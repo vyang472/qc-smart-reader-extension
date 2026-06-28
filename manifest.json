@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "QC Smart Reader Lite",
+  "description": "Read web pages with role-based AI agents and save useful notes into a local knowledge base.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "QC Smart Reader"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "downloads",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:37621/*",
+    "http://localhost:37621/*"
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

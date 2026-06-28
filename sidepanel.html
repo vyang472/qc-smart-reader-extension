@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QC Smart Reader</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-mark">Q</div>
+      <div>
+        <h1>QC Smart Reader</h1>
+        <p id="sourceLine">读取网页、帖子、论文片段</p>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="主导航">
+      <button class="tab active" data-tab="chat">聊天</button>
+      <button class="tab" data-tab="batch">批量</button>
+      <button class="tab" data-tab="agents">Agent</button>
+      <button class="tab" data-tab="knowledge">知识库</button>
+      <button class="tab" data-tab="deliverables">交付</button>
+      <button class="tab" data-tab="settings">设置</button>
+    </nav>
+
+    <main>
+      <section id="chat" class="panel active">
+        <div class="toolbar">
+          <button id="readPageBtn" class="primary">读取当前页</button>
+          <button id="useSelectionBtn">使用选中文本</button>
+          <button id="saveNoteBtn">保存笔记</button>
+        </div>
+        <div class="inline-fields">
+          <input id="manualSelectorInput" type="text" placeholder="正文 CSS 选择器，例如 article 或 #js_content">
+          <button id="readSelectorBtn">读取选择器</button>
+        </div>
+
+        <article class="source-card">
+          <div class="source-meta">
+            <strong id="sourceTitle">尚未读取内容</strong>
+            <span id="sourceStats">0 字</span>
+          </div>
+          <p id="sourceUrl"></p>
+          <div id="sourcePreview" class="source-preview"></div>
+          <div class="toolbar">
+            <button id="enqueueNextPagesBtn" disabled>分页加入候选池</button>
+          </div>
+        </article>
+
+        <label class="field-label" for="questionInput">问题</label>
+        <textarea id="questionInput" rows="3">这篇内容的核心要点、关键结论、可执行启发是什么？</textarea>
+
+        <div class="toolbar">
+          <button id="askBtn" class="primary">开始阅读</button>
+          <button id="clearBtn">清空结果</button>
+        </div>
+
+        <div id="status" class="status"></div>
+        <section id="answers" class="answers"></section>
+      </section>
+
+      <section id="batch" class="panel">
+        <h2>批量采集</h2>
+        <p class="hint">一行一个 URL。处理时会复用当前 Chrome 登录态，逐个打开后台标签页读取并写入本地 Vault。</p>
+
+        <label class="field-label" for="batchUrlsInput">URL 列表</label>
+        <textarea id="batchUrlsInput" rows="8" placeholder="https://bbs.quantclass.cn/thread/87030"></textarea>
+        <div class="inline-fields batch-controls">
+          <label class="compact-field" for="batchConcurrencyInput">
+            <span>并发上限</span>
+            <input id="batchConcurrencyInput" type="number" min="1" max="3" step="1" value="1">
+          </label>
+        </div>
+
+        <div class="toolbar">
+          <button id="enqueueBatchBtn" class="primary">加入队列</button>
+          <button id="addOpenTabsBtn">加入当前窗口标签</button>
+          <button id="restoreBatchBtn">恢复服务端任务</button>
+          <button id="processBatchBtn">开始处理</button>
+          <button id="pauseBatchBtn" disabled>暂停</button>
+          <button id="cancelBatchBtn" disabled>取消任务</button>
+          <button id="clearCompletedBatchBtn">清理已完成</button>
+          <button id="clearBatchBtn">清空队列</button>
+        </div>
+
+        <div id="batchStatus" class="status"></div>
+        <div id="batchProgress" class="batch-progress" aria-live="polite"></div>
+        <div id="batchList" class="batch-list"></div>
+
+        <h2>PDF / 论文导入</h2>
+        <p class="hint">输入本地 PDF 路径或 PDF URL。本地路径由 companion service 读取，解析结果会按页写入 Vault。</p>
+        <label class="field-label" for="pdfInput">PDF 路径或 URL</label>
+        <input id="pdfInput" type="text" placeholder="/Users/me/Downloads/paper.pdf">
+        <div class="toolbar">
+          <button id="ingestPdfBtn" class="primary">导入 PDF</button>
+        </div>
+
+        <h2>YouTube 字幕导入</h2>
+        <p class="hint">先粘贴你已获取的字幕文本或带时间戳字幕；当前版本不做音频转写。</p>
+        <label class="field-label" for="youtubeUrlInput">YouTube URL</label>
+        <input id="youtubeUrlInput" type="url" placeholder="https://www.youtube.com/watch?v=...">
+        <label class="field-label" for="youtubeTitleInput">标题</label>
+        <input id="youtubeTitleInput" type="text" placeholder="可选，留空使用视频 ID">
+        <label class="field-label" for="youtubeTranscriptInput">字幕文本</label>
+        <textarea id="youtubeTranscriptInput" rows="8" placeholder="[00:00] 第一段字幕&#10;[00:15] 第二段字幕"></textarea>
+        <div class="toolbar">
+          <button id="ingestYoutubeBtn" class="primary">导入字幕</button>
+        </div>
+      </section>
+
+      <section id="agents" class="panel">
+        <h2>邀请 Agent 一起阅读</h2>
+        <div id="agentList" class="agent-list"></div>
+        <div class="prompt-box">
+          <label class="field-label" for="customSystemPrompt">全局阅读要求</label>
+          <textarea id="customSystemPrompt" rows="6"></textarea>
+        </div>
+      </section>
+
+      <section id="knowledge" class="panel">
+        <div class="toolbar">
+          <button id="refreshKbBtn">刷新</button>
+          <button id="exportMarkdownBtn">导出 Markdown</button>
+          <button id="exportJsonBtn">导出 JSON</button>
+          <button id="clearKbBtn">清空知识库</button>
+        </div>
+
+        <h2>来源库</h2>
+        <p class="hint">查看已经入库的网页、帖子、选中文本和 PDF。详情会显示原始路径、摘要路径、chunks 和关联笔记。</p>
+
+        <label class="field-label" for="sourceSearchInput">搜索来源/片段/笔记</label>
+        <input id="sourceSearchInput" type="search" placeholder="例如：抱团股、回测、risk、factor">
+        <label class="field-label" for="sourceStatusFilter">来源状态</label>
+        <select id="sourceStatusFilter">
+          <option value="all">全部</option>
+          <option value="new">new</option>
+          <option value="read">read</option>
+          <option value="extracted">extracted</option>
+          <option value="reviewed">reviewed</option>
+          <option value="rejected">rejected</option>
+          <option value="archived">archived</option>
+        </select>
+        <div class="toolbar">
+          <button id="searchSourcesBtn">搜索</button>
+          <button id="clearSourceSearchBtn">清空搜索</button>
+        </div>
+
+        <div id="sourceSearchStatus" class="status"></div>
+        <div id="sourceSearchResults" class="source-search-results"></div>
+
+        <h2>待审队列</h2>
+        <p class="hint">集中处理 new / extracted 来源。接受后进入 reviewed，拒绝后进入 rejected。</p>
+        <div class="toolbar">
+          <button id="refreshReviewQueueBtn">刷新待审</button>
+        </div>
+        <div id="reviewQueueStatus" class="status"></div>
+        <div id="reviewQueueList" class="source-list"></div>
+
+        <div id="sourceLibraryStatus" class="status"></div>
+        <div id="sourceList" class="source-list"></div>
+        <div id="sourceDetail" class="source-detail"></div>
+
+        <h2>阅读笔记</h2>
+        <div id="kbList" class="kb-list"></div>
+
+        <h2>结构化知识</h2>
+        <p class="hint">把当前来源抽成草稿 claims、entities、evidence、risks 和 tasks，写入本地 Vault 的结构化知识层。</p>
+
+        <div class="toolbar">
+          <button id="extractKnowledgeBtn" class="primary">抽取结构化知识</button>
+          <button id="createLearningPackBtn">生成学习包</button>
+          <button id="refreshKnowledgeRecordsBtn">刷新记录</button>
+          <button id="refreshLearningItemsBtn">刷新学习项</button>
+        </div>
+
+        <label class="field-label" for="topicTitleInput">专题包标题</label>
+        <input id="topicTitleInput" type="text" placeholder="例如：抱团股核心证据包">
+        <label class="field-label" for="topicStatusSelect">专题包状态</label>
+        <select id="topicStatusSelect">
+          <option value="active">active</option>
+          <option value="draft">draft</option>
+          <option value="reviewed">reviewed</option>
+        </select>
+        <div class="toolbar">
+          <button id="createTopicPackageBtn">生成专题包</button>
+        </div>
+
+        <h2>Claim / Evidence 审阅</h2>
+        <p class="hint">集中验收 AI 抽取出的 claim 和 evidence。接受前先看原文 quote 与 chunk 上下文；拒绝时留下原因，避免弱证据进入专题包和交付物。</p>
+        <label class="field-label" for="claimReviewStatusFilter">审阅状态</label>
+        <select id="claimReviewStatusFilter">
+          <option value="extracted,pending_validation">待审</option>
+          <option value="extracted">extracted</option>
+          <option value="pending_validation">pending_validation</option>
+          <option value="reviewed">reviewed</option>
+          <option value="rejected">rejected</option>
+        </select>
+        <label class="field-label" for="claimReviewQuoteFilter">Quote 状态</label>
+        <select id="claimReviewQuoteFilter">
+          <option value="">全部 quote</option>
+          <option value="invalid">失效 quote</option>
+          <option value="needs_quote">无有效 quote</option>
+          <option value="valid">有有效 quote</option>
+        </select>
+        <label class="field-label" for="claimReviewStrengthFilter">证据强度</label>
+        <select id="claimReviewStrengthFilter">
+          <option value="">全部证据</option>
+          <option value="supporting">supporting</option>
+          <option value="contradicting">contradicting</option>
+          <option value="weak">weak</option>
+        </select>
+        <label class="field-label" for="claimReviewSourceFilter">Source ID</label>
+        <input id="claimReviewSourceFilter" type="text" placeholder="src_...">
+        <label class="field-label" for="claimReviewTopicFilter">Topic Package ID</label>
+        <input id="claimReviewTopicFilter" type="text" placeholder="topic_...">
+        <label class="field-label" for="claimReviewerInput">Reviewer</label>
+        <input id="claimReviewerInput" type="text" placeholder="extension-user">
+        <label class="field-label" for="claimReviewNoteInput">审阅备注</label>
+        <textarea id="claimReviewNoteInput" rows="2" placeholder="为什么接受、保留待验证，或需要补哪些材料"></textarea>
+        <label class="field-label" for="claimRejectionReasonInput">拒绝原因</label>
+        <input id="claimRejectionReasonInput" type="text" placeholder="例如：quote 不支持结论、证据过弱、重复 claim">
+        <label class="field-label" for="claimSplitTextInput">拆分文本</label>
+        <textarea id="claimSplitTextInput" rows="3" placeholder="每行一条拆分后的新 claim"></textarea>
+        <div class="toolbar">
+          <button id="refreshClaimReviewQueueBtn">刷新 Claim 审阅</button>
+          <button id="batchAcceptClaimsBtn">批量接受</button>
+          <button id="batchPendingClaimsBtn">批量待验证</button>
+          <button id="batchRejectClaimsBtn">批量拒绝</button>
+          <button id="mergeSelectedClaimsBtn">合并所选</button>
+          <button id="splitSelectedClaimBtn">拆分所选</button>
+        </div>
+        <div id="claimReviewStatus" class="status"></div>
+        <div id="claimReviewList" class="kb-list"></div>
+
+        <div id="knowledgeRecordStatus" class="status"></div>
+        <div id="knowledgeRecordList" class="kb-list"></div>
+        <h2>学习闭环</h2>
+        <div id="learningItemStatus" class="status"></div>
+        <div id="learningItemList" class="kb-list"></div>
+      </section>
+
+      <section id="deliverables" class="panel">
+        <h2>交付工作台</h2>
+        <p class="hint">基于当前来源和最近一次阅读结果生成 Markdown 交付物，写入本地 Vault 的 <code>wiki/deliverables/</code>。</p>
+
+        <label class="field-label" for="deliverableKindSelect">交付物类型</label>
+        <select id="deliverableKindSelect">
+          <option value="report">研究报告</option>
+          <option value="ppt_outline">PPT 大纲</option>
+          <option value="video_script">视频脚本</option>
+          <option value="strategy_task_brief">策略任务单</option>
+        </select>
+
+        <label class="field-label" for="deliverableTitleInput">标题</label>
+        <input id="deliverableTitleInput" type="text" placeholder="例如：抱团股专题研究报告">
+
+        <label class="field-label" for="deliverableStatusSelect">状态</label>
+        <select id="deliverableStatusSelect">
+          <option value="draft">draft</option>
+          <option value="final">final</option>
+        </select>
+
+        <h2>专题包输入</h2>
+        <div class="toolbar">
+          <button id="refreshTopicPackagesBtn">刷新专题包</button>
+        </div>
+        <div id="topicPackageStatus" class="status"></div>
+        <div id="topicPackageList" class="topic-package-list"></div>
+
+        <div class="toolbar">
+          <button id="createDeliverableBtn" class="primary">生成交付物</button>
+          <button id="refreshDeliverablesBtn">刷新列表</button>
+        </div>
+
+        <div id="deliverableStatus" class="status"></div>
+        <div id="deliverableList" class="kb-list"></div>
+
+        <h2>策略实现票据</h2>
+        <label class="field-label" for="strategyHandoffSelect">策略交接包</label>
+        <select id="strategyHandoffSelect"></select>
+        <label class="field-label" for="strategyTicketOwnerInput">负责人</label>
+        <input id="strategyTicketOwnerInput" type="text" placeholder="例如：vincent">
+        <div class="toolbar">
+          <button id="refreshStrategyTicketsBtn">刷新票据</button>
+          <button id="generateStrategyTicketsBtn" class="primary">生成/补齐票据</button>
+        </div>
+        <div id="strategyTicketStatus" class="status"></div>
+        <div id="strategyTicketList" class="strategy-ticket-list"></div>
+
+        <h2>回测反馈</h2>
+        <label class="field-label" for="backtestOutcomeSelect">回测结论</label>
+        <select id="backtestOutcomeSelect">
+          <option value="supported">supported</option>
+          <option value="weakened">weakened</option>
+          <option value="falsified">falsified</option>
+          <option value="needs-more-data">needs-more-data</option>
+        </select>
+        <label class="field-label" for="backtestStatusSelect">回测状态</label>
+        <select id="backtestStatusSelect">
+          <option value="reviewed">reviewed</option>
+          <option value="imported">imported</option>
+          <option value="rejected">rejected</option>
+        </select>
+        <label class="field-label" for="backtestPeriodInput">回测区间</label>
+        <input id="backtestPeriodInput" type="text" placeholder="2018-01-01 to 2025-12-31，含样本外区间">
+        <label class="field-label" for="backtestUniverseInput">股票池 / 标的范围</label>
+        <input id="backtestUniverseInput" type="text" placeholder="A-share daily tradable universe">
+        <label class="field-label" for="backtestBenchmarkInput">Benchmark</label>
+        <input id="backtestBenchmarkInput" type="text" placeholder="CSI 300">
+        <label class="field-label" for="backtestMetricsInput">指标 JSON</label>
+        <textarea id="backtestMetricsInput" rows="4" placeholder='{"annualized_return":"12.4%","max_drawdown":"-9%","out_of_sample_return":"5.1%"}'></textarea>
+        <label class="field-label" for="backtestCostsInput">成本 JSON</label>
+        <textarea id="backtestCostsInput" rows="3" placeholder='{"commission_bps":3,"slippage_bps":8}'></textarea>
+        <label class="field-label" for="backtestRiskInput">回撤 / 换手 / 容量</label>
+        <input id="backtestRiskInput" type="text" placeholder="max_drawdown=-9%; turnover=2.2x; capacity=passes target capital">
+        <label class="field-label" for="backtestArtifactInput">附件路径或 URL</label>
+        <input id="backtestArtifactInput" type="text" placeholder="/tmp/supported-backtest.md">
+        <label class="field-label" for="backtestFailureNotesInput">失败/复盘备注</label>
+        <textarea id="backtestFailureNotesInput" rows="3"></textarea>
+        <div class="toolbar">
+          <button id="importBacktestResultBtn" class="primary">导入回测结果</button>
+          <button id="refreshStrategyFeedbackBtn">刷新回测/审查</button>
+        </div>
+        <div id="strategyBacktestStatus" class="status"></div>
+        <div id="strategyBacktestList" class="strategy-feedback-list"></div>
+
+        <h2>策略风险审查</h2>
+        <label class="field-label" for="strategyReviewBacktestSelect">回测结果</label>
+        <select id="strategyReviewBacktestSelect"></select>
+        <label class="field-label" for="strategyReviewGateSelect">审查门禁</label>
+        <select id="strategyReviewGateSelect">
+          <option value="paper-ready">paper-ready</option>
+          <option value="live-ready">live-ready</option>
+        </select>
+        <label class="field-label" for="strategyReviewerInput">Reviewer</label>
+        <input id="strategyReviewerInput" type="text" placeholder="reviewer name">
+        <div id="strategyReviewChecklist" class="review-checklist"></div>
+        <label class="field-label" for="strategyReviewNoteInput">审查备注</label>
+        <textarea id="strategyReviewNoteInput" rows="3"></textarea>
+        <label class="field-label" for="strategyReviewArtifactInput">审查附件路径或 URL</label>
+        <input id="strategyReviewArtifactInput" type="text" placeholder="/tmp/paper-ready-review.md">
+        <div class="toolbar">
+          <button id="createStrategyReviewBtn" class="primary">提交审查</button>
+        </div>
+        <div id="strategyReviewStatus" class="status"></div>
+        <div id="strategyReviewList" class="strategy-feedback-list"></div>
+      </section>
+
+      <section id="settings" class="panel">
+        <h2>本地服务</h2>
+        <label class="field-label" for="serviceUrlInput">Companion URL</label>
+        <input id="serviceUrlInput" type="url" placeholder="http://127.0.0.1:37621">
+
+        <label class="field-label" for="pairingTokenInput">Pairing Token</label>
+        <input id="pairingTokenInput" type="password" placeholder="从本地服务 state/pairing_token.txt 复制">
+
+        <div class="toolbar">
+          <button id="testCompanionBtn">测试本地服务</button>
+          <button id="runVaultDoctorBtn">Vault Doctor</button>
+          <button id="rebuildLineageBtn">重建 Lineage</button>
+        </div>
+        <p id="vaultDoctorStatus" class="status"></p>
+        <div id="vaultDoctorResults" class="vault-doctor-results"></div>
+        <p id="lineageStatus" class="status"></p>
+        <div id="lineageResults" class="lineage-results"></div>
+
+        <h2>项目</h2>
+        <label class="field-label" for="projectSelect">当前项目</label>
+        <select id="projectSelect">
+          <option value="default">Inbox</option>
+        </select>
+
+        <label class="field-label" for="newProjectNameInput">新项目名称</label>
+        <input id="newProjectNameInput" type="text" placeholder="例如：抱团股研究">
+
+        <div class="toolbar">
+          <button id="refreshProjectsBtn">刷新项目</button>
+          <button id="createProjectBtn">创建项目</button>
+        </div>
+        <p id="projectStatus" class="status"></p>
+        <label class="field-label" for="projectStageReviewerInput">阶段确认人</label>
+        <input id="projectStageReviewerInput" type="text" placeholder="例如：vincent">
+        <label class="field-label" for="projectStageNoteInput">阶段确认备注</label>
+        <input id="projectStageNoteInput" type="text" placeholder="可选，记录退出标准或风险接受说明">
+        <div id="projectDashboard" class="project-dashboard"></div>
+
+        <h2>项目 Brief</h2>
+        <label class="field-label" for="projectResearchQuestionInput">研究问题</label>
+        <textarea id="projectResearchQuestionInput" rows="2" placeholder="这个项目要回答什么问题"></textarea>
+        <label class="field-label" for="projectTargetOutputInput">目标产物</label>
+        <textarea id="projectTargetOutputInput" rows="2" placeholder="例如：研究报告、PPT、视频脚本、可回测策略任务单"></textarea>
+        <label class="field-label" for="projectInclusionRulesInput">纳入规则</label>
+        <textarea id="projectInclusionRulesInput" rows="3" placeholder="每行一条：什么资料值得进入项目"></textarea>
+        <label class="field-label" for="projectExclusionRulesInput">排除规则</label>
+        <textarea id="projectExclusionRulesInput" rows="3" placeholder="每行一条：什么资料应当过滤掉"></textarea>
+        <label class="field-label" for="projectEvidenceThresholdInput">证据阈值</label>
+        <input id="projectEvidenceThresholdInput" type="text" placeholder="例如：关键结论至少 2 个来源或 1 个高质量原文引用">
+        <label class="field-label" for="projectReviewPolicyInput">审阅策略</label>
+        <textarea id="projectReviewPolicyInput" rows="2" placeholder="例如：先审 source，再审 claim，冲突观点不得直接进入 final"></textarea>
+        <label class="field-label" for="projectStrategyScopeInput">策略适用范围</label>
+        <textarea id="projectStrategyScopeInput" rows="2" placeholder="可选：市场、周期、标的池、约束"></textarea>
+        <div class="toolbar">
+          <button id="refreshProjectBriefBtn">读取 Brief</button>
+          <button id="saveProjectBriefBtn">保存 Brief</button>
+        </div>
+        <p id="projectBriefStatus" class="status"></p>
+
+        <h2>Capture Plan</h2>
+        <label class="field-label" for="capturePlanUrlsInput">候选来源 URL</label>
+        <textarea id="capturePlanUrlsInput" rows="4" placeholder="每行一个 URL，先进入候选池，不会直接抓取"></textarea>
+        <label class="field-label" for="capturePlanSourceTypeInput">来源类型</label>
+        <input id="capturePlanSourceTypeInput" type="text" placeholder="thread / article / pdf / url">
+        <label class="field-label" for="capturePlanPriorityInput">优先级</label>
+        <select id="capturePlanPriorityInput">
+          <option value="1">P1 最高</option>
+          <option value="2">P2</option>
+          <option value="3" selected>P3</option>
+          <option value="4">P4</option>
+          <option value="5">P5 最低</option>
+        </select>
+        <label class="field-label" for="capturePlanReasonInput">采集理由</label>
+        <textarea id="capturePlanReasonInput" rows="2" placeholder="为什么这些来源值得进入项目"></textarea>
+        <div class="toolbar">
+          <button id="discoverCurrentPageLinksBtn">从当前页发现链接</button>
+          <button id="createCapturePlansBtn">加入候选池</button>
+          <button id="refreshCapturePlansBtn">刷新计划</button>
+          <button id="enqueueApprovedPlansBtn">入队 Approved</button>
+        </div>
+        <p id="capturePlanStatus" class="status"></p>
+        <div id="capturePlanList" class="capture-plan-list"></div>
+
+        <h2>模型设置</h2>
+        <label class="field-label" for="providerSelect">服务商</label>
+        <select id="providerSelect">
+          <option value="openai">OpenAI-compatible</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+
+        <label class="field-label" for="baseUrlInput">Base URL</label>
+        <input id="baseUrlInput" type="url" placeholder="https://api.openai.com/v1">
+
+        <label class="field-label" for="apiKeyInput">API Key</label>
+        <input id="apiKeyInput" type="password" placeholder="留空表示沿用本地服务已保存 key">
+
+        <label class="field-label" for="modelInput">模型名</label>
+        <input id="modelInput" type="text" placeholder="gpt-5 或 claude-sonnet-4-6">
+
+        <label class="field-label" for="temperatureInput">Temperature</label>
+        <input id="temperatureInput" type="number" min="0" max="2" step="0.1">
+
+        <div class="toolbar">
+          <button id="saveSettingsBtn" class="primary">保存设置</button>
+          <button id="testSettingsBtn">测试模型</button>
+          <button id="clearApiKeyBtn">清除服务端 Key</button>
+        </div>
+        <p class="hint">模型 API Key 保存到 companion service 的本地配置文件，不再写入 Chrome storage。OpenAI-compatible 可填 OpenAI、OpenRouter、DeepSeek、智谱兼容网关等支持 /chat/completions 的地址。</p>
+      </section>
+    </main>
+
+    <template id="agentTemplate">
+      <label class="agent-card">
+        <input type="checkbox">
+        <span class="agent-icon"></span>
+        <span>
+          <strong></strong>
+          <small></small>
+        </span>
+      </label>
+    </template>
+
+    <script src="sidepanel.js" type="module"></script>
+  </body>
+</html>

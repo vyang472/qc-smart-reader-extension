@@ -1,0 +1,22 @@
+{
+  "name": "qc-smart-reader-extension",
+  "version": "0.1.0",
+  "description": "Codex plugin for operating and auditing the local QC Smart Reader companion service, Chrome extension, and research workflow.",
+  "author": {
+    "name": "Vincent Yang"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "QC Smart Reader",
+    "shortDescription": "Operate the local forum/PDF research reader and audit its Vault outputs.",
+    "longDescription": "QC Smart Reader helps Codex run, inspect, and audit a local Chrome extension plus companion service workflow for collecting forum posts, articles, PDFs, and source-backed research deliverables.",
+    "developerName": "Vincent Yang",
+    "category": "Productivity",
+    "capabilities": [
+      "Chrome extension research capture workflow",
+      "Local companion service and SQLite/Vault audit",
+      "Citation-backed report, deck, script, and strategy handoff review"
+    ],
+    "defaultPrompt": "Use QC Smart Reader to inspect the local project, verify source citations, and produce or audit a research deliverable."
+  }
+}

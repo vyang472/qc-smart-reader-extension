@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <title>如何搭建量化研究知识库 - 知乎</title>
+  </head>
+  <body>
+    <main>
+      <article class="Post-RichTextContainer">
+        <h1>如何搭建量化研究知识库</h1>
+        <a rel="author">知乎研究员</a>
+        <time datetime="2026-06-20">2026-06-20</time>
+        <p>稳定的研究知识库需要先保存来源、证据和推演链，再讨论策略实现。</p>
+        <p>每条结论都应该能回链到 source_id、chunk_id 和原文摘录。</p>
+        <pre><code class="language-python">def evidence_score(claim):
+    return claim.sources * claim.review_weight</code></pre>
+        <p>一个简化公式是 score = evidence * review_weight。</p>
+        <img src="/images/knowledge-graph.png" alt="知识图谱">
+        <a href="/files/research-template.docx">下载研究模板</a>
+      </article>
+    </main>
+  </body>
+</html>

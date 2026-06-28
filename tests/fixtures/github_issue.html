@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Fix stale source quality blockers · org/repo Issue #34</title>
+  </head>
+  <body>
+    <main class="application-main">
+      <div class="discussion-timeline js-discussion">
+        <h1><bdi class="js-issue-title markdown-title">Fix stale source quality blockers</bdi></h1>
+        <div class="js-comment">
+          <a class="author Link--primary">maintainer</a>
+          <relative-time datetime="2026-06-27T08:30:00Z">Jun 27, 2026</relative-time>
+          <td class="comment-body markdown-body">
+            <p>The screen stage keeps treating archived truncated sources as active blockers.</p>
+            <p>Expected behavior: only unreviewed or accepted sources should block the stage.</p>
+            <pre><code class="language-js">const active = sources.filter((source) =&gt; !["rejected", "archived"].includes(source.status));</code></pre>
+            <p><img src="/org/repo/assets/blocker-state.png" alt="quality blocker state"></p>
+            <p><a href="https://github.com/org/repo/files/quality-gate-repro.zip">quality-gate-repro.zip</a></p>
+          </td>
+        </div>
+        <div class="js-comment">
+          <a class="author Link--primary">reviewer</a>
+          <relative-time datetime="2026-06-27T09:10:00Z">Jun 27, 2026</relative-time>
+          <td class="comment-body markdown-body">
+            <p>Please also add a regression test for stale dependency gates before closing this issue.</p>
+          </td>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

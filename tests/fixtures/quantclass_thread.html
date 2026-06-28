@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+  <head>
+    <title>长上影线是卖出还是买入信号？ - QuantClass</title>
+  </head>
+  <body>
+    <main class="thread">
+      <h1 class="thread-title">长上影线是卖出还是买入信号？</h1>
+
+      <article id="post_1" class="post floor" data-floor="1">
+        <header>
+          <span class="author username">上官山下</span>
+          <time datetime="2026-06-25T19:41:00+08:00">2026-06-25 19:41</time>
+        </header>
+        <p>
+          看了 cadmean 老板的官方框架下复现放量长上影线动量策略，还有冬咚老板的炸板之上形态事件策略，
+          因为高位长上影线是我以前主观交易判断卖点的一个重要信号，所以做了简单验证。
+        </p>
+        <p>
+          首先魔改了一个只有卖出信号的凌烟阁因子，参数配置是收盘价处于 20 天内价格 70 分位以上，
+          且 5 天内出现长上影线次数大于两次。
+        </p>
+        <pre class="language-python"><code>
+import numpy as np
+import pandas as pd
+
+def signal(df):
+    return (df.close_rank_20d &gt; 0.7) &amp; (df.upper_shadow_count_5d &gt; 2)
+        </code></pre>
+        <figure>
+          <img src="https://cdn.quantclass.cn/images/upper-shadow-chart.png" alt="回测净值曲线">
+          <figcaption>回测净值曲线</figcaption>
+        </figure>
+        <p><a class="attachment" href="https://cdn.quantclass.cn/files/upper-shadow.zip">附件：upper-shadow.zip</a></p>
+      </article>
+
+      <article id="post_2" class="reply comment floor" data-floor="2">
+        <header>
+          <span class="author username">cadmean</span>
+          <time>2026-06-25 20:01</time>
+        </header>
+        <blockquote>引用 1 楼：高位长上影线是主观交易卖点。</blockquote>
+        <p>
+          这个验证要注意样本外和换手过滤。单看长上影线容易把高波动突破误杀，
+          最好叠加成交额、趋势位置、涨跌停过滤，并且把买入和卖出信号分开评估。
+        </p>
+      </article>
+
+      <article id="post_3" class="reply comment floor" data-floor="3">
+        <header>
+          <span class="author username">冬咚</span>
+          <time>2026-06-25 20:15</time>
+        </header>
+        <p>
+          我更关心它作为形态事件后的后续收益分布，不一定直接作为卖出信号。
+          建议按市场阶段拆分：牛市、震荡、熊市，以及按股票池分层。
+        </p>
+      </article>
+
+      <nav class="pagination">
+        <a href="https://bbs.quantclass.cn/thread/87030?page=2">下一页</a>
+      </nav>
+    </main>
+  </body>
+</html>

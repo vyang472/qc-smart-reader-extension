@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <head>
+    <title>多页因子研究：第二页 - QuantClass</title>
+  </head>
+  <body>
+    <main class="thread">
+      <h1 class="thread-title">多页因子研究：分页保真测试 - 第 2 页</h1>
+
+      <article id="post_4" class="reply comment floor" data-floor="4">
+        <header>
+          <span class="author username">研究员甲</span>
+          <time>2026-06-26 09:40</time>
+        </header>
+        <blockquote>引用 1 楼：第一页有策略定义。</blockquote>
+        <p>第 4 楼：补充样本外后，原始 turnover_rank_20d 参数在 2025 年以后失效。</p>
+      </article>
+
+      <article id="post_5" class="reply comment floor" data-floor="5">
+        <header>
+          <span class="author username">审稿人乙</span>
+          <time>2026-06-26 09:55</time>
+        </header>
+        <p>第 5 楼：需要增加成交额过滤、涨跌停过滤，并单独记录失败市场阶段。</p>
+        <pre class="language-python"><code>
+def revised_filter(df):
+    return df.amount_rank_60d > 0.6
+        </code></pre>
+      </article>
+
+      <article id="post_6" class="reply comment floor" data-floor="6">
+        <header>
+          <span class="author username">工程师丙</span>
+          <time>2026-06-26 10:05</time>
+        </header>
+        <p>第 6 楼：第二页附件是修正后的参数表，必须和第一页一起进入知识库。</p>
+        <figure>
+          <img src="/uploads/multipage-page2.png" alt="第二页参数分层图">
+          <figcaption>第二页参数分层图</figcaption>
+        </figure>
+        <p><a class="attachment" href="/files/multipage-page2.xlsx">附件：multipage-page2.xlsx</a></p>
+      </article>
+    </main>
+  </body>
+</html>

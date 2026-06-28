@@ -1,0 +1,4 @@
+interface:
+  display_name: "QC Smart Reader"
+  short_description: "Run and audit QC Smart Reader research projects."
+  default_prompt: "Use QC Smart Reader to inspect the local project, verify citations, and produce a cited research deliverable."
