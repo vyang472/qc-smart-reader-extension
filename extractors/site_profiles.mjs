@@ -2,7 +2,16 @@ import { parseQuantclassBbsHtml } from "./quantclass_bbs.mjs";
 
 const DEFAULT_URL = "https://example.com/article";
 const LIMITS = {
-  markdownLinks: 20
+  markdownLinks: 20,
+  bodyTextBytes: 512 * 1024,
+  blockTextBytes: 64 * 1024,
+  blocksTotalBytes: 384 * 1024,
+  codeBlockBytes: 64 * 1024,
+  codeTotalBytes: 256 * 1024,
+  mediaTotalBytes: 128 * 1024,
+  listTotalBytes: 128 * 1024,
+  textBytes: 768 * 1024,
+  markdownBytes: 768 * 1024
 };
 
 export const SITE_PROFILES = [
@@ -15,7 +24,8 @@ export const SITE_PROFILES = [
   { id: "wechat-article", site: "wechat", kind: "page", extract: (html, options) => parseArticle(html, options, {
     id: "wechat-article",
     site: "wechat",
-    selectors: ["#js_content", ".rich_media_content", "article"]
+    selectors: ["#js_content", ".rich_media_content", "article"],
+    documentMetadata: true
   }) },
   { id: "substack", site: "substack", kind: "page", extract: (html, options) => parseArticle(html, options, {
     id: "substack",
@@ -84,9 +94,10 @@ function parseQuantclass(html, options) {
 function parseArticle(html, options = {}, config) {
   const url = options.url || DEFAULT_URL;
   const rootHtml = firstFragment(html, config.selectors) || bodyFragment(html) || html;
-  const title = firstText(html, ["h1", "[data-testid='headline']", ".title", ".post-title", "title"]) || "Untitled";
-  const author = firstText(html, ["[rel='author']", ".author", ".byline", ".rich_media_meta_text", ".rich_media_meta_nickname", "[class*='author']", "[class*='byline']"]);
-  const publishedAt = firstText(html, ["time", ".date", ".publish-time", "[class*='date']", "[class*='time']"]);
+  const metadataHtml = config.documentMetadata ? html : rootHtml;
+  const title = firstText(metadataHtml, ["h1", "[data-testid='headline']", ".title", ".post-title"]) || firstText(html, ["title"]) || "Untitled";
+  const author = firstText(metadataHtml, ["[rel='author']", ".author", ".byline", ".rich_media_meta_text", ".rich_media_meta_nickname", "[class*='author']", "[class*='byline']"]);
+  const publishedAt = firstText(metadataHtml, ["time", ".date", ".publish-time", "[class*='date']", "[class*='time']"]);
   const text = normalizeText(stripTags(rootHtml));
   const codeBlocks = extractCodeBlocks(rootHtml);
   const images = extractImages(rootHtml, url);
@@ -103,6 +114,7 @@ function parseArticle(html, options = {}, config) {
     author,
     publishedAt,
     text,
+    _contentText: text,
     markdown,
     blocks: [],
     codeBlocks,
@@ -139,6 +151,7 @@ function parseHackerNews(html, options = {}) {
     author: firstText(subtext, [".hnuser"]),
     publishedAt: firstText(subtext, [".age"]),
     text,
+    _contentText: normalizeText(comments.map((block) => block.text).join("\n\n")),
     markdown: blocksToMarkdown(title, url, comments),
     blocks: comments,
     codeBlocks: comments.flatMap((block) => block.codeBlocks || []).map((code) => ({ code, language: "" })),
@@ -177,6 +190,7 @@ function parseReddit(html, options = {}) {
     author,
     publishedAt,
     text,
+    _contentText: normalizeText([stripTags(postBody), ...comments.map((block) => block.text)].join("\n\n")),
     markdown: blocksToMarkdown(title, url, [{ type: "main_post", floor: 1, author, time: publishedAt, text: normalizeText(stripTags(postBody)) }, ...comments]),
     blocks: [{ type: "main_post", floor: 1, author, time: publishedAt, text: normalizeText(stripTags(postBody)) }, ...comments],
     codeBlocks: extractCodeBlocks(postBody).concat(comments.flatMap((block) => (block.codeBlocks || []).map((code) => ({ code, language: "" })))),
@@ -205,6 +219,7 @@ function parseArxiv(html, options = {}) {
     author,
     publishedAt,
     text,
+    _contentText: abstract,
     markdown: articleMarkdown({ title, url, author, publishedAt, text: abstract, codeBlocks: [], images: [], attachments: pdfLinks, links }),
     blocks: [{ type: "abstract", text: abstract }].filter((block) => block.text),
     codeBlocks: [],
@@ -258,6 +273,7 @@ function parseGithubThread(html, options = {}, config) {
     author: blocks[0]?.author || "",
     publishedAt: blocks[0]?.time || "",
     text,
+    _contentText: text,
     markdown: blocksToMarkdown(title, url, blocks),
     blocks,
     codeBlocks: blocks.flatMap((block) => (block.codeBlocks || []).map((code) => ({ code, language: "" }))),
@@ -269,13 +285,29 @@ function parseGithubThread(html, options = {}, config) {
 }
 
 function withStats(result) {
-  const codeBlocks = result.codeBlocks || [];
-  const blocks = result.blocks || [];
-  const images = result.images || [];
-  const attachments = result.attachments || [];
-  const links = result.links || [];
-  const nextPages = result.nextPages || [];
-  const truncation = {
+  const { _contentText, ...publicResult } = result;
+  const truncation = {};
+  const blocks = limitBlocksByBytes(result.blocks || [], truncation);
+  const codeBlocks = limitCodeBlocksByBytes(result.codeBlocks || [], truncation);
+  const [images, attachments] = limitCollectionsByBytes(
+    [result.images || [], result.attachments || []],
+    LIMITS.mediaTotalBytes,
+    truncation,
+    "mediaBytes"
+  );
+  const [links, nextPages] = limitCollectionsByBytes(
+    [result.links || [], result.nextPages || []],
+    LIMITS.listTotalBytes,
+    truncation,
+    "listBytes"
+  );
+  const contentLimit = truncateUtf8(normalizeText(_contentText ?? result.text ?? ""), LIMITS.bodyTextBytes);
+  recordByteLimit(truncation, "bodyTextBytes", contentLimit, LIMITS.bodyTextBytes);
+  const contentText = contentLimit.value;
+  const authRequired = detectAuthRequired(result.title, contentText);
+  const emptyContent = !contentText;
+  const usableContent = !authRequired && !emptyContent;
+  Object.assign(truncation, {
     blocks: limitRecord(blocks.length, blocks.length, blocks.length),
     comments: limitRecord(
       blocks.filter((block) => block.type === "comment").length,
@@ -287,13 +319,29 @@ function withStats(result) {
     attachments: limitRecord(attachments.length, attachments.length, attachments.length),
     links: limitRecord(links.length, links.length, links.length),
     nextPages: limitRecord(nextPages.length, nextPages.length, nextPages.length)
-  };
+  });
+  const markdownLimit = truncateUtf8(usableContent ? result.markdown : "", LIMITS.markdownBytes);
+  recordByteLimit(truncation, "markdownBytes", markdownLimit, LIMITS.markdownBytes);
+  const textLimit = truncateUtf8(usableContent ? result.text : "", LIMITS.textBytes);
+  recordByteLimit(truncation, "textBytes", textLimit, LIMITS.textBytes);
+  const truncated = hasTruncation(truncation);
   return {
-    ...result,
+    ...publicResult,
+    text: textLimit.value,
+    markdown: markdownLimit.value,
+    blocks,
+    codeBlocks,
+    images,
+    attachments,
+    links,
+    nextPages,
     stats: {
       profile: result.profile,
       site: result.site,
-      textChars: normalizeText(result.text || "").replace(/\s+/g, "").length,
+      textChars: usableContent ? contentText.replace(/\s+/g, "").length : 0,
+      bodyTextChars: contentText.replace(/\s+/g, "").length,
+      emptyContent,
+      authRequired,
       blocks: blocks.length,
       comments: blocks.filter((block) => block.type === "comment").length,
       floors: blocks.filter((block) => block.floor).length,
@@ -301,9 +349,15 @@ function withStats(result) {
       images: images.length,
       attachments: attachments.length,
       nextPages: nextPages.length,
-      truncated: hasTruncation(truncation),
+      truncated,
       truncation,
-      quality: scoreQuality(result)
+      quality: usableContent ? scoreQuality({ ...result, text: contentText }) : 0
+    },
+    qualityFlags: { emptyContent, authRequired, truncated },
+    quality_flags: {
+      empty_content: emptyContent,
+      auth_required: authRequired,
+      truncated
     }
   };
 }
@@ -314,6 +368,137 @@ function limitRecord(total, kept, limit) {
     kept,
     limit,
     truncated: total > kept
+  };
+}
+
+function limitBlocksByBytes(items, truncation) {
+  const output = [];
+  let originalBytes = 0;
+  let outputBytes = 0;
+  let largestOriginalTextBytes = 0;
+  let largestOutputTextBytes = 0;
+  for (const item of items || []) {
+    const raw = item && typeof item === "object" ? item : {};
+    originalBytes += utf8Length(JSON.stringify(raw));
+    const textLimit = truncateUtf8(raw.text || "", LIMITS.blockTextBytes);
+    largestOriginalTextBytes = Math.max(largestOriginalTextBytes, textLimit.originalBytes);
+    largestOutputTextBytes = Math.max(largestOutputTextBytes, textLimit.outputBytes);
+    const block = {
+      ...raw,
+      text: textLimit.value,
+      codeBlocks: (raw.codeBlocks || []).map((code) => truncateUtf8(normalizeCode(code), LIMITS.codeBlockBytes).value)
+    };
+    const bytes = utf8Length(JSON.stringify(block));
+    if (outputBytes + bytes > LIMITS.blocksTotalBytes) break;
+    output.push(block);
+    outputBytes += bytes;
+  }
+  truncation.blockTextBytes = {
+    originalBytes: largestOriginalTextBytes,
+    outputBytes: largestOutputTextBytes,
+    limitBytes: LIMITS.blockTextBytes,
+    truncated: largestOriginalTextBytes > largestOutputTextBytes
+  };
+  truncation.blocksBytes = {
+    originalBytes,
+    outputBytes,
+    limitBytes: LIMITS.blocksTotalBytes,
+    truncated: originalBytes > outputBytes
+  };
+  return output;
+}
+
+function limitCodeBlocksByBytes(items, truncation) {
+  const output = [];
+  let originalBytes = 0;
+  let outputBytes = 0;
+  let largestOriginalBytes = 0;
+  let largestOutputBytes = 0;
+  for (const item of items || []) {
+    const rawCode = normalizeCode(item?.code || "");
+    const bytes = utf8Length(rawCode);
+    originalBytes += bytes;
+    largestOriginalBytes = Math.max(largestOriginalBytes, bytes);
+    const remaining = LIMITS.codeTotalBytes - outputBytes;
+    if (remaining <= 0) continue;
+    const bounded = truncateUtf8(rawCode, Math.min(LIMITS.codeBlockBytes, remaining));
+    largestOutputBytes = Math.max(largestOutputBytes, bounded.outputBytes);
+    if (!bounded.value) continue;
+    output.push({ ...item, code: bounded.value });
+    outputBytes += bounded.outputBytes;
+  }
+  truncation.codeBlockBytes = {
+    originalBytes: largestOriginalBytes,
+    outputBytes: largestOutputBytes,
+    limitBytes: LIMITS.codeBlockBytes,
+    truncated: largestOriginalBytes > largestOutputBytes
+  };
+  truncation.codeBytes = {
+    originalBytes,
+    outputBytes,
+    limitBytes: LIMITS.codeTotalBytes,
+    truncated: originalBytes > outputBytes
+  };
+  return output;
+}
+
+function limitCollectionsByBytes(collections, limitBytes, truncation, key) {
+  const output = collections.map(() => []);
+  let originalBytes = 0;
+  let outputBytes = 0;
+  collections.forEach((items, collectionIndex) => {
+    for (const item of items || []) {
+      originalBytes += utf8Length(JSON.stringify(item));
+      const remaining = limitBytes - outputBytes;
+      if (remaining <= 0) continue;
+      const bounded = boundCollectionItem(item, remaining);
+      if (bounded === null) continue;
+      const bytes = utf8Length(JSON.stringify(bounded));
+      if (bytes > remaining) continue;
+      output[collectionIndex].push(bounded);
+      outputBytes += bytes;
+    }
+  });
+  truncation[key] = { originalBytes, outputBytes, limitBytes, truncated: originalBytes > outputBytes };
+  return output;
+}
+
+function boundCollectionItem(item, remainingBytes) {
+  if (typeof item === "string") return truncateUtf8(item, Math.max(0, remainingBytes - 2)).value || null;
+  if (!item || typeof item !== "object") return null;
+  return Object.fromEntries(Object.entries(item).map(([key, value]) => [
+    key,
+    typeof value === "string" ? truncateUtf8(value, Math.min(16 * 1024, Math.max(0, remainingBytes - 32))).value : value
+  ]));
+}
+
+function truncateUtf8(value, limitBytes) {
+  const text = String(value || "");
+  const encoded = new TextEncoder().encode(text);
+  if (encoded.length <= limitBytes) return { value: text, originalBytes: encoded.length, outputBytes: encoded.length, truncated: false };
+  let end = Math.max(0, limitBytes);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let decoded = "";
+  while (end > 0) {
+    try {
+      decoded = decoder.decode(encoded.slice(0, end));
+      break;
+    } catch {
+      end -= 1;
+    }
+  }
+  const boundaryFloor = Math.floor(decoded.length * 0.8);
+  const boundary = Math.max(decoded.lastIndexOf("\n"), decoded.lastIndexOf(" "));
+  if (boundary >= boundaryFloor) decoded = decoded.slice(0, boundary);
+  return { value: decoded, originalBytes: encoded.length, outputBytes: utf8Length(decoded), truncated: true };
+}
+
+function recordByteLimit(truncation, key, result, limitBytes) {
+  truncation[key] = {
+    originalBytes: result.originalBytes,
+    outputBytes: result.outputBytes,
+    limitBytes,
+    truncated: result.truncated
   };
 }
 
@@ -336,6 +521,25 @@ function scoreQuality(result) {
   if (result.publishedAt) score += 5;
   if ((result.nextPages || []).length) score += 5;
   return Math.min(100, score || 10);
+}
+
+function detectAuthRequired(title, bodyText) {
+  const combined = normalizeText([title, bodyText].filter(Boolean).join("\n"));
+  if (!combined || utf8Length(combined) > 32 * 1024) return false;
+  const markers = [
+    /^(?:please\s+)?(?:sign|log)\s+in(?:\s+to\s+(?:continue|view|read|access).*)?[.!！。]?$/i,
+    /^(?:checking your browser|just a moment|verify you are human|security check|authentication required|access denied)[.!！。…]*$/i,
+    /^(?:请先登录|请登录后(?:继续|查看|访问)|登录后(?:继续|查看|访问).*)[!！。]?$/
+  ];
+  return combined
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line && line.length <= 240)
+    .some((line) => markers.some((pattern) => pattern.test(line)));
+}
+
+function utf8Length(value) {
+  return new TextEncoder().encode(String(value || "")).length;
 }
 
 function articleMarkdown({ title, url, author, publishedAt, text, codeBlocks, images, attachments, links }) {
@@ -517,7 +721,7 @@ function extractCodeBlocks(html) {
   const pattern = /<(pre|code)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
   let match;
   while ((match = pattern.exec(String(html || "")))) {
-    const code = normalizeText(decodeHtml(stripTags(match[3] || "")));
+    const code = normalizeCode(decodeHtml(stripTags(match[3] || "")));
     if (code.length < 8) continue;
     items.push({
       language: detectLanguage(match[2] || "") || detectLanguage(match[3] || ""),
@@ -626,8 +830,15 @@ function normalizeText(value) {
   return String(value || "")
     .replace(/\u00a0/g, " ")
     .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function normalizeCode(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
     .trim();
 }
 

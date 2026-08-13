@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">QC Smart Reader icon</title>
+  <desc id="desc">A white Q on a blue-to-green rounded square.</desc>
+  <defs>
+    <linearGradient id="background" x1="64" y1="45" x2="448" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1267E3"/>
+      <stop offset="1" stop-color="#087A58"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#041A2D" flood-opacity=".34"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#071426"/>
+  <rect x="52" y="52" width="408" height="408" rx="98" fill="url(#background)" filter="url(#shadow)"/>
+  <circle cx="246" cy="239" r="108" fill="none" stroke="#FFFFFF" stroke-width="48"/>
+  <path d="m311 305 76 76" fill="none" stroke="#FFFFFF" stroke-width="48" stroke-linecap="round"/>
+</svg>

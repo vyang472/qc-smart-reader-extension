@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1270" height="760" viewBox="0 0 1270 760" role="img" aria-labelledby="title desc">
+  <title id="title">QC Smart Reader evidence pipeline product diagram</title>
+  <desc id="desc">A product diagram showing capture, chunk, claim, and review stages, with an exact quote retained throughout.</desc>
+  <defs>
+    <linearGradient id="background" x1="30" y1="30" x2="1228" y2="731" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F7FAFD"/>
+      <stop offset="1" stop-color="#ECF6F2"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="58" y1="40" x2="120" y2="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1267E3"/>
+      <stop offset="1" stop-color="#087A58"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#17334F" flood-opacity=".12"/>
+    </filter>
+  </defs>
+  <rect width="1270" height="760" rx="28" fill="url(#background)"/>
+  <g>
+    <rect x="54" y="42" width="70" height="70" rx="17" fill="url(#brand)"/>
+    <circle cx="87" cy="75" r="19" fill="none" stroke="#fff" stroke-width="9"/>
+    <path d="m99 87 12 12" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+    <text x="145" y="71" fill="#172738" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="20" font-weight="750" letter-spacing="2">QC SMART READER</text>
+    <text x="145" y="99" fill="#64778A" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16">Product diagram · not a UI screenshot</text>
+  </g>
+  <text x="54" y="189" fill="#142538" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="48" font-weight="780" letter-spacing="-1.3">Every claim keeps its receipts.</text>
+  <text x="56" y="230" fill="#5D7186" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="21">From source capture to human review, the exact quote stays attached.</text>
+
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" filter="url(#shadow)">
+    <g transform="translate(54 292)">
+      <rect width="250" height="324" rx="22" fill="#FFFFFF" stroke="#D6E2EC"/>
+      <rect x="22" y="22" width="72" height="28" rx="14" fill="#E8F1FF"/>
+      <text x="42" y="42" fill="#1267E3" font-size="13" font-weight="800">01</text>
+      <text x="22" y="91" fill="#172738" font-size="27" font-weight="780">Capture</text>
+      <text x="22" y="122" fill="#687A8E" font-size="15">Web · PDF · YouTube</text>
+      <rect x="22" y="154" width="206" height="124" rx="13" fill="#F4F7FA"/>
+      <rect x="38" y="173" width="148" height="10" rx="5" fill="#4D6277"/>
+      <rect x="38" y="195" width="172" height="8" rx="4" fill="#A0B0BF"/>
+      <rect x="38" y="212" width="160" height="8" rx="4" fill="#B4C0CB"/>
+      <rect x="38" y="229" width="177" height="8" rx="4" fill="#B4C0CB"/>
+      <rect x="38" y="246" width="121" height="8" rx="4" fill="#B4C0CB"/>
+      <circle cx="38" cy="298" r="5" fill="#22A878"/>
+      <text x="51" y="303" fill="#476176" font-size="14">Raw source preserved</text>
+    </g>
+
+    <g transform="translate(358 292)">
+      <rect width="250" height="324" rx="22" fill="#FFFFFF" stroke="#D6E2EC"/>
+      <rect x="22" y="22" width="72" height="28" rx="14" fill="#EDF3F8"/>
+      <text x="42" y="42" fill="#4E6880" font-size="13" font-weight="800">02</text>
+      <text x="22" y="91" fill="#172738" font-size="27" font-weight="780">Chunk</text>
+      <text x="22" y="122" fill="#687A8E" font-size="15">Stable, inspectable context</text>
+      <rect x="22" y="154" width="206" height="56" rx="12" fill="#F4F7FA" stroke="#DDE5EC"/>
+      <text x="37" y="178" fill="#65788B" font-size="12" font-weight="700">CHUNK #04</text>
+      <rect x="37" y="190" width="154" height="7" rx="3.5" fill="#9DADBC"/>
+      <rect x="22" y="222" width="206" height="56" rx="12" fill="#EAF7F2" stroke="#CBEADD"/>
+      <text x="37" y="246" fill="#087A58" font-size="12" font-weight="800">EXACT QUOTE</text>
+      <rect x="37" y="258" width="172" height="7" rx="3.5" fill="#6FAE99"/>
+      <circle cx="38" cy="298" r="5" fill="#22A878"/>
+      <text x="51" y="303" fill="#476176" font-size="14">Offsets stay addressable</text>
+    </g>
+
+    <g transform="translate(662 292)">
+      <rect width="250" height="324" rx="22" fill="#FFFFFF" stroke="#D6E2EC"/>
+      <rect x="22" y="22" width="72" height="28" rx="14" fill="#E8F1FF"/>
+      <text x="42" y="42" fill="#1267E3" font-size="13" font-weight="800">03</text>
+      <text x="22" y="91" fill="#172738" font-size="27" font-weight="780">Claim</text>
+      <text x="22" y="122" fill="#687A8E" font-size="15">Drafted, never blindly trusted</text>
+      <rect x="22" y="154" width="206" height="124" rx="13" fill="#F2F6FC" stroke="#D7E5F7"/>
+      <text x="38" y="180" fill="#1267E3" font-size="12" font-weight="800">EXTRACTED</text>
+      <rect x="38" y="196" width="160" height="8" rx="4" fill="#56718C"/>
+      <rect x="38" y="214" width="176" height="8" rx="4" fill="#7D92A6"/>
+      <rect x="38" y="232" width="129" height="8" rx="4" fill="#A0AFBD"/>
+      <rect x="38" y="252" width="97" height="16" rx="8" fill="#DCEAFF"/>
+      <circle cx="38" cy="298" r="5" fill="#22A878"/>
+      <text x="51" y="303" fill="#476176" font-size="14">Evidence link required</text>
+    </g>
+
+    <g transform="translate(966 292)">
+      <rect width="250" height="324" rx="22" fill="#FFFFFF" stroke="#B9DFD0"/>
+      <rect x="22" y="22" width="72" height="28" rx="14" fill="#DFF5EC"/>
+      <text x="42" y="42" fill="#087A58" font-size="13" font-weight="800">04</text>
+      <text x="22" y="91" fill="#172738" font-size="27" font-weight="780">Review</text>
+      <text x="22" y="122" fill="#687A8E" font-size="15">Accept · verify · reject</text>
+      <rect x="22" y="154" width="206" height="124" rx="13" fill="#F0FAF6" stroke="#CBEADD"/>
+      <circle cx="62" cy="212" r="28" fill="#DDF3EA"/>
+      <path d="m49 212 9 9 18-22" fill="none" stroke="#087A58" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="101" y="205" fill="#087A58" font-size="14" font-weight="800">QUOTE VALID</text>
+      <text x="101" y="228" fill="#5D776D" font-size="13">Ready for approval</text>
+      <circle cx="38" cy="298" r="5" fill="#22A878"/>
+      <text x="51" y="303" fill="#476176" font-size="14">Decision history retained</text>
+    </g>
+  </g>
+
+  <g stroke="#6F879D" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M313 454h33m-9-9 9 9-9 9"/>
+    <path d="M617 454h33m-9-9 9 9-9 9"/>
+    <path d="M921 454h33m-9-9 9 9-9 9"/>
+  </g>
+  <text x="54" y="694" fill="#4F657A" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="18">The quote checker confirms citation integrity; human review still decides whether a claim is trustworthy.</text>
+</svg>

@@ -1,0 +1,103 @@
+name: Bug report
+description: Report a reproducible QC Smart Reader failure
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve QC Smart Reader. Search existing issues first.
+
+        **Do not paste Pairing Tokens, API keys, private source text, Vault contents, browser profiles, or an unredacted database.** Report security or private-data exposure through the process in `SECURITY.md`, not here.
+  - type: input
+    id: version
+    attributes:
+      label: QC Smart Reader version
+      description: Use the release tag or commit hash.
+      placeholder: v0.9.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation source
+      options:
+        - Release ZIPs
+        - Source checkout
+        - Other build
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include macOS, Chrome, Python, Node, and Codex CLI versions that matter to this report.
+      placeholder: macOS 15.x; Chrome 140.x; Python 3.13.x
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected workflow
+      options:
+        - Install, upgrade, rollback, or uninstall
+        - Companion pairing or startup
+        - Current-page or selected-text capture
+        - Batch capture or recovery
+        - Site extraction
+        - PDF or OCR
+        - YouTube captions
+        - Model provider or consent
+        - Claim and evidence review
+        - Topic, deliverable, lineage, or Vault Doctor
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Minimal reproduction
+      description: Use a public URL, synthetic text, or a minimal fixture whenever possible.
+      placeholder: |
+        1. Start from...
+        2. Click...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the exact error after removing private paths, tokens, keys, and source content.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation result
+      description: If using a source checkout, paste the final summary from `bash scripts/test_all.sh`, or explain why it could not run.
+      render: shell
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional redacted context
+      description: Screenshots, fixture links, or relevant logs. Drag files here after checking them for private data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I searched existing issues and Discussions.
+          required: true
+        - label: I removed Pairing Tokens, API keys, private content, personal paths, and browser data.
+          required: true
+        - label: This is not a security vulnerability or suspected private-data exposure.
+          required: true

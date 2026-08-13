@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">QC Smart Reader social preview</title>
+  <desc id="desc">QC Smart Reader turns web pages, PDFs, and public YouTube captions into traceable claims with exact quotes in a local vault.</desc>
+  <defs>
+    <linearGradient id="background" x1="74" y1="42" x2="1198" y2="614" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#071426"/>
+      <stop offset="0.54" stop-color="#0B2442"/>
+      <stop offset="1" stop-color="#073B36"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="67" y1="65" x2="176" y2="184" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2D84F7"/>
+      <stop offset="1" stop-color="#0BB07B"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="478" y1="333" x2="1104" y2="333" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B8FFF"/>
+      <stop offset="1" stop-color="#22C58B"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#000" flood-opacity=".28"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" rx="32" fill="url(#background)"/>
+  <circle cx="1138" cy="94" r="250" fill="#1267E3" opacity=".13"/>
+  <circle cx="1110" cy="598" r="310" fill="#0BB07B" opacity=".11"/>
+  <path d="M0 526C228 437 383 620 640 526S1031 446 1280 528V640H0Z" fill="#fff" opacity=".025"/>
+
+  <g filter="url(#shadow)">
+    <rect x="64" y="60" width="124" height="124" rx="30" fill="url(#brand)"/>
+    <circle cx="122" cy="119" r="34" fill="none" stroke="#fff" stroke-width="15"/>
+    <path d="m143 140 21 21" fill="none" stroke="#fff" stroke-width="15" stroke-linecap="round"/>
+  </g>
+  <text x="218" y="111" fill="#D8E8FA" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="22" font-weight="700" letter-spacing="3">QC SMART READER</text>
+  <text x="218" y="150" fill="#8EA7C2" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="19">Open-source · local-first research copilot</text>
+
+  <text x="64" y="284" fill="#FFFFFF" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="63" font-weight="760" letter-spacing="-2">Turn reading into</text>
+  <text x="64" y="357" fill="url(#accent)" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="63" font-weight="760" letter-spacing="-2">traceable knowledge.</text>
+  <text x="68" y="410" fill="#B9CAE0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="23">Capture sources. Keep exact quotes. Review every claim.</text>
+
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="18" font-weight="650">
+    <rect x="67" y="467" width="256" height="55" rx="16" fill="#122E4C" stroke="#2C547B"/>
+    <text x="95" y="501" fill="#EAF3FF">Web · PDF · YouTube</text>
+    <path d="M341 494h40m-9-9 9 9-9 9" fill="none" stroke="#78A9DC" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="400" y="467" width="248" height="55" rx="16" fill="#123548" stroke="#2D6572"/>
+    <text x="430" y="501" fill="#E8FFF7">Claims + exact quotes</text>
+    <path d="M666 494h40m-9-9 9 9-9 9" fill="none" stroke="#63B9A0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="725" y="467" width="194" height="55" rx="16" fill="#0F413B" stroke="#2B7567"/>
+    <text x="759" y="501" fill="#E8FFF7">Local Vault</text>
+  </g>
+
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16" font-weight="650">
+    <rect x="67" y="558" width="130" height="38" rx="19" fill="#FFFFFF" opacity=".09"/>
+    <circle cx="88" cy="577" r="5" fill="#22C58B"/>
+    <text x="102" y="583" fill="#DDEBFA">Local-first</text>
+    <rect x="211" y="558" width="168" height="38" rx="19" fill="#FFFFFF" opacity=".09"/>
+    <circle cx="232" cy="577" r="5" fill="#22C58B"/>
+    <text x="246" y="583" fill="#DDEBFA">Quote-checked</text>
+    <rect x="393" y="558" width="157" height="38" rx="19" fill="#FFFFFF" opacity=".09"/>
+    <circle cx="414" cy="577" r="5" fill="#22C58B"/>
+    <text x="428" y="583" fill="#DDEBFA">Restart-safe</text>
+  </g>
+
+  <g transform="translate(979 202)" filter="url(#shadow)">
+    <rect width="223" height="296" rx="24" fill="#F9FBFD"/>
+    <rect x="21" y="23" width="181" height="38" rx="11" fill="#E8F1FF"/>
+    <circle cx="43" cy="42" r="8" fill="#1267E3"/>
+    <rect x="60" y="35" width="111" height="8" rx="4" fill="#2D5E99"/>
+    <rect x="60" y="48" width="74" height="6" rx="3" fill="#8FA6BE"/>
+    <text x="22" y="91" fill="#172738" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="14" font-weight="750">CLAIM</text>
+    <rect x="22" y="104" width="179" height="51" rx="9" fill="#F0F4F8"/>
+    <rect x="34" y="118" width="141" height="7" rx="3.5" fill="#5F748B"/>
+    <rect x="34" y="133" width="108" height="7" rx="3.5" fill="#8CA0B4"/>
+    <text x="22" y="184" fill="#087A58" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="14" font-weight="750">EXACT QUOTE ✓</text>
+    <rect x="22" y="197" width="179" height="61" rx="9" fill="#E8F7F1"/>
+    <rect x="34" y="211" width="151" height="7" rx="3.5" fill="#3D806B"/>
+    <rect x="34" y="226" width="133" height="7" rx="3.5" fill="#66A28E"/>
+    <rect x="34" y="241" width="92" height="7" rx="3.5" fill="#88B5A6"/>
+    <rect x="22" y="270" width="80" height="9" rx="4.5" fill="#C9D6E3"/>
+    <rect x="111" y="267" width="90" height="16" rx="8" fill="#DDF3EA"/>
+  </g>
+</svg>

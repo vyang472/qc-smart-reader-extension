@@ -7,11 +7,20 @@
     images: 80,
     attachments: 40,
     links: 40,
-    nextPages: 5
+    nextPages: 5,
+    bodyTextBytes: 512 * 1024,
+    blockTextBytes: 64 * 1024,
+    blocksTotalBytes: 384 * 1024,
+    codeBlockBytes: 64 * 1024,
+    codeTotalBytes: 256 * 1024,
+    mediaTotalBytes: 128 * 1024,
+    listTotalBytes: 128 * 1024,
+    textBytes: 768 * 1024,
+    markdownBytes: 768 * 1024
   };
 
   function extractReadablePage() {
-    const selectedText = String(window.getSelection?.() || "").trim();
+    const selectedText = normalizeText(String(window.getSelection?.() || ""));
     const pageTitle = document.title || "";
     const url = location.href;
     const canonicalUrl = document.querySelector('link[rel="canonical"], link[rel~="canonical"]')?.href || url;
@@ -23,16 +32,29 @@
     const extracted = profile.extract(truncation, pageTitle);
     const title = extracted.title || pageTitle;
     const root = extracted.root || document;
-    const blocks = extracted.blocks || [];
-    const headings = extractHeadings(truncation);
+    const blocks = limitBlocksByBytes(extracted.blocks || [], truncation);
+    const headings = extractHeadings(root, truncation);
     const codeBlocks = extractCodeBlocks(root, truncation);
-    const images = extractImages(root, truncation);
-    const links = extractLinks(root, truncation);
-    const attachments = extracted.attachments || extractAttachments(root, truncation);
-    const bodyText = normalizeText(extracted.text || "");
-    const selectedSection = selectedText ? `选中文本：\n${selectedText}\n\n` : "";
+    const rawImages = extractImages(root, truncation);
+    const rawAttachments = extracted.attachments || extractAttachments(root, truncation);
+    const media = limitCollectionsByBytes([rawImages, rawAttachments], LIMITS.mediaTotalBytes, truncation, "mediaBytes");
+    const [images, attachments] = media;
+    const rawLinks = extractLinks(root, truncation);
+    const rawNextPages = extracted.nextPages || [];
+    const lists = limitCollectionsByBytes([rawLinks, rawNextPages], LIMITS.listTotalBytes, truncation, "listBytes");
+    const [links, nextPages] = lists;
+    const selectedTextLimit = truncateUtf8(selectedText, LIMITS.bodyTextBytes);
+    recordByteLimit(truncation, "selectedTextBytes", selectedTextLimit, LIMITS.bodyTextBytes);
+    const boundedSelectedText = selectedTextLimit.value;
+    const bodyTextLimit = truncateUtf8(normalizeText(extracted.text || ""), LIMITS.bodyTextBytes);
+    recordByteLimit(truncation, "bodyTextBytes", bodyTextLimit, LIMITS.bodyTextBytes);
+    const bodyText = bodyTextLimit.value;
+    const authRequired = !boundedSelectedText && detectAuthRequired(title, bodyText);
+    const emptyContent = !boundedSelectedText && !bodyText;
+    const usableContent = !authRequired && !emptyContent;
+    const selectedSection = boundedSelectedText ? `选中文本：\n${boundedSelectedText}\n\n` : "";
     const blockMarkdown = blocks.length ? blocksToMarkdown(blocks) : "";
-    const markdown = [
+    const renderedMarkdown = [
       `# ${title}`,
       url,
       canonicalUrl && canonicalUrl !== url ? `Canonical: ${canonicalUrl}` : "",
@@ -46,11 +68,22 @@
       attachments.length ? `\n## 附件\n${attachments.map((item) => `- [${item.text || "attachment"}](${item.href})`).join("\n")}` : "",
       links.length ? `\n## 重要链接\n${links.map((link) => `- [${link.text}](${link.href})`).join("\n")}` : ""
     ].filter(Boolean).join("\n\n");
-    const text = `${selectedSection}${markdown}`;
+    const markdownLimit = truncateUtf8(usableContent || boundedSelectedText ? renderedMarkdown : "", LIMITS.markdownBytes);
+    recordByteLimit(truncation, "markdownBytes", markdownLimit, LIMITS.markdownBytes);
+    const markdown = markdownLimit.value;
+    const textLimit = truncateUtf8(usableContent || boundedSelectedText ? `${selectedSection}${markdown}` : "", LIMITS.textBytes);
+    recordByteLimit(truncation, "textBytes", textLimit, LIMITS.textBytes);
+    const text = textLimit.value;
+    const contentText = normalizeText([boundedSelectedText, bodyText].filter(Boolean).join("\n\n"));
+    const truncated = hasTruncation(truncation);
+    const qualityFlags = { emptyContent, authRequired, truncated };
     const stats = {
       profile: profile.id,
       site,
-      textChars: text.replace(/\s+/g, "").length,
+      textChars: usableContent || boundedSelectedText ? contentText.replace(/\s+/g, "").length : 0,
+      bodyTextChars: bodyText.replace(/\s+/g, "").length,
+      emptyContent,
+      authRequired,
       blocks: blocks.length,
       images: images.length,
       codeBlocks: codeBlocks.length,
@@ -58,10 +91,12 @@
       links: links.length,
       comments: blocks.filter((block) => block.type === "comment").length,
       floors: blocks.filter((block) => block.floor).length,
-      nextPages: extracted.nextPages?.length || 0,
-      truncated: hasTruncation(truncation),
+      nextPages: nextPages.length,
+      truncated,
       truncation,
-      quality: scoreQuality({ text, blocks, images, codeBlocks, attachments, extracted })
+      quality: usableContent || boundedSelectedText
+        ? scoreQuality({ text: contentText, blocks, images, codeBlocks, attachments, extracted })
+        : 0
     };
     return {
       title,
@@ -69,7 +104,7 @@
       canonicalUrl,
       text,
       markdown,
-      kind: selectedText ? `${extracted.kind}+selection` : extracted.kind,
+      kind: boundedSelectedText ? `${extracted.kind}+selection` : extracted.kind,
       site,
       profile: profile.id,
       author: extracted.author || "",
@@ -78,8 +113,14 @@
       images,
       attachments,
       links,
-      nextPages: extracted.nextPages || [],
-      stats
+      nextPages,
+      stats,
+      qualityFlags,
+      quality_flags: {
+        empty_content: emptyContent,
+        auth_required: authRequired,
+        truncated
+      }
     };
   }
 
@@ -111,7 +152,7 @@
     const profiles = {
       quantclass: { id: "quantclass-bbs", extract: extractForum },
       zhihu: { id: "zhihu", extract: (_truncation, pageTitle) => extractArticle(["article", ".Post-RichTextContainer", ".RichContent-inner", ".QuestionAnswer-content", "main"], pageTitle) },
-      wechat: { id: "wechat-article", extract: (_truncation, pageTitle) => extractArticle(["#js_content", ".rich_media_content", "article"], pageTitle) },
+      wechat: { id: "wechat-article", extract: (_truncation, pageTitle) => extractArticle(["#js_content", ".rich_media_content", "article"], pageTitle, { documentMetadata: true }) },
       substack: { id: "substack", extract: (_truncation, pageTitle) => extractArticle(["article", ".available-content", ".post", "main"], pageTitle) },
       medium: { id: "medium", extract: (_truncation, pageTitle) => extractArticle(["article", "main"], pageTitle) },
       "hacker-news": { id: "hacker-news", extract: extractHackerNews },
@@ -291,14 +332,15 @@
     };
   }
 
-  function extractArticle(selectors, pageTitle) {
+  function extractArticle(selectors, pageTitle, options = {}) {
     const root = pickBestRoot(selectors);
-    const titleNode = firstExisting(["h1", "[data-testid='headline']", ".title", ".post-title"]) || document.querySelector("title");
+    const metadataRoot = options.documentMetadata ? document : root;
+    const titleNode = firstExisting(["h1", "[data-testid='headline']", ".title", ".post-title"], metadataRoot) || document.querySelector("title");
     return {
       kind: "page",
       title: textOf(titleNode) || pageTitle,
-      author: textOf(firstExisting(["[rel='author']", ".author", ".byline", ".rich_media_meta_text", ".rich_media_meta_nickname", "[class*='author']", "[class*='byline']"])),
-      publishedAt: textOf(firstExisting(["time", ".date", ".publish-time", "[class*='date']", "[class*='time']"])),
+      author: textOf(firstExisting(["[rel='author']", ".author", ".byline", ".rich_media_meta_text", ".rich_media_meta_nickname", "[class*='author']", "[class*='byline']"], metadataRoot)),
+      publishedAt: textOf(firstExisting(["time", ".date", ".publish-time", "[class*='date']", "[class*='time']"], metadataRoot)),
       root,
       text: normalizeText(root?.innerText || root?.textContent || ""),
       blocks: []
@@ -307,9 +349,11 @@
 
   function pickBestRoot(selectors) {
     const nodes = uniqueNodes(selectors.flatMap((selector) => [...document.querySelectorAll(selector)]));
-    let best = nodes[0] || document.body;
+    const specificNodes = nodes.filter((node) => node !== document.body && normalizeText(node.innerText || node.textContent || ""));
+    const candidates = specificNodes.length ? specificNodes : nodes;
+    let best = candidates[0] || document.body;
     let bestScore = 0;
-    for (const node of nodes) {
+    for (const node of candidates) {
       const text = normalizeText(node.innerText || node.textContent || "");
       const paragraphs = node.querySelectorAll?.("p, li, h1, h2, h3, pre, code, blockquote").length || 0;
       const score = text.length + paragraphs * 120;
@@ -321,9 +365,9 @@
     return best;
   }
 
-  function firstExisting(selectors) {
+  function firstExisting(selectors, scope = document) {
     for (const selector of selectors) {
-      const node = document.querySelector(selector);
+      const node = scope?.querySelector?.(selector);
       if (node) return node;
     }
     return null;
@@ -337,8 +381,8 @@
     return normalizeText(node?.innerText || node?.textContent || "");
   }
 
-  function extractHeadings(truncation) {
-    const headings = [...document.querySelectorAll("h1, h2, h3")]
+  function extractHeadings(root, truncation) {
+    const headings = [...(root?.querySelectorAll?.("h1, h2, h3") || [])]
       .map((node) => `${"#".repeat(Math.min(Number(node.tagName.slice(1)), 3))} ${normalizeText(node.innerText || node.textContent || "")}`)
       .filter((line) => !/^#+\s*$/.test(line));
     return limitItems(headings, "headings", LIMITS.headings, truncation);
@@ -350,10 +394,11 @@
     const items = [...preNodes, ...looseCodeNodes]
       .map((node) => ({
         language: detectLanguage(node),
-        code: normalizeText(node.innerText || node.textContent || "")
+        code: normalizeCode(node.textContent || "")
       }))
       .filter((item) => item.code.length > 20);
-    return truncation ? limitItems(items, "codeBlocks", LIMITS.codeBlocks, truncation) : items.slice(0, LIMITS.codeBlocks);
+    const counted = truncation ? limitItems(items, "codeBlocks", LIMITS.codeBlocks, truncation) : items.slice(0, LIMITS.codeBlocks);
+    return limitCodeBlocksByBytes(counted, truncation);
   }
 
   function detectLanguage(node) {
@@ -415,6 +460,159 @@
     const kept = list.slice(0, limit);
     if (truncation) recordLimit(truncation, key, list.length, kept.length, limit);
     return kept;
+  }
+
+  function limitBlocksByBytes(items, truncation) {
+    const source = Array.isArray(items) ? items.slice(0, LIMITS.blocks) : [];
+    const output = [];
+    let totalOriginalBytes = 0;
+    let totalOutputBytes = 0;
+    let largestOriginalTextBytes = 0;
+    let largestOutputTextBytes = 0;
+    let anyTextTruncated = false;
+    for (const item of source) {
+      const raw = item && typeof item === "object" ? item : {};
+      totalOriginalBytes += utf8Length(JSON.stringify(raw));
+      const textLimit = truncateUtf8(raw.text || "", LIMITS.blockTextBytes);
+      largestOriginalTextBytes = Math.max(largestOriginalTextBytes, textLimit.originalBytes);
+      largestOutputTextBytes = Math.max(largestOutputTextBytes, textLimit.outputBytes);
+      anyTextTruncated ||= textLimit.truncated;
+      const block = {
+        ...raw,
+        text: textLimit.value,
+        codeBlocks: (raw.codeBlocks || []).map((code) => truncateUtf8(normalizeCode(code), LIMITS.codeBlockBytes).value)
+      };
+      const blockBytes = utf8Length(JSON.stringify(block));
+      if (totalOutputBytes + blockBytes > LIMITS.blocksTotalBytes) break;
+      output.push(block);
+      totalOutputBytes += blockBytes;
+    }
+    truncation.blockTextBytes = {
+      originalBytes: largestOriginalTextBytes,
+      outputBytes: largestOutputTextBytes,
+      limitBytes: LIMITS.blockTextBytes,
+      truncated: anyTextTruncated
+    };
+    truncation.blocksBytes = {
+      originalBytes: totalOriginalBytes,
+      outputBytes: totalOutputBytes,
+      limitBytes: LIMITS.blocksTotalBytes,
+      truncated: totalOriginalBytes > totalOutputBytes
+    };
+    return output;
+  }
+
+  function limitCodeBlocksByBytes(items, truncation) {
+    const output = [];
+    let totalOriginalBytes = 0;
+    let totalOutputBytes = 0;
+    let largestOriginalBytes = 0;
+    let largestOutputBytes = 0;
+    let anyItemTruncated = false;
+    for (const item of items || []) {
+      const rawCode = normalizeCode(item?.code || "");
+      const originalBytes = utf8Length(rawCode);
+      totalOriginalBytes += originalBytes;
+      largestOriginalBytes = Math.max(largestOriginalBytes, originalBytes);
+      const remaining = LIMITS.codeTotalBytes - totalOutputBytes;
+      if (remaining <= 0) continue;
+      const itemLimit = truncateUtf8(rawCode, Math.min(LIMITS.codeBlockBytes, remaining));
+      largestOutputBytes = Math.max(largestOutputBytes, itemLimit.outputBytes);
+      anyItemTruncated ||= itemLimit.truncated || originalBytes > itemLimit.outputBytes;
+      if (!itemLimit.value) continue;
+      output.push({ ...item, code: itemLimit.value });
+      totalOutputBytes += itemLimit.outputBytes;
+    }
+    if (truncation) {
+      truncation.codeBlockBytes = {
+        originalBytes: largestOriginalBytes,
+        outputBytes: largestOutputBytes,
+        limitBytes: LIMITS.codeBlockBytes,
+        truncated: anyItemTruncated
+      };
+      truncation.codeBytes = {
+        originalBytes: totalOriginalBytes,
+        outputBytes: totalOutputBytes,
+        limitBytes: LIMITS.codeTotalBytes,
+        truncated: totalOriginalBytes > totalOutputBytes
+      };
+    }
+    return output;
+  }
+
+  function limitCollectionsByBytes(collections, limitBytes, truncation, key) {
+    const output = collections.map(() => []);
+    let originalBytes = 0;
+    let outputBytes = 0;
+    collections.forEach((items, collectionIndex) => {
+      for (const item of items || []) {
+        originalBytes += utf8Length(JSON.stringify(item));
+        const remaining = limitBytes - outputBytes;
+        if (remaining <= 0) continue;
+        const bounded = boundCollectionItem(item, remaining);
+        if (bounded === null) continue;
+        const itemBytes = utf8Length(JSON.stringify(bounded));
+        if (itemBytes > remaining) continue;
+        output[collectionIndex].push(bounded);
+        outputBytes += itemBytes;
+      }
+    });
+    truncation[key] = {
+      originalBytes,
+      outputBytes,
+      limitBytes,
+      truncated: originalBytes > outputBytes
+    };
+    return output;
+  }
+
+  function boundCollectionItem(item, remainingBytes) {
+    if (typeof item === "string") {
+      return truncateUtf8(item, Math.max(0, remainingBytes - 2)).value || null;
+    }
+    if (!item || typeof item !== "object") return null;
+    const output = {};
+    for (const [key, value] of Object.entries(item)) {
+      output[key] = typeof value === "string"
+        ? truncateUtf8(value, Math.min(16 * 1024, Math.max(0, remainingBytes - 32))).value
+        : value;
+    }
+    return output;
+  }
+
+  function truncateUtf8(value, limitBytes) {
+    const text = String(value || "");
+    const encoded = new TextEncoder().encode(text);
+    if (encoded.length <= limitBytes) {
+      return { value: text, originalBytes: encoded.length, outputBytes: encoded.length, truncated: false };
+    }
+    let end = Math.max(0, limitBytes);
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let decoded = "";
+    while (end > 0) {
+      try {
+        decoded = decoder.decode(encoded.slice(0, end));
+        break;
+      } catch {
+        end -= 1;
+      }
+    }
+    const boundaryFloor = Math.floor(decoded.length * 0.8);
+    const newline = decoded.lastIndexOf("\n");
+    const space = decoded.lastIndexOf(" ");
+    const boundary = Math.max(newline, space);
+    if (boundary >= boundaryFloor) decoded = decoded.slice(0, boundary);
+    const outputBytes = utf8Length(decoded);
+    return { value: decoded, originalBytes: encoded.length, outputBytes, truncated: true };
+  }
+
+  function recordByteLimit(truncation, key, result, limitBytes) {
+    truncation[key] = {
+      originalBytes: result.originalBytes,
+      outputBytes: result.outputBytes,
+      limitBytes,
+      truncated: result.truncated
+    };
   }
 
   function recordLimit(truncation, key, total, kept, limit) {
@@ -479,12 +677,37 @@
     return Math.min(100, score || 10);
   }
 
+  function detectAuthRequired(title, bodyText) {
+    const combined = normalizeText([title, bodyText].filter(Boolean).join("\n"));
+    if (!combined || utf8Length(combined) > 32 * 1024) return false;
+    const markers = [
+      /^(?:please\s+)?(?:sign|log)\s+in(?:\s+to\s+(?:continue|view|read|access).*)?[.!！。]?$/i,
+      /^(?:checking your browser|just a moment|verify you are human|security check|authentication required|access denied)[.!！。…]*$/i,
+      /^(?:请先登录|请登录后(?:继续|查看|访问)|登录后(?:继续|查看|访问).*)[!！。]?$/
+    ];
+    return combined
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter((line) => line && line.length <= 240)
+      .some((line) => markers.some((pattern) => pattern.test(line)));
+  }
+
+  function utf8Length(value) {
+    return new TextEncoder().encode(String(value || "")).length;
+  }
+
   function normalizeText(value) {
     return String(value || "")
       .replace(/\u00a0/g, " ")
       .replace(/[ \t]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }
+
+  function normalizeCode(value) {
+    return String(value || "")
+      .replace(/\r\n?/g, "\n")
       .trim();
   }
 

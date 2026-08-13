@@ -10,11 +10,17 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import http.client
+import ipaddress
 import json
+import os
 import re
 import secrets
+import shlex
 import shutil
+import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,14 +31,27 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 from uuid import uuid4
 
 
 APP_NAME = "QC Smart Reader"
+SERVICE_VERSION = "0.9.0"
+API_VERSION = 1
+SCHEMA_VERSION = 1
+MIN_EXTENSION_VERSION = "0.9.0"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 37621
 MAX_BODY_BYTES = 25 * 1024 * 1024
+PDF_DOWNLOAD_TIMEOUT_SECONDS = 45
+MAX_PDF_REDIRECTS = 5
+DB_BUSY_TIMEOUT_SECONDS = 30
+JOB_CLAIM_CAS_ATTEMPTS = 20
+# Separator for hash fingerprints. Kept as a module constant so the fingerprint
+# expressions stay free of backslashes: an f-string expression part may not
+# contain a backslash before Python 3.12, and this service must start on the
+# stock python3 that ships with macOS.
+NULL_JOIN = "\0"
 SOURCE_STATUSES = {"new", "needs_review", "read", "extracted", "reviewed", "rejected", "archived"}
 CLAIM_REVIEW_STATUSES = {"pending_validation", "extracted", "reviewed", "rejected", "archived"}
 EVIDENCE_REVIEW_STATUSES = {"pending_validation", "reviewed", "rejected", "archived"}
@@ -67,28 +86,89 @@ JOB_FAILURE_CATEGORIES = {
     "stuck_running",
     "unknown",
 }
-BUNDLED_SITE_PACKAGES = (
-    Path.home()
-    / ".cache"
-    / "codex-runtimes"
-    / "codex-primary-runtime"
-    / "dependencies"
-    / "python"
-    / "lib"
-    / "python3.12"
-    / "site-packages"
-)
-BUNDLED_PYTHON = (
-    Path.home()
-    / ".cache"
-    / "codex-runtimes"
-    / "codex-primary-runtime"
-    / "dependencies"
-    / "python"
-    / "bin"
-    / "python3"
-)
 PDF_WORKER = Path(__file__).with_name("pdf_extract_worker.py")
+PDF_EXTRACT_TIMEOUT_SECONDS = 90
+MAX_PDF_PAGES = 5000
+MAX_PDF_PAGE_TEXT_BYTES = 2 * 1024 * 1024
+MAX_PDF_TOTAL_TEXT_BYTES = 12 * 1024 * 1024
+MAX_PDF_WORKER_OUTPUT_BYTES = 32 * 1024 * 1024
+MAX_PDF_WORKER_ERROR_BYTES = 64 * 1024
+PDF_WORKER_MEMORY_BYTES = 768 * 1024 * 1024
+PDF_WORKER_CPU_SECONDS = 80
+PDF_OCR_WORKER = Path(__file__).with_name("pdf_ocr_worker.swift")
+PDF_OCR_ENGINE = "macos-pdfkit-vision"
+PDF_OCR_TIMEOUT_SECONDS = 180
+YOUTUBE_METADATA_TIMEOUT_SECONDS = 45
+YOUTUBE_SUBTITLE_TIMEOUT_SECONDS = 30
+MAX_YOUTUBE_METADATA_BYTES = 5 * 1024 * 1024
+MAX_YOUTUBE_SUBTITLE_BYTES = 10 * 1024 * 1024
+MAX_MODEL_RESPONSE_BYTES = 10 * 1024 * 1024
+MODEL_HTTP_TIMEOUT_SECONDS = 120
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTP transport that connects to an already-vetted numeric address."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        pinned_address: str,
+        *,
+        timeout: float,
+    ) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self.pinned_address = pinned_address
+
+    def connect(self) -> None:
+        # The numeric address is the result of our own DNS policy check. Passing
+        # it here prevents a second attacker-controlled lookup between validation
+        # and the TCP connection (DNS rebinding / time-of-check-time-of-use).
+        self.sock = socket.create_connection(
+            (self.pinned_address, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS equivalent of _PinnedHTTPConnection, preserving TLS hostname checks."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        pinned_address: str,
+        *,
+        timeout: float,
+    ) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self.pinned_address = pinned_address
+
+    def connect(self) -> None:
+        raw_socket = socket.create_connection(
+            (self.pinned_address, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        try:
+            if self._tunnel_host:
+                self.sock = raw_socket
+                self._tunnel()
+                raw_socket = self.sock
+            self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+        except BaseException:
+            raw_socket.close()
+            raise
+
+
+class _RejectModelRedirects(urllib.request.HTTPRedirectHandler):
+    """Prevent model credentials from crossing to a redirect destination."""
+
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        return None
 
 
 def utc_now() -> str:
@@ -144,6 +224,43 @@ def short_text(value: str, limit: int = 1200) -> str:
     return f"{text[: max(0, limit - 24)].rstrip()}\n... excerpt truncated ..."
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            fd = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            # Some filesystems do not support directory fsync; the file itself
+            # was still flushed before the atomic rename.
+            pass
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def canonicalize_url(value: str) -> str:
     url = normalize_text(value or "")
     if not url:
@@ -176,6 +293,97 @@ def canonicalize_url(value: str) -> str:
         query_items.append((key, item_value))
     query_items.sort(key=lambda item: (item[0].lower(), item[1]))
     return urlunparse((scheme, netloc, path, "", urlencode(query_items, doseq=True), ""))
+
+
+def path_is_within(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def has_pdf_header(data: bytes) -> bool:
+    # ISO 32000 readers commonly tolerate a small binary preamble before the
+    # header, so inspect the first 1024 bytes instead of requiring byte zero.
+    return b"%PDF-" in data[:1024]
+
+
+def resolve_public_resource_endpoints(host: str, port: int) -> list[str]:
+    """Resolve a host once and return only globally routable numeric addresses."""
+
+    try:
+        answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, OSError) as error:
+        raise ValueError(
+            "could not resolve the remote hostname; check the URL and network connection"
+        ) from error
+    if not answers:
+        raise ValueError(
+            "remote hostname returned no network addresses; check the URL"
+        )
+
+    endpoints: list[str] = []
+    for family, socket_type, _protocol, _canonical_name, sockaddr in answers:
+        if socket_type not in {0, socket.SOCK_STREAM}:
+            continue
+        if family not in {socket.AF_INET, socket.AF_INET6} or not sockaddr:
+            continue
+        raw_address = str(sockaddr[0])
+        # Scoped IPv6 addresses are necessarily interface-local and must not be
+        # accepted by a downloader that promises public-network-only access.
+        address_without_scope = raw_address.split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(address_without_scope)
+        except ValueError as error:
+            raise ValueError("remote PDF host returned an invalid network address") from error
+        mapped = getattr(address, "ipv4_mapped", None)
+        policy_address = mapped or address
+        if (
+            policy_address.is_loopback
+            or policy_address.is_private
+            or policy_address.is_link_local
+            or policy_address.is_multicast
+            or policy_address.is_reserved
+            or policy_address.is_unspecified
+            or not policy_address.is_global
+        ):
+            raise ValueError(
+                "remote host resolves to a non-public network address; "
+                "use a public URL or import a local PDF from an allowed folder"
+            )
+        if raw_address not in endpoints:
+            endpoints.append(raw_address)
+
+    if not endpoints:
+        raise ValueError("remote host did not resolve to a usable public network address")
+    return endpoints
+
+
+def parse_public_resource_url(value: str):
+    url = normalize_text(value)
+    if not url or any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise ValueError("remote URL is empty or contains invalid control characters")
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("remote URL is malformed; provide a complete public http or https URL") from error
+    if scheme not in {"http", "https"}:
+        raise ValueError("remote URL must use http or https")
+    if not host or not parsed.netloc:
+        raise ValueError("remote URL must include a public hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("remote URL must not contain embedded credentials")
+    try:
+        ascii_host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError as error:
+        raise ValueError("remote URL contains an invalid hostname") from error
+    effective_port = port or (443 if scheme == "https" else 80)
+    endpoints = resolve_public_resource_endpoints(ascii_host, effective_port)
+    return parsed, ascii_host, effective_port, endpoints
 
 
 def estimate_tokens(text: str) -> int:
@@ -214,16 +422,13 @@ def markdown_escape(value: str) -> str:
     return (value or "").replace("\n", " ").strip()
 
 
-def ensure_pdf_dependencies() -> None:
-    if BUNDLED_SITE_PACKAGES.exists() and str(BUNDLED_SITE_PACKAGES) not in sys.path:
-        sys.path.insert(0, str(BUNDLED_SITE_PACKAGES))
-
-
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict | list) -> None:
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     handler.send_response(status)
     handler.send_header("content-type", "application/json; charset=utf-8")
     handler.send_header("content-length", str(len(body)))
+    handler.send_header("cache-control", "no-store")
+    handler.send_header("x-content-type-options", "nosniff")
     origin = handler.headers.get("origin") or ""
     allowed_origin = allowed_cors_origin(origin)
     if allowed_origin:
@@ -249,12 +454,25 @@ def allowed_cors_origin(origin: str) -> str:
 
 
 class Store:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, allowed_pdf_dirs: list[Path] | None = None):
         self.data_dir = data_dir.expanduser().resolve()
         self.vault_dir = self.data_dir / "vault"
         self.db_path = self.data_dir / "state" / "qc_smart_reader.sqlite3"
         self.pairing_token_path = self.data_dir / "state" / "pairing_token.txt"
         self.model_settings_path = self.data_dir / "state" / "model_settings.json"
+        default_pdf_dirs = [
+            Path.home() / "Desktop",
+            Path.home() / "Documents",
+            Path.home() / "Downloads",
+            self.data_dir,
+        ]
+        configured_pdf_dirs = [Path(path) for path in (allowed_pdf_dirs or [])]
+        self.allowed_pdf_dirs = tuple(
+            dict.fromkeys(
+                path.expanduser().resolve(strict=False)
+                for path in [*default_pdf_dirs, *configured_pdf_dirs]
+            )
+        )
         self.default_project_id = "default"
         self.init_storage()
 
@@ -286,10 +504,19 @@ class Store:
         ]:
             path.mkdir(parents=True, exist_ok=True)
 
+        # State contains the pairing token, model credentials and the complete
+        # research database. Repair permissive legacy modes on every startup;
+        # the human-readable Vault remains user-managed.
+        try:
+            self.data_dir.chmod(0o700)
+            self.db_path.parent.chmod(0o700)
+        except OSError as error:
+            raise RuntimeError("could not secure the companion data/state directories") from error
+
         self.ensure_pairing_token()
 
         with self.connect() as db:
-            self.create_schema(db)
+            self.upgrade_schema(db)
             db.execute(
                 """
                 INSERT OR IGNORE INTO projects(id, name, vault_path, created_at, updated_at)
@@ -299,21 +526,48 @@ class Store:
             )
             db.commit()
 
+        for sensitive_path in (
+            self.db_path,
+            self.db_path.with_name(f"{self.db_path.name}-wal"),
+            self.db_path.with_name(f"{self.db_path.name}-shm"),
+        ):
+            if sensitive_path.exists():
+                try:
+                    sensitive_path.chmod(0o600)
+                except OSError as error:
+                    raise RuntimeError(f"could not secure database file: {sensitive_path.name}") from error
+
         self.ensure_vault_docs()
 
     def ensure_pairing_token(self) -> str:
         try:
-            existing = self.pairing_token_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            existing = ""
-        if existing:
-            return existing
+            metadata = self.pairing_token_path.lstat()
+        except FileNotFoundError:
+            metadata = None
+        except OSError as error:
+            raise RuntimeError("could not inspect the pairing token file") from error
+        if metadata is not None:
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise RuntimeError("pairing token path must be a regular non-symlink file")
+            if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+                raise RuntimeError("pairing token file is not owned by the current user")
+            try:
+                self.pairing_token_path.chmod(0o600)
+                existing_raw = self.pairing_token_path.read_text(encoding="ascii")
+            except (OSError, UnicodeError) as error:
+                raise RuntimeError("could not securely read the pairing token file") from error
+            match = re.fullmatch(r"([A-Za-z0-9_-]{43,256})(?:\r?\n)?", existing_raw)
+            if not match:
+                raise RuntimeError(
+                    "pairing token file is malformed; move it aside and restart to generate a new token"
+                )
+            return match.group(1)
         token = secrets.token_urlsafe(32)
-        self.pairing_token_path.write_text(f"{token}\n", encoding="utf-8")
+        atomic_write_text(self.pairing_token_path, f"{token}\n")
         try:
             self.pairing_token_path.chmod(0o600)
-        except OSError:
-            pass
+        except OSError as error:
+            raise RuntimeError("could not secure the pairing token file") from error
         return token
 
     def pairing_token(self) -> str:
@@ -328,6 +582,11 @@ class Store:
             "api_key": "",
             "input_cost_per_1m": None,
             "output_cost_per_1m": None,
+            # provider == "codex" shells out to a locally installed Codex CLI
+            # instead of calling an HTTP API, so a ChatGPT plan can drive
+            # extraction without a pay-as-you-go API key.
+            "codex_command": "",
+            "codex_timeout_seconds": 300,
             "updated_at": "",
             "last_validated_at": "",
         }
@@ -335,11 +594,28 @@ class Store:
     def read_model_settings(self, include_secret: bool = False) -> dict:
         settings = self.default_model_settings()
         try:
-            loaded = json.loads(self.model_settings_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                settings.update(loaded)
-        except (OSError, json.JSONDecodeError):
-            pass
+            metadata = self.model_settings_path.lstat()
+        except FileNotFoundError:
+            metadata = None
+        except OSError as error:
+            raise RuntimeError("could not inspect model settings") from error
+        if metadata is not None:
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise RuntimeError("model settings path must be a regular non-symlink file")
+            if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+                raise RuntimeError("model settings file is not owned by the current user")
+            try:
+                self.model_settings_path.chmod(0o600)
+                loaded = json.loads(self.model_settings_path.read_text(encoding="utf-8"))
+            except OSError as error:
+                raise RuntimeError("could not securely read model settings") from error
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    "model settings JSON is corrupted; restore or move state/model_settings.json"
+                ) from error
+            if not isinstance(loaded, dict):
+                raise RuntimeError("model settings JSON must contain an object")
+            settings.update(loaded)
         if include_secret:
             return settings
         return self.public_model_settings(settings)
@@ -354,11 +630,27 @@ class Store:
     def update_model_settings(self, payload: dict) -> dict:
         settings = self.read_model_settings(include_secret=True)
         provider = normalize_text(payload.get("provider") or settings.get("provider") or "openai")
-        if provider not in {"openai", "anthropic"}:
-            raise ValueError("provider must be openai or anthropic")
+        if provider not in {"openai", "anthropic", "codex"}:
+            raise ValueError("provider must be openai, anthropic, or codex")
         settings["provider"] = provider
-        settings["base_url"] = normalize_text(payload.get("base_url") or settings.get("base_url") or "")
-        settings["model"] = normalize_text(payload.get("model") or settings.get("model") or "")
+        if "codex_command" in payload:
+            raw_command = payload.get("codex_command")
+            if isinstance(raw_command, list):
+                settings["codex_command"] = [str(part) for part in raw_command if str(part).strip()]
+            else:
+                settings["codex_command"] = normalize_text(str(raw_command or ""))
+        if "codex_timeout_seconds" in payload:
+            try:
+                timeout_seconds = int(float(payload.get("codex_timeout_seconds") or 0))
+            except (TypeError, ValueError):
+                raise ValueError("codex_timeout_seconds must be numeric")
+            if timeout_seconds < 10 or timeout_seconds > 3600:
+                raise ValueError("codex_timeout_seconds must be between 10 and 3600")
+            settings["codex_timeout_seconds"] = timeout_seconds
+        if "base_url" in payload:
+            settings["base_url"] = normalize_text(payload.get("base_url") or "")
+        if "model" in payload:
+            settings["model"] = normalize_text(payload.get("model") or "")
         try:
             settings["temperature"] = float(payload.get("temperature", settings.get("temperature", 0.2)))
         except (TypeError, ValueError):
@@ -386,22 +678,187 @@ class Store:
         return self.public_model_settings(settings)
 
     def write_model_settings(self, settings: dict) -> None:
-        self.model_settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+        if self.model_settings_path.is_symlink():
+            raise RuntimeError("model settings path must not be a symlink")
+        atomic_write_text(
+            self.model_settings_path,
+            json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+        )
         try:
             self.model_settings_path.chmod(0o600)
-        except OSError:
-            pass
+        except OSError as error:
+            raise RuntimeError("could not secure model settings") from error
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.db_path)
+        db = sqlite3.connect(self.db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
         db.row_factory = sqlite3.Row
+        db.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}")
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA foreign_keys=ON")
         try:
             yield db
         finally:
             db.close()
+
+    def upgrade_schema(self, db: sqlite3.Connection) -> None:
+        current_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+        if current_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Database schema version {current_version} is newer than this "
+                f"QC Smart Reader build supports ({SCHEMA_VERSION}). Upgrade the "
+                "application before opening this data directory."
+            )
+
+        has_existing_schema = db.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+              AND type IN ('table', 'index', 'trigger', 'view')
+            LIMIT 1
+            """
+        ).fetchone() is not None
+        backup_path: Path | None = None
+        if current_version < SCHEMA_VERSION and has_existing_schema:
+            backup_path = self.ensure_schema_backup(db, current_version, SCHEMA_VERSION)
+
+        try:
+            # create_schema is intentionally idempotent. Running it at the current
+            # version repairs additive objects from interrupted filesystem copies,
+            # while user_version remains the authoritative compatibility marker.
+            self.create_schema(db)
+            if current_version < SCHEMA_VERSION:
+                integrity = db.execute("PRAGMA integrity_check").fetchone()
+                if not integrity or integrity[0] != "ok":
+                    detail = integrity[0] if integrity else "no result"
+                    raise sqlite3.DatabaseError(f"post-upgrade integrity_check failed: {detail}")
+                db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                db.commit()
+        except Exception as exc:
+            db.rollback()
+            if backup_path is not None:
+                raise RuntimeError(
+                    f"Database schema upgrade from version {current_version} to "
+                    f"{SCHEMA_VERSION} failed. A verified pre-upgrade backup remains "
+                    f"at '{backup_path}'. Stop the service, preserve the current "
+                    f"database, and restore that backup to '{self.db_path}' before "
+                    f"retrying. Original error: {exc}"
+                ) from exc
+            raise RuntimeError(
+                f"Database schema initialization to version {SCHEMA_VERSION} failed "
+                f"for '{self.db_path}'. Original error: {exc}"
+            ) from exc
+
+    def schema_backup_path(self, target_version: int) -> Path:
+        return self.db_path.with_name(
+            f"{self.db_path.name}.pre-schema-v{target_version}.bak"
+        )
+
+    def ensure_schema_backup(
+        self,
+        db: sqlite3.Connection,
+        source_version: int,
+        target_version: int,
+    ) -> Path:
+        backup_path = self.schema_backup_path(target_version)
+        if backup_path.exists() or backup_path.is_symlink():
+            self.verify_schema_backup(backup_path, source_version)
+            return backup_path
+
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f".{backup_path.name}.tmp-",
+            dir=backup_path.parent,
+        )
+        os.close(temp_fd)
+        temp_path = Path(temp_name)
+        try:
+            temp_path.chmod(0o600)
+            backup_db = sqlite3.connect(temp_path)
+            try:
+                db.backup(backup_db)
+                backup_db.commit()
+                # A backup copied from the live WAL database inherits WAL mode.
+                # Convert the standalone artifact to DELETE mode so it can be
+                # inspected read-only and restored without sidecar files.
+                backup_db.execute("PRAGMA journal_mode=DELETE")
+            finally:
+                backup_db.close()
+            self.verify_schema_backup(temp_path, source_version)
+            self.sync_file(temp_path)
+
+            # link() provides an atomic no-clobber publish on the same filesystem.
+            # If another process won the race, keep and verify the first backup.
+            try:
+                os.link(temp_path, backup_path)
+            except FileExistsError:
+                self.verify_schema_backup(backup_path, source_version)
+            else:
+                self.sync_directory(backup_path.parent)
+            self.verify_schema_backup(backup_path, source_version)
+            return backup_path
+        except Exception as exc:
+            raise RuntimeError(
+                f"Refusing to upgrade database schema from version {source_version} "
+                f"to {target_version}: could not create and verify the required "
+                f"backup at '{backup_path}'. Original error: {exc}"
+            ) from exc
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def verify_schema_backup(self, backup_path: Path, expected_version: int) -> None:
+        try:
+            metadata = os.lstat(backup_path)
+        except OSError as exc:
+            raise RuntimeError(f"cannot inspect backup: {exc}") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError("backup path is not a regular, non-symlink file")
+        if metadata.st_uid != os.getuid():
+            raise RuntimeError("backup is not owned by the current user")
+        try:
+            backup_path.chmod(0o600)
+        except OSError as exc:
+            raise RuntimeError(f"cannot restrict backup permissions: {exc}") from exc
+
+        try:
+            backup_db = sqlite3.connect(f"{backup_path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                integrity = backup_db.execute("PRAGMA integrity_check").fetchone()
+                backup_version = int(backup_db.execute("PRAGMA user_version").fetchone()[0])
+            finally:
+                backup_db.close()
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            raise RuntimeError(f"backup is not a readable SQLite database: {exc}") from exc
+        if not integrity or integrity[0] != "ok":
+            detail = integrity[0] if integrity else "no result"
+            raise RuntimeError(f"backup integrity_check failed: {detail}")
+        if backup_version != expected_version:
+            raise RuntimeError(
+                f"backup schema version is {backup_version}, expected {expected_version}"
+            )
+
+    def sync_file(self, path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def sync_directory(self, path: Path) -> None:
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            try:
+                os.fsync(descriptor)
+            except OSError:
+                pass
+        finally:
+            os.close(descriptor)
 
     def create_schema(self, db: sqlite3.Connection) -> None:
         db.executescript(
@@ -838,6 +1295,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS assumptions (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL REFERENCES projects(id),
+              source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
               claim_id TEXT REFERENCES claims(id) ON DELETE SET NULL,
               text TEXT NOT NULL,
               status TEXT NOT NULL,
@@ -894,6 +1352,15 @@ class Store:
               UNIQUE(project_id, upstream_type, upstream_id, downstream_type, downstream_id, relation)
             );
 
+            """
+        )
+        # Existing databases can predate columns used by the current indexes.
+        # Apply all additive column migrations before creating schema objects
+        # that reference those columns.
+        self.ensure_schema_columns(db)
+        db.executescript(
+            """
+
             CREATE INDEX IF NOT EXISTS idx_sources_created_at ON sources(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_project_stage_confirmations_project ON project_stage_confirmations(project_id, stage);
             CREATE INDEX IF NOT EXISTS idx_project_briefs_status ON project_briefs(status, updated_at DESC);
@@ -948,38 +1415,26 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_lineage_relation ON lineage_edges(relation);
             """
         )
-        self.ensure_column(db, "chunks", "page_start", "INTEGER")
-        self.ensure_column(db, "chunks", "page_end", "INTEGER")
-        self.ensure_column(db, "chunks", "timestamp_start", "REAL")
-        self.ensure_column(db, "chunks", "timestamp_end", "REAL")
-        self.ensure_column(db, "sources", "status", "TEXT NOT NULL DEFAULT 'new'")
-        self.ensure_column(db, "sources", "canonical_url", "TEXT")
-        self.ensure_column(db, "sources", "alias_urls_json", "TEXT NOT NULL DEFAULT '[]'")
-        self.ensure_column(db, "capture_plans", "canonical_url", "TEXT NOT NULL DEFAULT ''")
-        self.ensure_column(db, "sources", "extraction_quality", "INTEGER NOT NULL DEFAULT 0")
-        self.ensure_column(db, "sources", "quality_flags_json", "TEXT NOT NULL DEFAULT '{}'")
-        self.ensure_column(db, "notes", "project_id", f"TEXT NOT NULL DEFAULT '{self.default_project_id}'")
-        self.ensure_column(db, "claims", "review_note", "TEXT")
-        self.ensure_column(db, "claims", "rejection_reason", "TEXT")
-        self.ensure_column(db, "claims", "reviewer", "TEXT")
-        self.ensure_column(db, "claims", "reviewed_at", "TEXT")
-        self.ensure_column(db, "evidence", "timestamp", "TEXT")
-        self.ensure_column(db, "evidence", "status", "TEXT NOT NULL DEFAULT 'pending_validation'")
-        self.ensure_column(db, "evidence", "review_note", "TEXT")
-        self.ensure_column(db, "evidence", "reviewer", "TEXT")
-        self.ensure_column(db, "evidence", "reviewed_at", "TEXT")
-        self.ensure_column(db, "evidence", "updated_at", "TEXT")
-        self.ensure_column(db, "job_items", "hidden", "INTEGER NOT NULL DEFAULT 0")
-        self.ensure_column(db, "job_items", "cleared_at", "TEXT")
-        self.ensure_column(db, "job_items", "lease_owner", "TEXT")
-        self.ensure_column(db, "job_items", "lease_expires_at", "TEXT")
-        self.ensure_column(db, "job_items", "heartbeat_at", "TEXT")
-        self.ensure_column(db, "job_items", "error_category", "TEXT NOT NULL DEFAULT ''")
-        self.ensure_column(db, "topic_packages", "stale_reason", "TEXT")
-        self.ensure_column(db, "topic_packages", "stale_at", "TEXT")
-        self.ensure_column(db, "deliverables", "stale", "INTEGER NOT NULL DEFAULT 0")
-        self.ensure_column(db, "deliverables", "stale_reason", "TEXT")
-        self.ensure_column(db, "deliverables", "stale_at", "TEXT")
+        db.execute(
+            """
+            UPDATE assumptions
+            SET source_id = (
+              SELECT claims.source_id
+              FROM claims
+              WHERE claims.id = assumptions.claim_id
+                AND claims.project_id = assumptions.project_id
+            )
+            WHERE source_id IS NULL
+              AND claim_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM claims
+                WHERE claims.id = assumptions.claim_id
+                  AND claims.project_id = assumptions.project_id
+                  AND claims.source_id IS NOT NULL
+              )
+            """
+        )
         for table in ("sources", "capture_plans"):
             rows = db.execute(
                 f"SELECT id, url FROM {table} WHERE canonical_url IS NULL OR canonical_url = ''"
@@ -1006,6 +1461,7 @@ class Store:
         db.execute("CREATE INDEX IF NOT EXISTS idx_source_aliases_project_canonical ON source_aliases(project_id, canonical_url)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_source_versions_source ON source_versions(source_id, version_index)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_source_versions_project_canonical ON source_versions(project_id, canonical_url, version_index)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_assumptions_source ON assumptions(source_id, created_at DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_job_items_lease ON job_items(job_id, status, lease_expires_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_job_items_error_category ON job_items(job_id, error_category)")
         for row in db.execute(
@@ -1043,6 +1499,46 @@ class Store:
                     source_id=row["id"],
                     record=alias,
                 )
+
+    def ensure_schema_columns(self, db: sqlite3.Connection) -> None:
+        self.ensure_column(db, "chunks", "page_start", "INTEGER")
+        self.ensure_column(db, "chunks", "page_end", "INTEGER")
+        self.ensure_column(db, "chunks", "timestamp_start", "REAL")
+        self.ensure_column(db, "chunks", "timestamp_end", "REAL")
+        self.ensure_column(db, "sources", "status", "TEXT NOT NULL DEFAULT 'new'")
+        self.ensure_column(db, "sources", "canonical_url", "TEXT")
+        self.ensure_column(db, "sources", "alias_urls_json", "TEXT NOT NULL DEFAULT '[]'")
+        self.ensure_column(db, "capture_plans", "canonical_url", "TEXT NOT NULL DEFAULT ''")
+        self.ensure_column(db, "sources", "extraction_quality", "INTEGER NOT NULL DEFAULT 0")
+        self.ensure_column(db, "sources", "quality_flags_json", "TEXT NOT NULL DEFAULT '{}'")
+        self.ensure_column(db, "notes", "project_id", f"TEXT NOT NULL DEFAULT '{self.default_project_id}'")
+        self.ensure_column(db, "claims", "review_note", "TEXT")
+        self.ensure_column(db, "claims", "rejection_reason", "TEXT")
+        self.ensure_column(db, "claims", "reviewer", "TEXT")
+        self.ensure_column(db, "claims", "reviewed_at", "TEXT")
+        self.ensure_column(db, "evidence", "timestamp", "TEXT")
+        self.ensure_column(db, "evidence", "status", "TEXT NOT NULL DEFAULT 'pending_validation'")
+        self.ensure_column(db, "evidence", "review_note", "TEXT")
+        self.ensure_column(db, "evidence", "reviewer", "TEXT")
+        self.ensure_column(db, "evidence", "reviewed_at", "TEXT")
+        self.ensure_column(db, "evidence", "updated_at", "TEXT")
+        self.ensure_column(
+            db,
+            "assumptions",
+            "source_id",
+            "TEXT REFERENCES sources(id) ON DELETE SET NULL",
+        )
+        self.ensure_column(db, "job_items", "hidden", "INTEGER NOT NULL DEFAULT 0")
+        self.ensure_column(db, "job_items", "cleared_at", "TEXT")
+        self.ensure_column(db, "job_items", "lease_owner", "TEXT")
+        self.ensure_column(db, "job_items", "lease_expires_at", "TEXT")
+        self.ensure_column(db, "job_items", "heartbeat_at", "TEXT")
+        self.ensure_column(db, "job_items", "error_category", "TEXT NOT NULL DEFAULT ''")
+        self.ensure_column(db, "topic_packages", "stale_reason", "TEXT")
+        self.ensure_column(db, "topic_packages", "stale_at", "TEXT")
+        self.ensure_column(db, "deliverables", "stale", "INTEGER NOT NULL DEFAULT 0")
+        self.ensure_column(db, "deliverables", "stale_reason", "TEXT")
+        self.ensure_column(db, "deliverables", "stale_at", "TEXT")
 
     def ensure_column(self, db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -1115,7 +1611,11 @@ When working in this QC Smart Reader vault:
         return {
             "ok": True,
             "app": APP_NAME,
-            "version": "0.8.3",
+            "version": SERVICE_VERSION,
+            "service_version": SERVICE_VERSION,
+            "api_version": API_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "min_extension_version": MIN_EXTENSION_VERSION,
             "data_dir": str(self.data_dir),
             "vault_dir": str(self.vault_dir),
             "db_path": str(self.db_path),
@@ -1976,6 +2476,78 @@ source_type: {plan['source_type']}
             raise ValueError(f"unknown project_id: {project_id}")
         return project_id
 
+    def validate_project_reference(
+        self,
+        db: sqlite3.Connection,
+        *,
+        project_id: str,
+        record_type: str,
+        record_id: str | None,
+        field: str,
+        required: bool = True,
+    ) -> bool:
+        record_id = normalize_text(record_id or "")
+        if not record_id:
+            return False
+        project_queries = {
+            "source": "SELECT project_id FROM sources WHERE id = ?",
+            "chunk": """
+                SELECT sources.project_id
+                FROM chunks
+                JOIN documents ON documents.id = chunks.document_id
+                JOIN sources ON sources.id = documents.source_id
+                WHERE chunks.id = ?
+            """,
+            "entity": "SELECT project_id FROM entities WHERE id = ?",
+            "claim": "SELECT project_id FROM claims WHERE id = ?",
+            "evidence": """
+                SELECT claims.project_id
+                FROM evidence
+                JOIN claims ON claims.id = evidence.claim_id
+                WHERE evidence.id = ?
+            """,
+            "capture_plan": "SELECT project_id FROM capture_plans WHERE id = ?",
+            "topic_package": "SELECT project_id FROM topic_packages WHERE id = ?",
+            "deliverable": "SELECT project_id FROM deliverables WHERE id = ?",
+            "strategy_handoff": "SELECT project_id FROM strategy_handoffs WHERE id = ?",
+            "backtest_result": "SELECT project_id FROM backtest_results WHERE id = ?",
+            "assumption": "SELECT project_id FROM assumptions WHERE id = ?",
+            "risk": "SELECT project_id FROM risks WHERE id = ?",
+        }
+        query = project_queries.get(record_type)
+        if not query:
+            raise ValueError(f"unsupported project reference type: {record_type}")
+        row = db.execute(query, (record_id,)).fetchone()
+        if not row:
+            if required:
+                raise ValueError(f"{field} does not exist: {record_id}")
+            return False
+        if row["project_id"] != project_id:
+            raise ValueError(
+                f"{field} does not belong to project_id '{project_id}': {record_id}"
+            )
+        return True
+
+    def validate_project_references(
+        self,
+        db: sqlite3.Connection,
+        *,
+        project_id: str,
+        record_type: str,
+        record_ids: list[str],
+        field: str,
+        required: bool = True,
+    ) -> None:
+        for record_id in self.unique_ids(record_ids):
+            self.validate_project_reference(
+                db,
+                project_id=project_id,
+                record_type=record_type,
+                record_id=record_id,
+                field=field,
+                required=required,
+            )
+
     def project_id_for_source(self, source_id: str | None) -> str:
         source_id = normalize_text(source_id or "")
         if not source_id:
@@ -2183,14 +2755,28 @@ source_type: {plan['source_type']}
             floor = normalize_text(item.get("floor") or block.get("floor") or block.get("id") or "")
             filename = self.infer_attachment_filename(item, url)
             label = normalize_text(item.get("text") or item.get("title") or item.get("label") or filename)
+            status = normalize_text(item.get("status") or "").lower()
+            local_path = normalize_text(
+                item.get("downloaded_path")
+                or item.get("downloadedPath")
+                or item.get("local_path")
+                or item.get("localPath")
+                or item.get("path")
+                or ""
+            )
             metadata = {
                 key: value
                 for key, value in item.items()
-                if key not in {"href", "url", "src", "filename", "file_name", "name", "text", "title", "label", "context", "paragraph", "surrounding_text", "floor"}
+                if key not in {
+                    "href", "url", "src", "filename", "file_name", "name", "text", "title",
+                    "label", "context", "paragraph", "surrounding_text", "floor", "status",
+                    "downloaded_path", "downloadedPath", "local_path", "localPath", "path",
+                }
             }
+            attachment_fingerprint = NULL_JOIN.join([source_id, key])
             output.append(
                 {
-                    "id": f"att_{hashlib.sha256(f'{source_id}\0{key}'.encode('utf-8')).hexdigest()[:14]}",
+                    "id": "att_" + hashlib.sha256(attachment_fingerprint.encode("utf-8")).hexdigest()[:14],
                     "project_id": project_id,
                     "source_id": source_id,
                     "url": url,
@@ -2199,9 +2785,9 @@ source_type: {plan['source_type']}
                     "label": label,
                     "context": context,
                     "floor": floor,
-                    "status": "linked",
-                    "downloaded_path": "",
-                    "retry_error": "",
+                    "status": status or ("downloaded" if local_path else "linked"),
+                    "downloaded_path": local_path,
+                    "retry_error": normalize_text(item.get("retry_error") or item.get("retryError") or ""),
                     "metadata": metadata,
                 }
             )
@@ -2226,10 +2812,14 @@ source_type: {plan['source_type']}
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id, canonical_url) DO UPDATE SET
+                  url = excluded.url,
                   filename = excluded.filename,
                   label = excluded.label,
                   context = excluded.context,
                   floor = excluded.floor,
+                  status = excluded.status,
+                  downloaded_path = excluded.downloaded_path,
+                  retry_error = excluded.retry_error,
                   metadata_json = excluded.metadata_json,
                   updated_at = excluded.updated_at
                 """,
@@ -2319,7 +2909,8 @@ source_type: {plan['source_type']}
         site = normalize_text(record.get("site") or infer_site(url))
         captured_at = normalize_text(record.get("captured_at") or utc_now())
         now = utc_now()
-        alias_id = f"salias_{hashlib.sha256(f'{source_id}\0{url}\0{canonical_url}\0{captured_at}'.encode('utf-8')).hexdigest()[:14]}"
+        alias_fingerprint = NULL_JOIN.join([source_id, url, canonical_url, captured_at])
+        alias_id = "salias_" + hashlib.sha256(alias_fingerprint.encode("utf-8")).hexdigest()[:14]
         db.execute(
             """
             INSERT INTO source_aliases(
@@ -2384,7 +2975,8 @@ source_type: {plan['source_type']}
             or 1
         )
         now = utc_now()
-        record_id = f"sver_{hashlib.sha256(f'{project_id}\0{canonical_url}\0{source_id}'.encode('utf-8')).hexdigest()[:14]}"
+        version_fingerprint = NULL_JOIN.join([project_id, canonical_url, source_id])
+        record_id = "sver_" + hashlib.sha256(version_fingerprint.encode("utf-8")).hexdigest()[:14]
         db.execute(
             """
             INSERT INTO source_versions(
@@ -2675,6 +3267,159 @@ source_type: {plan['source_type']}
             **metrics,
         }
 
+    def revalidate_superseded_source_evidence(
+        self,
+        *,
+        superseded_source_id: str,
+        replacement_source_id: str,
+        canonical_url: str,
+    ) -> dict:
+        """Make source currency explicit without invalidating historical quotes.
+
+        Source rows and chunks are immutable, so an old quote can remain an exact
+        citation after a newer canonical capture arrives.  Its *review* is no
+        longer current, though.  Demote reviewed evidence from the superseded
+        source and only demote a reviewed claim when no other reviewed, valid
+        evidence remains.
+        """
+
+        now = utc_now()
+        reason = (
+            f"Source `{superseded_source_id}` was superseded by newer capture "
+            f"`{replacement_source_id}` for canonical URL `{canonical_url}`; revalidation required."
+        )
+        evidence_ids: list[str] = []
+        affected_claim_ids: set[str] = set()
+        downgraded_claim_ids: list[str] = []
+        project_id = self.default_project_id
+
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT evidence.*, claims.project_id, claims.status AS claim_status
+                FROM evidence
+                JOIN claims ON claims.id = evidence.claim_id
+                WHERE evidence.source_id = ? AND evidence.status = 'reviewed'
+                ORDER BY evidence.created_at ASC
+                """,
+                (superseded_source_id,),
+            ).fetchall()
+            if rows:
+                project_id = rows[0]["project_id"]
+            else:
+                source_row = db.execute(
+                    "SELECT project_id FROM sources WHERE id = ?",
+                    (superseded_source_id,),
+                ).fetchone()
+                if source_row:
+                    project_id = source_row["project_id"]
+
+            for row in rows:
+                evidence_ids.append(row["id"])
+                affected_claim_ids.add(row["claim_id"])
+                db.execute(
+                    """
+                    UPDATE evidence
+                    SET status = 'pending_validation',
+                        review_note = CASE
+                          WHEN COALESCE(review_note, '') = '' THEN ?
+                          ELSE review_note || '\n' || ?
+                        END,
+                        reviewed_at = '',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (reason, reason, now, row["id"]),
+                )
+                self.insert_claim_event(
+                    db,
+                    project_id=row["project_id"],
+                    claim_id=row["claim_id"],
+                    event_type="evidence_revalidation_required",
+                    note=reason,
+                    metadata={
+                        "evidence_id": row["id"],
+                        "superseded_source_id": superseded_source_id,
+                        "replacement_source_id": replacement_source_id,
+                        "canonical_url": canonical_url,
+                    },
+                    created_at=now,
+                )
+
+            for claim_id in sorted(affected_claim_ids):
+                claim = db.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
+                if not claim or claim["status"] != "reviewed":
+                    continue
+                alternative_rows = db.execute(
+                    """
+                    SELECT *
+                    FROM evidence
+                    WHERE claim_id = ?
+                      AND source_id != ?
+                      AND status = 'reviewed'
+                    ORDER BY created_at ASC
+                    """,
+                    (claim_id, superseded_source_id),
+                ).fetchall()
+                has_alternative = any(self.evidence_citation_is_valid(db, row) for row in alternative_rows)
+                if has_alternative:
+                    continue
+                db.execute(
+                    """
+                    UPDATE claims
+                    SET status = 'pending_validation',
+                        review_note = CASE
+                          WHEN COALESCE(review_note, '') = '' THEN ?
+                          ELSE review_note || '\n' || ?
+                        END,
+                        reviewed_at = '',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (reason, reason, now, claim_id),
+                )
+                downgraded_claim_ids.append(claim_id)
+                self.insert_claim_event(
+                    db,
+                    project_id=claim["project_id"],
+                    claim_id=claim_id,
+                    event_type="claim_revalidation_required",
+                    note=reason,
+                    metadata={
+                        "superseded_source_id": superseded_source_id,
+                        "replacement_source_id": replacement_source_id,
+                        "canonical_url": canonical_url,
+                        "evidence_ids": [row["id"] for row in rows if row["claim_id"] == claim_id],
+                    },
+                    created_at=now,
+                )
+            db.commit()
+
+        for evidence_id in evidence_ids:
+            self.mark_lineage_dependents_stale(
+                project_id=project_id,
+                upstream_type="evidence",
+                upstream_id=evidence_id,
+                reason=reason,
+            )
+        for claim_id in downgraded_claim_ids:
+            self.mark_lineage_dependents_stale(
+                project_id=project_id,
+                upstream_type="claim",
+                upstream_id=claim_id,
+                reason=reason,
+            )
+        if evidence_ids or downgraded_claim_ids:
+            self.rebuild_index()
+        return {
+            "superseded_source_id": superseded_source_id,
+            "replacement_source_id": replacement_source_id,
+            "reviewed_evidence_demoted": len(evidence_ids),
+            "reviewed_claims_demoted": len(downgraded_claim_ids),
+            "evidence_ids": evidence_ids,
+            "claim_ids": downgraded_claim_ids,
+        }
+
     def capture(self, payload: dict) -> dict:
         source = payload.get("source") or {}
         content = payload.get("content") or {}
@@ -2720,6 +3465,12 @@ source_type: {plan['source_type']}
         superseded_sources: list[dict] = []
 
         with self.connect() as db:
+            # Serialize the initial existence check with the insert. Without a
+            # write reservation, two first captures of the same content can
+            # both write the same Vault paths before one loses the database
+            # uniqueness race. The later caller must instead observe the
+            # committed source and merge aliases/attachments as a duplicate.
+            db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
                 "SELECT * FROM sources WHERE project_id = ? AND content_hash = ?", (project_id, content_hash)
             ).fetchone()
@@ -2893,19 +3644,69 @@ source_type: {plan['source_type']}
             )
             db.commit()
 
-        self.append_log(f"ingest | {title} | {source_id} | {initial_status}")
+        warnings: list[dict] = []
+
+        def post_commit_warning(code: str, message: str, error: Exception) -> None:
+            warnings.append(
+                {
+                    "code": code,
+                    "message": f"{message}: {short_text(str(error), 500)}",
+                    "retry_capture": False,
+                }
+            )
+
+        try:
+            self.append_log(f"ingest | {title} | {source_id} | {initial_status}")
+        except Exception as error:
+            post_commit_warning(
+                "capture_activity_log_failed",
+                "Capture committed, but the Vault activity log was not updated",
+                error,
+            )
         for superseded_source in superseded_sources:
-            if (superseded_source.get("status") or "new") == "reviewed":
-                self.mark_lineage_dependents_stale(
-                    project_id=superseded_source["project_id"],
-                    upstream_type="source",
-                    upstream_id=superseded_source["id"],
-                    reason=(
-                        f"source `{superseded_source['id']}` was superseded by newer capture `{source_id}` "
-                        f"for canonical URL `{canonical_url}`"
-                    ),
+            try:
+                self.revalidate_superseded_source_evidence(
+                    superseded_source_id=superseded_source["id"],
+                    replacement_source_id=source_id,
+                    canonical_url=canonical_url,
                 )
-        self.rebuild_index()
+            except Exception as error:
+                post_commit_warning(
+                    "capture_evidence_revalidation_failed",
+                    (
+                        "Capture committed, but evidence revalidation did not complete for "
+                        f"superseded source {superseded_source['id']}"
+                    ),
+                    error,
+                )
+            if (superseded_source.get("status") or "new") == "reviewed":
+                try:
+                    self.mark_lineage_dependents_stale(
+                        project_id=superseded_source["project_id"],
+                        upstream_type="source",
+                        upstream_id=superseded_source["id"],
+                        reason=(
+                            f"source `{superseded_source['id']}` was superseded by newer capture `{source_id}` "
+                            f"for canonical URL `{canonical_url}`"
+                        ),
+                    )
+                except Exception as error:
+                    post_commit_warning(
+                        "capture_lineage_stale_mark_failed",
+                        (
+                            "Capture committed, but dependent lineage was not marked stale for "
+                            f"superseded source {superseded_source['id']}"
+                        ),
+                        error,
+                    )
+        try:
+            self.rebuild_index()
+        except Exception as error:
+            post_commit_warning(
+                "capture_index_rebuild_failed",
+                "Capture committed, but the rebuildable Vault index was not refreshed",
+                error,
+            )
         return {
             "ok": True,
             "duplicate": duplicate,
@@ -2922,6 +3723,7 @@ source_type: {plan['source_type']}
                 for item in chunks
             ],
             "attachments": attachments,
+            "warnings": warnings,
         }
 
     def write_source_files(
@@ -2942,7 +3744,10 @@ source_type: {plan['source_type']}
         quality_flags: dict,
         status: str,
     ) -> tuple[Path, Path]:
-        base_name = f"{today_slug()}-{slugify(title)}-{content_hash[:8]}"
+        # source_id includes the project scope. Keeping it in the filename
+        # prevents two valid sources in different projects from sharing and
+        # overwriting the same Vault paths.
+        base_name = f"{today_slug()}-{slugify(title)}-{content_hash[:8]}-{source_id}"
         raw_path = self.vault_dir / "原始资料" / "inbox" / f"{base_name}.md"
         summary_path = self.vault_dir / "wiki" / "sources" / f"{base_name}.md"
 
@@ -2963,11 +3768,12 @@ content_hash: {content_hash}
 browser_tab_id: {browser.get("tab_id", "")}
 ---
 """
-        raw_path.write_text(
+        atomic_write_text(
+            raw_path,
             f"{frontmatter}\n# {title}\n\nSource: {url}\n\n## 原文\n\n{text}\n",
-            encoding="utf-8",
         )
-        summary_path.write_text(
+        atomic_write_text(
+            summary_path,
             f"""{frontmatter}
 # {title}
 
@@ -2995,7 +3801,6 @@ browser_tab_id: {browser.get("tab_id", "")}
 
 [[../../原始资料/inbox/{raw_path.name}]]
 """,
-            encoding="utf-8",
         )
         return raw_path, summary_path
 
@@ -3213,22 +4018,152 @@ browser_tab_id: {browser.get("tab_id", "")}
             return f"timestamp:{self.timestamp_label(start)}"
         return f"timestamp:{self.timestamp_label(start)}-{self.timestamp_label(end)}"
 
+    def pdf_text_is_low(self, pages: list[dict]) -> bool:
+        text = "\n\n".join(normalize_text(page.get("text") or "") for page in pages if page.get("text"))
+        return len(text.strip()) < max(200, len(pages) * 40)
+
+    def pdf_ocr_is_enabled(self, payload: dict) -> bool:
+        if "ocr" not in payload:
+            return True
+        value = payload.get("ocr")
+        if value is False or value is None:
+            return False
+        if isinstance(value, str) and value.strip().lower() in {"0", "false", "no", "off", "disabled"}:
+            return False
+        return True
+
+    def merge_pdf_ocr_pages(self, pages: list[dict], ocr_pages: list[dict]) -> tuple[list[dict], int]:
+        recognized_by_page: dict[int, str] = {}
+        for item in ocr_pages if isinstance(ocr_pages, list) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                page_number = int(item.get("page"))
+            except (TypeError, ValueError):
+                continue
+            text = normalize_text(item.get("text") or "")
+            if text:
+                recognized_by_page[page_number] = text
+
+        merged: list[dict] = []
+        pages_replaced = 0
+        for index, page in enumerate(pages, start=1):
+            current = dict(page)
+            try:
+                page_number = int(page.get("page") or index)
+            except (TypeError, ValueError):
+                page_number = index
+            existing_text = normalize_text(page.get("text") or "")
+            recognized_text = recognized_by_page.get(page_number, "")
+            existing_completeness = len(re.sub(r"\s+", "", existing_text))
+            recognized_completeness = len(re.sub(r"\s+", "", recognized_text))
+            if recognized_completeness > existing_completeness:
+                current["text"] = recognized_text
+                pages_replaced += 1
+            else:
+                current["text"] = existing_text
+            merged.append(current)
+        return merged, pages_replaced
+
+    def apply_pdf_ocr(self, pdf_path: Path, pages: list[dict], payload: dict) -> tuple[list[dict], dict]:
+        metadata = {
+            "attempted": False,
+            "applied": False,
+            "engine": PDF_OCR_ENGINE,
+            "error": "",
+            "pages_replaced": 0,
+            "reason": "not_needed",
+        }
+        if not self.pdf_text_is_low(pages):
+            return [dict(page) for page in pages], metadata
+        if not self.pdf_ocr_is_enabled(payload):
+            metadata["reason"] = "disabled"
+            return [dict(page) for page in pages], metadata
+
+        metadata["attempted"] = True
+        try:
+            result = self.run_pdf_ocr(pdf_path)
+            if normalize_text(result.get("engine") or ""):
+                metadata["engine"] = normalize_text(result.get("engine") or "")
+            merged, pages_replaced = self.merge_pdf_ocr_pages(pages, result.get("pages") or [])
+            metadata["pages_replaced"] = pages_replaced
+            metadata["applied"] = pages_replaced > 0
+            metadata["reason"] = "applied" if pages_replaced else "no_text_recognized"
+            return merged, metadata
+        except Exception as error:
+            metadata["error"] = short_text(str(error), 1000)
+            metadata["reason"] = "failed"
+            return [dict(page) for page in pages], metadata
+
+    def run_pdf_ocr(self, pdf_path: Path) -> dict:
+        swift = shutil.which("swift")
+        if not swift:
+            raise ValueError(
+                "macOS OCR requires the system Swift toolchain; install Apple Command Line Tools "
+                "or retry with ocr:false"
+            )
+        if not PDF_OCR_WORKER.exists():
+            raise ValueError(f"macOS OCR worker is missing: {PDF_OCR_WORKER}")
+        try:
+            result = subprocess.run(
+                [swift, str(PDF_OCR_WORKER), str(pdf_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=PDF_OCR_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            detail = normalize_text(error.stderr or "")
+            suffix = f": {short_text(detail, 500)}" if detail else ""
+            raise ValueError(f"macOS OCR timed out after {PDF_OCR_TIMEOUT_SECONDS} seconds{suffix}") from error
+        except OSError as error:
+            raise ValueError(f"failed to start macOS OCR worker: {error}") from error
+        if result.returncode != 0:
+            detail = normalize_text(result.stderr or result.stdout or "macOS OCR worker failed")
+            raise ValueError(f"macOS OCR worker failed (exit {result.returncode}): {short_text(detail, 1000)}")
+        try:
+            output = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            detail = normalize_text(result.stderr or "")
+            suffix = f"; stderr: {short_text(detail, 500)}" if detail else ""
+            raise ValueError(f"macOS OCR worker returned invalid JSON: {error}{suffix}") from error
+        if not isinstance(output, dict) or not isinstance(output.get("pages"), list):
+            raise ValueError("macOS OCR worker returned JSON without a pages array")
+        return output
+
     def ingest_pdf(self, payload: dict) -> dict:
         pdf_path, source_url, cleanup_path = self.resolve_pdf_input(payload)
+        retain_cleanup = False
+        artifact_path: Path | None = None
         try:
             extracted = self.extract_pdf(pdf_path)
             title = payload.get("title") or extracted["title"] or pdf_path.stem
-            pages = extracted["pages"]
+            pages, ocr_metadata = self.apply_pdf_ocr(pdf_path, extracted["pages"], payload)
             page_markdown = "\n\n".join(
                 f"## Page {page['page']}\n\n{page['text'] or '[No text extracted from this page]'}"
                 for page in pages
             )
             metadata = extracted["metadata"]
             text = "\n\n".join(page["text"] for page in pages if page["text"])
-            low_text = len(text.strip()) < max(200, len(pages) * 40)
+            low_text = self.pdf_text_is_low(pages)
+            profile = "pdf-pypdf+macos-vision-ocr" if ocr_metadata["applied"] else "pdf-pypdf"
             if not text.strip():
                 page_markdown += "\n\n> No text layer was extracted. This is likely a scanned or image-only PDF."
 
+            raw_sha256 = self.file_sha256(pdf_path)
+            try:
+                artifact_path = self.copy_pdf_to_vault(
+                    pdf_path,
+                    title,
+                    "",
+                    raw_sha256=raw_sha256,
+                )
+            except OSError as error:
+                retain_cleanup = cleanup_path is not None
+                retained = f"; downloaded PDF retained at {cleanup_path}" if cleanup_path else ""
+                raise ValueError(f"could not preserve immutable PDF artifact: {error}{retained}") from error
+
+            artifact_url = f"pdf-sha256:{raw_sha256}"
             capture_payload = {
                 "project_id": payload.get("project_id") or self.default_project_id,
                 "source": {
@@ -3244,28 +4179,55 @@ browser_tab_id: {browser.get("tab_id", "")}
                     "text": page_markdown,
                     "markdown": page_markdown,
                     "pages": pages,
+                    "attachments": [
+                        {
+                            "url": artifact_url,
+                            "filename": pdf_path.name,
+                            "label": "Immutable original PDF",
+                            "status": "downloaded",
+                            "downloaded_path": str(artifact_path),
+                            "raw_sha256": raw_sha256,
+                            "byte_size": pdf_path.stat().st_size,
+                            "source_url": source_url,
+                        }
+                    ],
                     "stats": {
-                        "profile": "pdf-pypdf",
+                        "profile": profile,
                         "pages": len(pages),
                         "textChars": len(text),
                         "lowText": low_text,
+                        "ocr": ocr_metadata,
                     },
                 },
                 "browser": {},
             }
-            capture_result = self.capture(capture_payload)
+            try:
+                capture_result = self.capture(capture_payload)
+            except Exception as error:
+                retained = f"; immutable PDF retained at {artifact_path}" if artifact_path else ""
+                raise ValueError(f"PDF metadata commit failed: {error}{retained}") from error
             source_id = capture_result["source"]["id"]
-            existing_pdf = self.find_pdf_for_source(source_id) if capture_result.get("duplicate") else None
-            copied_pdf = existing_pdf or self.copy_pdf_to_vault(pdf_path, title, source_id)
+            artifact = next(
+                (
+                    item
+                    for item in capture_result.get("attachments") or []
+                    if (item.get("metadata") or {}).get("raw_sha256") == raw_sha256
+                ),
+                {},
+            )
             capture_result["pdf"] = {
-                "path": str(copied_pdf),
+                "path": str(artifact_path),
+                "artifact_id": artifact.get("id") or "",
+                "raw_sha256": raw_sha256,
                 "pages": len(pages),
                 "metadata": metadata,
                 "low_text": low_text,
+                "profile": profile,
+                "ocr": ocr_metadata,
             }
             return capture_result
         finally:
-            if cleanup_path:
+            if cleanup_path and not retain_cleanup:
                 try:
                     cleanup_path.unlink(missing_ok=True)
                 except OSError:
@@ -3273,40 +4235,85 @@ browser_tab_id: {browser.get("tab_id", "")}
 
     def ingest_youtube_transcript(self, payload: dict) -> dict:
         url = normalize_text(payload.get("url") or "")
-        video_id = normalize_text(payload.get("video_id") or self.infer_youtube_video_id(url))
-        if not video_id and not url:
-            raise ValueError("YouTube url or video_id is required")
-        title = normalize_text(payload.get("title") or f"YouTube {video_id or url}")
         raw_segments = payload.get("segments") or payload.get("transcript_segments") or []
         transcript_text = normalize_text(payload.get("transcript") or payload.get("text") or "")
         if not raw_segments and transcript_text:
             raw_segments = transcript_text.splitlines()
+        manual_transcript = bool(raw_segments)
+
+        effective_payload = dict(payload)
+        transcript_source = "manual"
+        transcript_language = normalize_text(payload.get("language") or "")
+        if manual_transcript:
+            inferred_video_id = self.infer_youtube_video_id(url) if url else ""
+            video_id = normalize_text(inferred_video_id or payload.get("video_id") or "")
+            if not video_id and not url:
+                raise ValueError("YouTube url or video_id is required")
+        else:
+            video_id = self.infer_youtube_video_id(url, strict=True)
+            if not video_id:
+                raise ValueError(
+                    "A valid YouTube URL with an 11-character video id is required for automatic subtitles"
+                )
+            canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+            downloaded = self.fetch_youtube_transcript_with_ytdlp(
+                canonical_url,
+                transcript_language,
+            )
+            raw_segments = downloaded["segments"]
+            transcript_source = downloaded["source"]
+            transcript_language = downloaded["language"]
+            downloaded_metadata = downloaded["metadata"]
+            if not normalize_text(effective_payload.get("title") or ""):
+                effective_payload["title"] = downloaded_metadata.get("title") or ""
+            if not normalize_text(effective_payload.get("channel") or effective_payload.get("author") or ""):
+                effective_payload["channel"] = downloaded_metadata.get("channel") or ""
+            if not normalize_text(effective_payload.get("published_at") or ""):
+                effective_payload["published_at"] = downloaded_metadata.get("published_at") or ""
+            if effective_payload.get("duration") in {None, ""}:
+                effective_payload["duration"] = downloaded_metadata.get("duration")
+            effective_payload["language"] = transcript_language
+
+        canonical_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else url
+        title = normalize_text(effective_payload.get("title") or f"YouTube {video_id or url}")
         segments = self.normalize_transcript_segments(raw_segments)
         if not segments:
-            raise ValueError("transcript text or segments are required")
-        transcript_markdown = self.youtube_transcript_markdown(title, url, video_id, segments, payload)
+            raise ValueError("transcript text or segments are required; paste a transcript and retry")
+        transcript_markdown = self.youtube_transcript_markdown(
+            title,
+            canonical_url,
+            video_id,
+            segments,
+            effective_payload,
+        )
         capture_result = self.capture(
             {
-                "project_id": payload.get("project_id") or self.default_project_id,
+                "project_id": effective_payload.get("project_id") or self.default_project_id,
                 "source": {
                     "kind": "video",
                     "site": "youtube",
-                    "url": url or (f"https://www.youtube.com/watch?v={video_id}" if video_id else ""),
-                    "canonical_url": f"https://www.youtube.com/watch?v={video_id}" if video_id else url,
+                    "url": url or canonical_url,
+                    "canonical_url": canonical_url,
                     "title": title,
-                    "author": normalize_text(payload.get("channel") or payload.get("author") or ""),
-                    "published_at": normalize_text(payload.get("published_at") or ""),
-                    "captured_at": payload.get("captured_at") or utc_now(),
+                    "author": normalize_text(
+                        effective_payload.get("channel") or effective_payload.get("author") or ""
+                    ),
+                    "published_at": normalize_text(effective_payload.get("published_at") or ""),
+                    "captured_at": effective_payload.get("captured_at") or utc_now(),
                 },
                 "content": {
                     "text": transcript_markdown,
                     "markdown": transcript_markdown,
                     "transcript_segments": segments,
                     "stats": {
-                        "profile": "youtube-transcript",
+                        "profile": (
+                            "youtube-transcript" if transcript_source == "manual" else "youtube-transcript-auto"
+                        ),
                         "quality": 75 if len(segments) >= 3 else 55,
                         "textChars": len(transcript_markdown),
                         "segments": len(segments),
+                        "transcriptSource": transcript_source,
+                        "language": transcript_language,
                     },
                 },
                 "browser": {},
@@ -3314,27 +4321,213 @@ browser_tab_id: {browser.get("tab_id", "")}
         )
         capture_result["youtube"] = {
             "video_id": video_id,
-            "url": url or (f"https://www.youtube.com/watch?v={video_id}" if video_id else ""),
+            "url": canonical_url,
             "segments": len(segments),
-            "duration": payload.get("duration") or segments[-1].get("end") or segments[-1].get("start"),
+            "duration": (
+                effective_payload.get("duration")
+                if effective_payload.get("duration") not in {None, ""}
+                else segments[-1].get("end") or segments[-1].get("start")
+            ),
+            "source": transcript_source,
+            "caption_source": transcript_source,
+            "language": transcript_language,
         }
         return capture_result
 
-    def infer_youtube_video_id(self, url: str) -> str:
+    def infer_youtube_video_id(self, url: str, strict: bool = False) -> str:
         if not url:
             return ""
         parsed = urlparse(url)
-        host = parsed.netloc.lower()
-        if "youtu.be" in host:
-            return parsed.path.strip("/").split("/")[0]
-        if "youtube.com" in host:
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return ""
+        host = (parsed.hostname or "").lower().rstrip(".")
+        candidate = ""
+        if host in {"youtu.be", "www.youtu.be"}:
+            candidate = unquote(parsed.path.strip("/").split("/")[0])
+        elif host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
             query = parse_qs(parsed.query)
             if query.get("v"):
-                return query["v"][0]
-            match = re.search(r"/(?:shorts|embed)/([^/?#]+)", parsed.path)
-            if match:
-                return match.group(1)
-        return ""
+                candidate = query["v"][0]
+            else:
+                match = re.search(r"/(?:shorts|embed)/([^/?#]+)", parsed.path)
+                if match:
+                    candidate = unquote(match.group(1))
+        pattern = r"[A-Za-z0-9_-]{11}" if strict else r"[A-Za-z0-9_-]{6,64}"
+        return candidate if re.fullmatch(pattern, candidate or "") else ""
+
+    def youtube_language_order(self, preferred_language: str) -> list[str]:
+        output: list[str] = []
+        seen: set[str] = set()
+        preferred = [item for item in str(preferred_language or "").split(",")]
+        for language in [*preferred, "zh-Hans", "zh-Hant", "zh", "en"]:
+            normalized = normalize_text(language)
+            key = normalized.casefold()
+            if normalized and key not in seen:
+                seen.add(key)
+                output.append(normalized)
+        return output
+
+    def select_youtube_subtitle_track(self, metadata: dict, preferred_language: str) -> dict | None:
+        language_order = self.youtube_language_order(preferred_language)
+        for source_key, source_name in (("subtitles", "manual"), ("automatic_captions", "automatic")):
+            catalog = metadata.get(source_key) or {}
+            if not isinstance(catalog, dict):
+                continue
+            available = {str(language).casefold(): (str(language), tracks) for language, tracks in catalog.items()}
+            for requested in language_order:
+                matched = available.get(requested.casefold())
+                if not matched:
+                    continue
+                language, raw_tracks = matched
+                tracks = [item for item in raw_tracks if isinstance(item, dict)] if isinstance(raw_tracks, list) else []
+                tracks.sort(key=lambda item: 0 if normalize_text(item.get("ext") or "").lower() == "json3" else 1)
+                for track in tracks:
+                    track_url = normalize_text(track.get("url") or "")
+                    parsed = urlparse(track_url)
+                    if parsed.scheme in {"http", "https"} and parsed.netloc:
+                        return {
+                            "source": source_name,
+                            "language": language,
+                            "url": track_url,
+                            "format": normalize_text(track.get("ext") or ""),
+                        }
+        return None
+
+    def parse_youtube_json3_segments(self, payload: dict) -> list[dict]:
+        events = payload.get("events") or []
+        if not isinstance(events, list):
+            raise ValueError("subtitle JSON does not contain an events array")
+        output: list[dict] = []
+        for event in events:
+            if not isinstance(event, dict) or not isinstance(event.get("segs"), list):
+                continue
+            text = normalize_text(
+                "".join(
+                    str(segment.get("utf8") or "")
+                    for segment in event["segs"]
+                    if isinstance(segment, dict)
+                )
+            )
+            text = re.sub(r"[ \t]+", " ", text)
+            if not text:
+                continue
+            try:
+                start = max(0.0, float(event.get("tStartMs") or 0) / 1000.0)
+                duration = max(0.0, float(event.get("dDurationMs") or 0) / 1000.0)
+            except (TypeError, ValueError):
+                continue
+            end = start + duration
+            if output and output[-1]["text"] == text:
+                output[-1]["end"] = max(float(output[-1]["end"]), end)
+                continue
+            output.append({"text": text, "start": start, "end": end})
+        return output
+
+    def youtube_published_date(self, value: str) -> str:
+        text = normalize_text(value)
+        if re.fullmatch(r"\d{8}", text):
+            try:
+                return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
+            except ValueError:
+                return text
+        return text
+
+    def fetch_youtube_transcript_with_ytdlp(self, canonical_url: str, preferred_language: str) -> dict:
+        yt_dlp = shutil.which("yt-dlp")
+        if not yt_dlp:
+            raise ValueError(
+                "yt-dlp was not found on PATH; install it (for example, brew install yt-dlp) "
+                "or paste transcript text/segments"
+            )
+        command = [
+            yt_dlp,
+            "--dump-single-json",
+            "--skip-download",
+            "--no-playlist",
+            "--no-warnings",
+            "--ignore-config",
+            "--no-cookies",
+            "--no-cookies-from-browser",
+            canonical_url,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=YOUTUBE_METADATA_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            detail = normalize_text(error.stderr or "")
+            suffix = f": {short_text(detail, 500)}" if detail else ""
+            raise ValueError(
+                f"yt-dlp timed out after {YOUTUBE_METADATA_TIMEOUT_SECONDS} seconds{suffix}; "
+                "retry or paste transcript text/segments"
+            ) from error
+        except OSError as error:
+            raise ValueError(f"failed to start yt-dlp: {error}; paste transcript text/segments") from error
+        if result.returncode != 0:
+            detail = normalize_text(result.stderr or result.stdout or "yt-dlp failed")
+            raise ValueError(
+                f"yt-dlp could not inspect public subtitles (exit {result.returncode}): "
+                f"{short_text(detail, 1000)}; retry or paste transcript text/segments"
+            )
+        stdout = result.stdout or ""
+        if len(stdout.encode("utf-8")) > MAX_YOUTUBE_METADATA_BYTES:
+            raise ValueError(
+                f"yt-dlp metadata exceeded the {MAX_YOUTUBE_METADATA_BYTES} byte limit; "
+                "paste transcript text/segments"
+            )
+        try:
+            metadata = json.loads(stdout)
+        except json.JSONDecodeError as error:
+            detail = normalize_text(result.stderr or "")
+            suffix = f"; stderr: {short_text(detail, 500)}" if detail else ""
+            raise ValueError(f"yt-dlp returned invalid JSON: {error}{suffix}; paste transcript text/segments") from error
+        if not isinstance(metadata, dict):
+            raise ValueError("yt-dlp returned invalid metadata; paste transcript text/segments")
+        track = self.select_youtube_subtitle_track(metadata, preferred_language)
+        if not track:
+            raise ValueError(
+                "No public subtitles were found in the requested/Chinese/English languages; "
+                "paste transcript text/segments"
+            )
+
+        try:
+            data = self.download_public_resource(
+                track["url"],
+                max_bytes=MAX_YOUTUBE_SUBTITLE_BYTES,
+                timeout_seconds=YOUTUBE_SUBTITLE_TIMEOUT_SECONDS,
+                accept="application/json,text/json;q=0.9,*/*;q=0.1",
+                label="subtitle track",
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"failed to download subtitle track: {error}; retry or paste transcript text/segments"
+            ) from error
+        try:
+            subtitle_payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"downloaded subtitle track was not valid json3: {error}; paste transcript text/segments"
+            ) from error
+        if not isinstance(subtitle_payload, dict):
+            raise ValueError("downloaded subtitle track was not a json3 object; paste transcript text/segments")
+        segments = self.parse_youtube_json3_segments(subtitle_payload)
+        if not segments:
+            raise ValueError("public subtitle track contained no readable text; paste transcript text/segments")
+        return {
+            "segments": segments,
+            "source": track["source"],
+            "language": track["language"],
+            "metadata": {
+                "title": normalize_text(metadata.get("title") or ""),
+                "channel": normalize_text(metadata.get("channel") or metadata.get("uploader") or ""),
+                "published_at": self.youtube_published_date(metadata.get("upload_date") or ""),
+                "duration": metadata.get("duration"),
+            },
+        }
 
     def youtube_transcript_markdown(self, title: str, url: str, video_id: str, segments: list[dict], payload: dict) -> str:
         meta_lines = [
@@ -3367,103 +4560,275 @@ browser_tab_id: {browser.get("tab_id", "")}
         )
 
     def resolve_pdf_input(self, payload: dict) -> tuple[Path, str, Path | None]:
-        path_value = (payload.get("path") or "").strip()
-        url_value = (payload.get("url") or "").strip()
+        path_value = normalize_text(payload.get("path") or "")
+        url_value = normalize_text(payload.get("url") or "")
+        if path_value and url_value:
+            raise ValueError("provide either path or url, not both")
         if path_value:
-            path = Path(path_value).expanduser().resolve()
-            if not path.exists():
-                raise ValueError(f"PDF path does not exist: {path}")
+            try:
+                path = Path(path_value).expanduser().resolve(strict=True)
+            except (FileNotFoundError, RuntimeError, OSError, ValueError) as error:
+                raise ValueError("local PDF path does not exist or cannot be resolved") from error
+            if not any(path_is_within(path, root) for root in self.allowed_pdf_dirs):
+                raise ValueError(
+                    "local PDF is outside every allowed import folder. "
+                    "Move it into Desktop, Documents, Downloads, the configured data directory, "
+                    "or start the service with --allow-pdf-dir."
+                )
+            if not path.is_file():
+                raise ValueError("local PDF path must point to a regular file")
             if path.suffix.lower() != ".pdf":
                 raise ValueError("local path must point to a .pdf file")
+            try:
+                with path.open("rb") as handle:
+                    header = handle.read(1024)
+            except OSError as error:
+                raise ValueError("local PDF could not be opened; check its permissions") from error
+            if not has_pdf_header(header):
+                raise ValueError("local path does not contain a valid PDF file")
             return path, path.as_uri(), None
         if url_value:
-            parsed = urlparse(url_value)
-            if parsed.scheme not in {"http", "https"}:
-                raise ValueError("PDF URL must be http or https")
             fd, tmp_name = tempfile.mkstemp(prefix="qc-smart-reader-", suffix=".pdf")
-            Path(tmp_name).write_bytes(b"")
             tmp = Path(tmp_name)
-            request = urllib.request.Request(url_value, headers={"user-agent": "QC Smart Reader/0.4"})
-            with urllib.request.urlopen(request, timeout=45) as response:
-                content_type = response.headers.get("content-type", "")
-                data = response.read(MAX_BODY_BYTES + 1)
             try:
-                import os
-
                 os.close(fd)
-            except OSError:
-                pass
-            if len(data) > MAX_BODY_BYTES:
-                tmp.unlink(missing_ok=True)
-                raise ValueError(f"PDF exceeds {MAX_BODY_BYTES} byte limit")
-            if not data.startswith(b"%PDF") and "pdf" not in content_type.lower():
-                tmp.unlink(missing_ok=True)
-                raise ValueError("URL did not return a PDF")
-            tmp.write_bytes(data)
+                fd = -1
+                data = self.download_remote_pdf(url_value)
+                tmp.write_bytes(data)
+            except BaseException:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
             return tmp, url_value, tmp
         raise ValueError("provide either path or url")
 
-    def extract_pdf(self, pdf_path: Path) -> dict:
-        if BUNDLED_PYTHON.exists() and PDF_WORKER.exists():
-            result = subprocess.run(
-                [str(BUNDLED_PYTHON), str(PDF_WORKER), str(pdf_path)],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=90,
+    def download_remote_pdf(self, url: str) -> bytes:
+        data = self.download_public_resource(
+            url,
+            max_bytes=MAX_BODY_BYTES,
+            timeout_seconds=PDF_DOWNLOAD_TIMEOUT_SECONDS,
+            accept="application/pdf,application/octet-stream;q=0.8,*/*;q=0.1",
+            label="remote PDF",
+        )
+        if not has_pdf_header(data):
+            raise ValueError("remote URL did not return a valid PDF file")
+        return data
+
+    def download_public_resource(
+        self,
+        url: str,
+        *,
+        max_bytes: int,
+        timeout_seconds: int,
+        accept: str,
+        label: str,
+    ) -> bytes:
+        current_url = normalize_text(url)
+        visited: set[str] = set()
+        redirect_statuses = {301, 302, 303, 307, 308}
+        for redirect_count in range(MAX_PDF_REDIRECTS + 1):
+            if current_url in visited:
+                raise ValueError(f"{label} redirect loop detected; use the final public URL")
+            visited.add(current_url)
+            parsed, host, port, endpoints = parse_public_resource_url(current_url)
+
+            request_target = quote(unquote(parsed.path or "/"), safe="/%:@!$&'()*+,;=-._~")
+            if parsed.params:
+                request_target += f";{parsed.params}"
+            if parsed.query:
+                request_target += f"?{parsed.query}"
+            default_port = 443 if parsed.scheme.lower() == "https" else 80
+            host_header = host if port == default_port else f"{host}:{port}"
+            if ":" in host and not host.startswith("["):
+                host_header = f"[{host}]" if port == default_port else f"[{host}]:{port}"
+            headers = {
+                "accept": accept,
+                "connection": "close",
+                "host": host_header,
+                "user-agent": f"{APP_NAME}/{SERVICE_VERSION}",
+            }
+            connection_type = (
+                _PinnedHTTPSConnection
+                if parsed.scheme.lower() == "https"
+                else _PinnedHTTPConnection
             )
+            connection = connection_type(
+                host,
+                port,
+                endpoints[0],
+                timeout=timeout_seconds,
+            )
+            try:
+                connection.request("GET", request_target, headers=headers)
+                response = connection.getresponse()
+                status = int(response.status)
+                if status in redirect_statuses:
+                    location = normalize_text(response.headers.get("location") or "")
+                    if not location:
+                        raise ValueError(f"{label} redirect omitted its destination URL")
+                    if redirect_count >= MAX_PDF_REDIRECTS:
+                        raise ValueError(
+                            f"{label} exceeded the {MAX_PDF_REDIRECTS}-redirect safety limit"
+                        )
+                    current_url = urljoin(current_url, location)
+                    continue
+                if status < 200 or status >= 300:
+                    raise ValueError(
+                        f"{label} request returned HTTP {status}; check that the link is public"
+                    )
+                content_length = normalize_text(response.headers.get("content-length") or "")
+                if content_length:
+                    try:
+                        declared_size = int(content_length)
+                    except ValueError:
+                        declared_size = 0
+                    if declared_size > max_bytes:
+                        raise ValueError(f"{label} exceeds the {max_bytes}-byte limit")
+                data = response.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise ValueError(f"{label} exceeds the {max_bytes}-byte limit")
+                return data
+            except ValueError:
+                raise
+            except (http.client.HTTPException, OSError, TimeoutError) as error:
+                raise ValueError(
+                    f"{label} network request failed; check the public URL and connection"
+                ) from error
+            finally:
+                connection.close()
+        raise ValueError(f"{label} exceeded the {MAX_PDF_REDIRECTS}-redirect safety limit")
+
+    def extract_pdf(self, pdf_path: Path) -> dict:
+        if not PDF_WORKER.is_file():
+            raise ValueError("PDF extraction worker is missing; reinstall the companion service")
+        command = [
+            sys.executable,
+            str(PDF_WORKER),
+            str(pdf_path),
+            "--max-pages",
+            str(MAX_PDF_PAGES),
+            "--max-page-text-bytes",
+            str(MAX_PDF_PAGE_TEXT_BYTES),
+            "--max-total-text-bytes",
+            str(MAX_PDF_TOTAL_TEXT_BYTES),
+            "--max-output-bytes",
+            str(MAX_PDF_WORKER_OUTPUT_BYTES),
+            "--memory-bytes",
+            str(PDF_WORKER_MEMORY_BYTES),
+            "--cpu-seconds",
+            str(PDF_WORKER_CPU_SECONDS),
+        ]
+        with tempfile.TemporaryDirectory(prefix="qc-pdf-worker-") as temp_dir:
+            output_path = Path(temp_dir) / "output.json"
+            error_path = Path(temp_dir) / "error.txt"
+            try:
+                with output_path.open("wb") as output_handle, error_path.open("wb") as error_handle:
+                    result = subprocess.run(
+                        command,
+                        check=False,
+                        stdout=output_handle,
+                        stderr=error_handle,
+                        timeout=PDF_EXTRACT_TIMEOUT_SECONDS,
+                    )
+            except subprocess.TimeoutExpired as error:
+                raise ValueError(
+                    f"PDF extraction exceeded the {PDF_EXTRACT_TIMEOUT_SECONDS}-second safety limit"
+                ) from error
+            except OSError as error:
+                raise ValueError("PDF extraction runtime is unavailable; reinstall the companion service") from error
+
+            output_size = output_path.stat().st_size
+            error_size = error_path.stat().st_size
+            with error_path.open("rb") as error_handle:
+                error_bytes = error_handle.read(MAX_PDF_WORKER_ERROR_BYTES + 1)
+            error_text = error_bytes.decode("utf-8", errors="replace").strip()
+            if error_size > MAX_PDF_WORKER_ERROR_BYTES:
+                error_text = f"{error_text[:MAX_PDF_WORKER_ERROR_BYTES]}\n... worker diagnostics truncated ..."
+            if output_size > MAX_PDF_WORKER_OUTPUT_BYTES:
+                raise ValueError(
+                    f"PDF worker output exceeded the {MAX_PDF_WORKER_OUTPUT_BYTES}-byte safety limit"
+                )
             if result.returncode != 0:
-                message = (result.stderr or result.stdout or "PDF worker failed").strip()
+                message = error_text or (
+                    "PDF extraction worker was terminated by a CPU, memory, or output safety limit"
+                    if result.returncode < 0
+                    else "PDF extraction worker failed without diagnostics"
+                )
                 raise ValueError(message)
             try:
-                return json.loads(result.stdout)
-            except json.JSONDecodeError as error:
+                with output_path.open("rb") as output_handle:
+                    output = output_handle.read(MAX_PDF_WORKER_OUTPUT_BYTES + 1)
+                return json.loads(output.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
                 raise ValueError(f"PDF worker returned invalid JSON: {error}") from error
 
-        ensure_pdf_dependencies()
+    def file_sha256(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def pdf_artifact_path(self, raw_sha256: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{64}", raw_sha256 or ""):
+            raise ValueError("PDF artifact SHA-256 is malformed")
+        return self.vault_dir / "原始资料" / "papers" / f"sha256-{raw_sha256}.pdf"
+
+    def copy_pdf_to_vault(
+        self,
+        pdf_path: Path,
+        title: str,
+        source_id: str,
+        *,
+        raw_sha256: str = "",
+    ) -> Path:
+        del title, source_id  # Artifact identity is the complete raw PDF hash.
+        raw_sha256 = raw_sha256 or self.file_sha256(pdf_path)
+        target = self.pdf_artifact_path(raw_sha256)
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or not target.is_file() or self.file_sha256(target) != raw_sha256:
+                raise OSError(f"unsafe or hash-mismatched PDF artifact target: {target}")
+            return target
+
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        temp_path = Path(temp_name)
         try:
-            from pypdf import PdfReader
-        except Exception as error:
-            raise ValueError(f"pypdf is unavailable: {error}") from error
-
-        try:
-            reader = PdfReader(str(pdf_path))
-        except Exception as error:
-            raise ValueError(f"failed to read PDF: {error}") from error
-        if getattr(reader, "is_encrypted", False):
+            with os.fdopen(fd, "wb") as output, pdf_path.open("rb") as source:
+                fd = -1
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+            if self.file_sha256(temp_path) != raw_sha256:
+                raise OSError("PDF artifact changed while it was being copied")
             try:
-                reader.decrypt("")
-            except Exception as error:
-                raise ValueError(f"encrypted PDF cannot be read: {error}") from error
-
-        metadata = reader.metadata or {}
-        clean_metadata = {
-            "title": normalize_text(str(metadata.get("/Title") or "")),
-            "author": normalize_text(str(metadata.get("/Author") or "")),
-            "subject": normalize_text(str(metadata.get("/Subject") or "")),
-            "creator": normalize_text(str(metadata.get("/Creator") or "")),
-            "producer": normalize_text(str(metadata.get("/Producer") or "")),
-            "created": normalize_text(str(metadata.get("/CreationDate") or "")),
-            "modified": normalize_text(str(metadata.get("/ModDate") or "")),
-        }
-
-        pages = []
-        for index, page in enumerate(reader.pages, start=1):
+                os.link(temp_path, target)
+            except FileExistsError:
+                if target.is_symlink() or not target.is_file() or self.file_sha256(target) != raw_sha256:
+                    raise OSError(f"unsafe or hash-mismatched PDF artifact target: {target}")
+            else:
+                self.sync_directory(target.parent)
+            return target
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
-                text = normalize_text(page.extract_text() or "")
-            except Exception:
-                text = ""
-            pages.append({"page": index, "text": text})
-        return {
-            "title": clean_metadata.get("title") or pdf_path.stem,
-            "metadata": clean_metadata,
-            "pages": pages,
-        }
-
-    def copy_pdf_to_vault(self, pdf_path: Path, title: str, source_id: str) -> Path:
-        target = self.vault_dir / "原始资料" / "papers" / f"{today_slug()}-{slugify(title)}-{source_id[-8:]}.pdf"
-        shutil.copyfile(pdf_path, target)
-        return target
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def find_pdf_for_source(self, source_id: str) -> Path | None:
         suffix = source_id[-8:]
@@ -3684,8 +5049,17 @@ browser_tab_id: {browser.get("tab_id", "")}
         return source
 
     def create_note(self, payload: dict) -> dict:
-        source_id = payload.get("source_id") or None
+        source_id = normalize_text(payload.get("source_id") or "") or None
         project_id = self.ensure_project(payload.get("project_id") or self.project_id_for_source(source_id))
+        if source_id:
+            with self.connect() as db:
+                self.validate_project_reference(
+                    db,
+                    project_id=project_id,
+                    record_type="source",
+                    record_id=source_id,
+                    field="source_id",
+                )
         title = payload.get("title") or "Untitled note"
         question = payload.get("question") or ""
         answer = payload.get("answer") or ""
@@ -3757,6 +5131,14 @@ tags: {json.dumps(tags, ensure_ascii=False)}
             raise KeyError(source_id)
         source = self.get_source(source_id)
         project_id = self.ensure_project(payload.get("project_id") or source.get("project_id") or self.default_project_id)
+        with self.connect() as db:
+            self.validate_project_reference(
+                db,
+                project_id=project_id,
+                record_type="source",
+                record_id=source_id,
+                field="source_id",
+            )
         chunks = self.source_chunks(source_id, limit=int(payload.get("chunk_limit") or 20))
         max_items = max(3, min(int(payload.get("max_items") or 8), 20))
         candidate_sentences = self.learning_candidate_sentences(source, chunks, max_items=max_items)
@@ -4055,10 +5437,101 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
         if not project_hint and topic_package_ids:
             project_hint = self.project_id_for_topic_package(topic_package_ids[0])
         project_id = self.ensure_project(project_hint)
+        with self.connect() as db:
+            self.validate_project_references(
+                db,
+                project_id=project_id,
+                record_type="source",
+                record_ids=source_ids,
+                field="source_ids",
+            )
+            self.validate_project_references(
+                db,
+                project_id=project_id,
+                record_type="topic_package",
+                record_ids=topic_package_ids,
+                field="topic_package_ids",
+            )
         topic_packages = self.topic_packages_by_id(topic_package_ids, project_id)
         source_ids = self.unique_ids([*source_ids, *(source_id for topic in topic_packages for source_id in topic.get("source_ids") or [])])
         topic_claim_payloads = self.claim_payloads_from_topic_packages(topic_packages)
-        claims = self.normalize_claims([*topic_claim_payloads, *(payload.get("claims") or [])])
+        raw_claim_payloads = [*topic_claim_payloads, *(payload.get("claims") or [])]
+        claims = self.normalize_claims(raw_claim_payloads)
+        with self.connect() as db:
+            self.validate_project_references(
+                db,
+                project_id=project_id,
+                record_type="source",
+                record_ids=source_ids,
+                field="source_ids",
+            )
+            for raw_claim in raw_claim_payloads:
+                if not isinstance(raw_claim, dict):
+                    continue
+                raw_claim_id = normalize_text(
+                    raw_claim.get("claim_id") or raw_claim.get("id") or ""
+                )
+                if raw_claim_id:
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="claim",
+                        record_id=raw_claim_id,
+                        field="claim_id",
+                        required=False,
+                    )
+                raw_citations = raw_claim.get("citations") or raw_claim.get("evidence") or []
+                for raw_citation in raw_citations if isinstance(raw_citations, list) else []:
+                    if not isinstance(raw_citation, dict):
+                        continue
+                    citation_source_id = normalize_text(
+                        raw_citation.get("source_id") or raw_citation.get("source") or ""
+                    )
+                    citation_chunk_id = normalize_text(
+                        raw_citation.get("chunk_id") or raw_citation.get("chunk") or ""
+                    )
+                    if citation_source_id:
+                        self.validate_project_reference(
+                            db,
+                            project_id=project_id,
+                            record_type="source",
+                            record_id=citation_source_id,
+                            field="citation.source_id",
+                        )
+                    if citation_chunk_id:
+                        self.validate_project_reference(
+                            db,
+                            project_id=project_id,
+                            record_type="chunk",
+                            record_id=citation_chunk_id,
+                            field="citation.chunk_id",
+                        )
+            for claim in claims:
+                claim_id = normalize_text(claim.get("id") or "")
+                if claim_id:
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="claim",
+                        record_id=claim_id,
+                        field="claim_id",
+                        required=False,
+                    )
+                for citation in claim.get("citations") or []:
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="source",
+                        record_id=citation.get("source_id"),
+                        field="citation.source_id",
+                    )
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="chunk",
+                        record_id=citation.get("chunk_id"),
+                        field="citation.chunk_id",
+                    )
         unsupported_claims = sum(1 for claim in claims if not claim["citations"])
         source_rows = self.sources_by_id(source_ids)
         ready_gate = self.evaluate_deliverable_ready_gate(
@@ -4865,13 +6338,14 @@ Speaker notes: {notes or "待补充讲稿。"}
 Transition: {section.get('transition') or '待补充过渡语。'}
 """
                 )
+        sections_markdown = "".join(section_lines) or "## 正文段落\n\n待补充分段讲解、案例和过渡语。\n"
         return f"""# {title}
 
 ## 开场
 
 {normalize_text(payload.get("opening") or "今天我们用证据链快速讲清这个专题。")}
 
-{''.join(section_lines) or "## 正文段落\n\n待补充分段讲解、案例和过渡语。\n"}
+{sections_markdown}
 ## 关键结论
 
 {self.claims_markdown(claims) or "- 待提炼。"}
@@ -5083,6 +6557,20 @@ Transition: {section.get('transition') or '待补充过渡语。'}
         source_ids = self.unique_ids(deliverable.get("source_ids") or [])
         claim_ids = self.strategy_handoff_claim_ids(deliverable, topic_packages)
         evidence_ids = self.strategy_handoff_evidence_ids(topic_packages, claim_ids)
+        with self.connect() as db:
+            for record_type, field, record_ids in (
+                ("source", "source_ids", source_ids),
+                ("topic_package", "topic_package_ids", topic_package_ids),
+                ("claim", "claim_ids", claim_ids),
+                ("evidence", "evidence_ids", evidence_ids),
+            ):
+                self.validate_project_references(
+                    db,
+                    project_id=project_id,
+                    record_type=record_type,
+                    record_ids=record_ids,
+                    field=field,
+                )
         status = normalize_text(payload.get("status") or "drafted").replace("_", "-")
         allowed_statuses = {"drafted", "implementing", "implemented", "backtested", "rejected", "paper-ready", "live-ready"}
         if status not in allowed_statuses:
@@ -5403,6 +6891,22 @@ created_at: {handoff['created_at']}
         if not raw_tickets:
             raw_tickets = self.default_strategy_ticket_specs(handoff)
         normalized_tickets = [self.normalize_strategy_ticket(raw_ticket, handoff, owner) for raw_ticket in raw_tickets]
+        with self.connect() as db:
+            for ticket in normalized_tickets:
+                self.validate_project_references(
+                    db,
+                    project_id=project_id,
+                    record_type="claim",
+                    record_ids=ticket["claim_ids"],
+                    field="tickets.claim_ids",
+                )
+                self.validate_project_references(
+                    db,
+                    project_id=project_id,
+                    record_type="evidence",
+                    record_ids=ticket["evidence_ids"],
+                    field="tickets.evidence_ids",
+                )
         requested_kinds: set[str] = set()
         for ticket in normalized_tickets:
             if ticket["kind"] in requested_kinds:
@@ -5723,6 +7227,19 @@ created_at: {ticket['created_at']}
         )
         assumption_ids = self.unique_ids(self.normalize_record_ids(payload.get("assumption_ids") or []))
         risk_ids = self.unique_ids(self.normalize_record_ids(payload.get("risk_ids") or []))
+        with self.connect() as db:
+            for record_type, field, record_ids in (
+                ("claim", "claim_ids", claim_ids),
+                ("assumption", "assumption_ids", assumption_ids),
+                ("risk", "risk_ids", risk_ids),
+            ):
+                self.validate_project_references(
+                    db,
+                    project_id=project_id,
+                    record_type=record_type,
+                    record_ids=record_ids,
+                    field=field,
+                )
         failure_notes = normalize_text(payload.get("failure_notes") or payload.get("notes") or "")
         now = utc_now()
         created_risk = None
@@ -6473,6 +7990,30 @@ created_at: {review['created_at']}
         project_id = self.ensure_project(
             payload.get("project_id") or (self.project_id_for_claim(requested_claim_ids[0]) if requested_claim_ids else "")
         )
+        with self.connect() as db:
+            self.validate_project_references(
+                db,
+                project_id=project_id,
+                record_type="claim",
+                record_ids=requested_claim_ids,
+                field="claim_ids",
+            )
+            self.validate_project_references(
+                db,
+                project_id=project_id,
+                record_type="evidence",
+                record_ids=self.unique_ids(
+                    [
+                        *self.normalize_record_ids(payload.get("supporting_evidence_ids") or []),
+                        *self.normalize_record_ids(
+                            payload.get("contradicting_evidence_ids")
+                            or payload.get("counter_evidence_ids")
+                            or []
+                        ),
+                    ]
+                ),
+                field="evidence_ids",
+            )
         max_claims = max(1, min(int(payload.get("max_claims") or 30), 200))
         claims = self.claims_for_topic(requested_claim_ids, project_id) if requested_claim_ids else self.recent_claims_for_topic(project_id, max_claims)
         if requested_claim_ids and len(claims) != len(requested_claim_ids):
@@ -6483,6 +8024,33 @@ created_at: {review['created_at']}
             raise ValueError("topic package requires at least one claim")
         claim_ids = [claim["id"] for claim in claims]
         evidence_rows = self.evidence_for_claims(claim_ids)
+        with self.connect() as db:
+            for claim in claims:
+                if claim.get("source_id"):
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="source",
+                        record_id=claim.get("source_id"),
+                        field="claims.source_id",
+                    )
+            for evidence in evidence_rows:
+                if evidence.get("source_id"):
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="source",
+                        record_id=evidence.get("source_id"),
+                        field="evidence.source_id",
+                    )
+                if evidence.get("chunk_id"):
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="chunk",
+                        record_id=evidence.get("chunk_id"),
+                        field="evidence.chunk_id",
+                    )
         evidence_by_id = {row["id"]: row for row in evidence_rows}
         canonical_claim_id = normalize_text(payload.get("canonical_claim_id") or payload.get("canonical_claim") or "")
         if canonical_claim_id and canonical_claim_id not in claim_ids:
@@ -6875,7 +8443,18 @@ canonical_claim_id: {topic['canonical_claim_id']}
                     add_edge(row["project_id"], "source", row["source_id"], downstream_type, row["id"], relation)
                     add_edge(row["project_id"], "claim", row["claim_id"], downstream_type, row["id"], relation)
 
-            for row in db.execute(f"SELECT id, project_id, claim_id FROM assumptions {project_filter}", delete_params).fetchall():
+            for row in db.execute(
+                f"SELECT id, project_id, source_id, claim_id FROM assumptions {project_filter}",
+                delete_params,
+            ).fetchall():
+                add_edge(
+                    row["project_id"],
+                    "source",
+                    row["source_id"],
+                    "assumption",
+                    row["id"],
+                    "derived_assumption",
+                )
                 add_edge(row["project_id"], "claim", row["claim_id"], "assumption", row["id"], "derived_assumption")
 
             agent_run_rows = db.execute(
@@ -7406,6 +8985,39 @@ canonical_claim_id: {topic['canonical_claim_id']}
                         field=field,
                     )
 
+        cross_project_issue_keys: set[tuple[str, str, str, str]] = set()
+
+        def check_cross_project_ids(
+            table: str,
+            record_id: str,
+            record_project_id: str,
+            field: str,
+            ids: list[str],
+            owner_by_id: dict[str, str],
+        ) -> None:
+            for linked_id in ids:
+                linked_id = normalize_text(linked_id)
+                if not linked_id:
+                    continue
+                owner_project_id = owner_by_id.get(linked_id)
+                if not owner_project_id or owner_project_id == record_project_id:
+                    continue
+                issue_key = (table, record_id, field, linked_id)
+                if issue_key in cross_project_issue_keys:
+                    continue
+                cross_project_issue_keys.add(issue_key)
+                add_issue(
+                    "error",
+                    "cross_project_reference",
+                    table,
+                    record_id,
+                    (
+                        f"{field} references {linked_id} from project "
+                        f"{owner_project_id}, but the record belongs to {record_project_id}"
+                    ),
+                    field=field,
+                )
+
         with self.connect() as db:
             project_where = "" if project_id == "all" else "WHERE project_id = ?"
             project_params: tuple[object, ...] = () if project_id == "all" else (project_id,)
@@ -7414,7 +9026,7 @@ canonical_claim_id: {topic['canonical_claim_id']}
                 f"SELECT id, project_id, raw_path, markdown_path FROM sources {project_where}",
                 project_params,
             ).fetchall()
-            source_ids = {row["id"] for row in source_rows}
+            source_ids = {row["id"] for row in db.execute("SELECT id FROM sources").fetchall()}
             for row in source_rows:
                 check_path("sources", row["id"], "raw_path", row["raw_path"], expected_id=row["id"])
                 check_path("sources", row["id"], "markdown_path", row["markdown_path"], expected_id=row["id"])
@@ -7444,7 +9056,7 @@ canonical_claim_id: {topic['canonical_claim_id']}
                 project_params,
             ).fetchall()
             chunk_text_by_id = {row["id"]: row["text"] for row in chunks}
-            chunk_ids = set(chunk_text_by_id)
+            chunk_ids = {row["id"] for row in db.execute("SELECT id FROM chunks").fetchall()}
 
             path_tables = [
                 ("notes", "id", "markdown_path", "id"),
@@ -7494,7 +9106,7 @@ canonical_claim_id: {topic['canonical_claim_id']}
                 f"SELECT id, source_id FROM claims {project_where}",
                 project_params,
             ).fetchall()
-            claim_ids = {row["id"] for row in claim_rows}
+            claim_ids = {row["id"] for row in db.execute("SELECT id FROM claims").fetchall()}
             for row in claim_rows:
                 if row["source_id"]:
                     check_ids("claims", row["id"], "source_id", [row["source_id"]], source_ids)
@@ -7520,7 +9132,7 @@ canonical_claim_id: {topic['canonical_claim_id']}
                 """,
                 project_params,
             ).fetchall()
-            evidence_ids = {row["id"] for row in evidence_rows}
+            evidence_ids = {row["id"] for row in db.execute("SELECT id FROM evidence").fetchall()}
             for row in evidence_rows:
                 check_ids("evidence", row["id"], "claim_id", [row["claim_id"]], claim_ids)
                 if row["source_id"]:
@@ -7539,29 +9151,35 @@ canonical_claim_id: {topic['canonical_claim_id']}
                             field="quote",
                         )
 
-            assumption_ids = {
-                row["id"]
-                for row in db.execute(f"SELECT id FROM assumptions {project_where}", project_params).fetchall()
-            }
+            assumption_rows = db.execute(
+                f"SELECT id, source_id, claim_id FROM assumptions {project_where}",
+                project_params,
+            ).fetchall()
+            assumption_ids = {row["id"] for row in db.execute("SELECT id FROM assumptions").fetchall()}
+            for row in assumption_rows:
+                if row["source_id"]:
+                    check_ids("assumptions", row["id"], "source_id", [row["source_id"]], source_ids)
+                if row["claim_id"]:
+                    check_ids("assumptions", row["id"], "claim_id", [row["claim_id"]], claim_ids)
             risk_ids = {
                 row["id"]
-                for row in db.execute(f"SELECT id FROM risks {project_where}", project_params).fetchall()
+                for row in db.execute("SELECT id FROM risks").fetchall()
             }
             deliverable_ids = {
                 row["id"]
-                for row in db.execute(f"SELECT id FROM deliverables {project_where}", project_params).fetchall()
+                for row in db.execute("SELECT id FROM deliverables").fetchall()
             }
             handoff_ids = {
                 row["id"]
-                for row in db.execute(f"SELECT id FROM strategy_handoffs {project_where}", project_params).fetchall()
+                for row in db.execute("SELECT id FROM strategy_handoffs").fetchall()
             }
             backtest_ids = {
                 row["id"]
-                for row in db.execute(f"SELECT id FROM backtest_results {project_where}", project_params).fetchall()
+                for row in db.execute("SELECT id FROM backtest_results").fetchall()
             }
 
             topic_rows = db.execute(f"SELECT * FROM topic_packages {project_where}", project_params).fetchall()
-            topic_ids = {row["id"] for row in topic_rows}
+            topic_ids = {row["id"] for row in db.execute("SELECT id FROM topic_packages").fetchall()}
             for row in topic_rows:
                 check_ids("topic_packages", row["id"], "canonical_claim_id", [row["canonical_claim_id"] or ""], claim_ids)
                 check_ids("topic_packages", row["id"], "claim_ids", load_json_list(row["claim_ids_json"]), claim_ids)
@@ -7604,6 +9222,218 @@ canonical_claim_id: {topic['canonical_claim_id']}
                 check_ids("strategy_tickets", row["id"], "handoff_id", [row["handoff_id"]], handoff_ids)
                 check_ids("strategy_tickets", row["id"], "claim_ids", load_json_list(row["claim_ids_json"]), claim_ids)
                 check_ids("strategy_tickets", row["id"], "evidence_ids", load_json_list(row["evidence_ids_json"]), evidence_ids)
+
+            # Foreign keys prove that a referenced row exists, but the legacy
+            # schema cannot express that both rows must share project_id. Audit
+            # ownership independently so `project_id=all` also detects links
+            # that would otherwise look globally valid.
+            def owners(query: str) -> dict[str, str]:
+                return {
+                    row["id"]: row["project_id"]
+                    for row in db.execute(query).fetchall()
+                }
+
+            source_owners = owners("SELECT id, project_id FROM sources")
+            chunk_owners = owners(
+                """
+                SELECT chunks.id, sources.project_id
+                FROM chunks
+                JOIN documents ON documents.id = chunks.document_id
+                JOIN sources ON sources.id = documents.source_id
+                """
+            )
+            entity_owners = owners("SELECT id, project_id FROM entities")
+            claim_owners = owners("SELECT id, project_id FROM claims")
+            evidence_owners = owners(
+                """
+                SELECT evidence.id, claims.project_id
+                FROM evidence
+                JOIN claims ON claims.id = evidence.claim_id
+                """
+            )
+            topic_owners = owners("SELECT id, project_id FROM topic_packages")
+            deliverable_owners = owners("SELECT id, project_id FROM deliverables")
+            handoff_owners = owners("SELECT id, project_id FROM strategy_handoffs")
+            backtest_owners = owners("SELECT id, project_id FROM backtest_results")
+            assumption_owners = owners("SELECT id, project_id FROM assumptions")
+            risk_owners = owners("SELECT id, project_id FROM risks")
+
+            for table in ("notes", "capture_plans", "learning_items", "claims"):
+                rows = db.execute(
+                    f"SELECT id, project_id, source_id FROM {table} {project_where}",
+                    project_params,
+                ).fetchall()
+                for row in rows:
+                    check_cross_project_ids(
+                        table,
+                        row["id"],
+                        row["project_id"],
+                        "source_id",
+                        [row["source_id"] or ""],
+                        source_owners,
+                    )
+
+            for row in claim_event_rows:
+                check_cross_project_ids(
+                    "claim_events",
+                    row["id"],
+                    row["project_id"],
+                    "claim_id",
+                    [row["claim_id"] or ""],
+                    claim_owners,
+                )
+                check_cross_project_ids(
+                    "claim_events",
+                    row["id"],
+                    row["project_id"],
+                    "related_claim_ids",
+                    load_json_list(row["related_claim_ids_json"]),
+                    claim_owners,
+                )
+
+            evidence_audit_rows = db.execute(
+                f"""
+                SELECT evidence.*, claims.project_id AS record_project_id
+                FROM evidence
+                JOIN claims ON claims.id = evidence.claim_id
+                {'' if project_id == 'all' else 'WHERE claims.project_id = ?'}
+                """,
+                project_params,
+            ).fetchall()
+            for row in evidence_audit_rows:
+                check_cross_project_ids(
+                    "evidence", row["id"], row["record_project_id"], "claim_id",
+                    [row["claim_id"]], claim_owners,
+                )
+                check_cross_project_ids(
+                    "evidence", row["id"], row["record_project_id"], "source_id",
+                    [row["source_id"] or ""], source_owners,
+                )
+                check_cross_project_ids(
+                    "evidence", row["id"], row["record_project_id"], "chunk_id",
+                    [row["chunk_id"] or ""], chunk_owners,
+                )
+
+            for table in ("relations", "assumptions", "risks", "strategy_ideas", "tasks"):
+                rows = db.execute(f"SELECT * FROM {table} {project_where}", project_params).fetchall()
+                for row in rows:
+                    check_cross_project_ids(
+                        table, row["id"], row["project_id"], "source_id",
+                        [row["source_id"] or ""], source_owners,
+                    )
+                    check_cross_project_ids(
+                        table, row["id"], row["project_id"], "claim_id",
+                        [row["claim_id"] or ""], claim_owners,
+                    )
+                    if table == "relations":
+                        check_cross_project_ids(
+                            table, row["id"], row["project_id"], "subject_entity_id",
+                            [row["subject_entity_id"] or ""], entity_owners,
+                        )
+                        check_cross_project_ids(
+                            table, row["id"], row["project_id"], "object_entity_id",
+                            [row["object_entity_id"] or ""], entity_owners,
+                        )
+
+            for row in topic_rows:
+                row_project_id = row["project_id"]
+                for field, ids, owner_map in (
+                    ("canonical_claim_id", [row["canonical_claim_id"] or ""], claim_owners),
+                    ("claim_ids", load_json_list(row["claim_ids_json"]), claim_owners),
+                    ("duplicate_claim_ids", load_json_list(row["duplicate_claim_ids_json"]), claim_owners),
+                    ("source_ids", load_json_list(row["source_ids_json"]), source_owners),
+                    ("supporting_evidence_ids", load_json_list(row["supporting_evidence_ids_json"]), evidence_owners),
+                    ("contradicting_evidence_ids", load_json_list(row["contradicting_evidence_ids_json"]), evidence_owners),
+                ):
+                    check_cross_project_ids(
+                        "topic_packages", row["id"], row_project_id, field, ids, owner_map,
+                    )
+
+            for row in deliverable_rows:
+                row_project_id = row["project_id"]
+                check_cross_project_ids(
+                    "deliverables", row["id"], row_project_id, "source_ids",
+                    load_json_list(row["source_ids_json"]), source_owners,
+                )
+                try:
+                    deliverable_input = json.loads(row["input_json"] or "{}")
+                except json.JSONDecodeError:
+                    deliverable_input = {}
+                check_cross_project_ids(
+                    "deliverables", row["id"], row_project_id, "topic_package_ids",
+                    self.normalize_record_ids(deliverable_input.get("topic_package_ids") or []),
+                    topic_owners,
+                )
+                for claim in deliverable_input.get("claims") or []:
+                    if not isinstance(claim, dict):
+                        continue
+                    check_cross_project_ids(
+                        "deliverables", row["id"], row_project_id, "claim_id",
+                        [normalize_text(claim.get("claim_id") or claim.get("id") or "")],
+                        claim_owners,
+                    )
+                    for citation in claim.get("citations") or claim.get("evidence") or []:
+                        if not isinstance(citation, dict):
+                            continue
+                        check_cross_project_ids(
+                            "deliverables", row["id"], row_project_id, "citation.source_id",
+                            [normalize_text(citation.get("source_id") or citation.get("source") or "")],
+                            source_owners,
+                        )
+                        check_cross_project_ids(
+                            "deliverables", row["id"], row_project_id, "citation.chunk_id",
+                            [normalize_text(citation.get("chunk_id") or citation.get("chunk") or "")],
+                            chunk_owners,
+                        )
+
+            for row in handoff_rows:
+                row_project_id = row["project_id"]
+                for field, ids, owner_map in (
+                    ("deliverable_id", [row["deliverable_id"]], deliverable_owners),
+                    ("source_ids", load_json_list(row["source_ids_json"]), source_owners),
+                    ("topic_package_ids", load_json_list(row["topic_package_ids_json"]), topic_owners),
+                    ("claim_ids", load_json_list(row["claim_ids_json"]), claim_owners),
+                    ("evidence_ids", load_json_list(row["evidence_ids_json"]), evidence_owners),
+                ):
+                    check_cross_project_ids(
+                        "strategy_handoffs", row["id"], row_project_id, field, ids, owner_map,
+                    )
+
+            for row in backtest_rows:
+                row_project_id = row["project_id"]
+                for field, ids, owner_map in (
+                    ("handoff_id", [row["handoff_id"]], handoff_owners),
+                    ("claim_ids", load_json_list(row["claim_ids_json"]), claim_owners),
+                    ("assumption_ids", load_json_list(row["assumption_ids_json"]), assumption_owners),
+                    ("risk_ids", load_json_list(row["risk_ids_json"]), risk_owners),
+                ):
+                    check_cross_project_ids(
+                        "backtest_results", row["id"], row_project_id, field, ids, owner_map,
+                    )
+
+            for row in review_rows:
+                check_cross_project_ids(
+                    "strategy_reviews", row["id"], row["project_id"], "handoff_id",
+                    [row["handoff_id"]], handoff_owners,
+                )
+                check_cross_project_ids(
+                    "strategy_reviews", row["id"], row["project_id"], "backtest_result_id",
+                    [row["backtest_result_id"]], backtest_owners,
+                )
+
+            for row in ticket_rows:
+                check_cross_project_ids(
+                    "strategy_tickets", row["id"], row["project_id"], "handoff_id",
+                    [row["handoff_id"]], handoff_owners,
+                )
+                check_cross_project_ids(
+                    "strategy_tickets", row["id"], row["project_id"], "claim_ids",
+                    load_json_list(row["claim_ids_json"]), claim_owners,
+                )
+                check_cross_project_ids(
+                    "strategy_tickets", row["id"], row["project_id"], "evidence_ids",
+                    load_json_list(row["evidence_ids_json"]), evidence_owners,
+                )
 
         report = {
             "ok": counts["errors"] == 0,
@@ -7967,6 +9797,92 @@ Vault: {package['vault_dir']}
 {lineage_edge_lines}
 """
 
+    def validate_knowledge_payload_references(
+        self,
+        db: sqlite3.Connection,
+        *,
+        project_id: str,
+        source_id: str,
+        payload: dict,
+    ) -> None:
+        if source_id:
+            self.validate_project_reference(
+                db,
+                project_id=project_id,
+                record_type="source",
+                record_id=source_id,
+                field="source_id",
+            )
+
+        client_claim_ids = {
+            normalize_text(item.get("id") or item.get("client_id") or "")
+            for item in payload.get("claims") or []
+            if isinstance(item, dict)
+            and normalize_text(item.get("id") or item.get("client_id") or "")
+        }
+        for item in payload.get("claims") or []:
+            if not isinstance(item, dict):
+                continue
+            citations = item.get("evidence") or item.get("citations") or []
+            for citation in citations if isinstance(citations, list) else []:
+                if not isinstance(citation, dict):
+                    continue
+                citation_source_id = normalize_text(
+                    citation.get("source_id") or citation.get("source") or source_id
+                )
+                citation_chunk_id = normalize_text(
+                    citation.get("chunk_id") or citation.get("chunk") or ""
+                )
+                if citation_source_id:
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="source",
+                        record_id=citation_source_id,
+                        field="citation.source_id",
+                    )
+                if citation_chunk_id:
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="chunk",
+                        record_id=citation_chunk_id,
+                        field="citation.chunk_id",
+                    )
+
+        for key in ("relations", "assumptions", "risks", "strategy_ideas", "tasks"):
+            for item in payload.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                claim_id = normalize_text(item.get("claim_id") or "")
+                if claim_id and claim_id not in client_claim_ids:
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="claim",
+                        record_id=claim_id,
+                        field=f"{key}.claim_id",
+                    )
+
+        for item in payload.get("relations") or []:
+            if not isinstance(item, dict):
+                continue
+            for field in ("subject", "subject_entity", "from", "object", "object_entity", "to"):
+                reference = item.get(field)
+                entity_id = ""
+                if isinstance(reference, dict):
+                    entity_id = normalize_text(reference.get("id") or "")
+                elif isinstance(reference, str) and reference.startswith("ent_"):
+                    entity_id = normalize_text(reference)
+                if entity_id:
+                    self.validate_project_reference(
+                        db,
+                        project_id=project_id,
+                        record_type="entity",
+                        record_id=entity_id,
+                        field=f"relations.{field}",
+                    )
+
     def create_knowledge_records(self, payload: dict) -> dict:
         source_id = normalize_text(payload.get("source_id") or "")
         if source_id and not self.source_exists(source_id):
@@ -7984,6 +9900,17 @@ Vault: {package['vault_dir']}
             "tasks": [],
         }
         with self.connect() as db:
+            # Serialize the read-before-insert equivalence checks below.  Without
+            # an immediate write transaction, concurrent re-extractions can both
+            # observe no existing claim and insert duplicates before either one
+            # commits.
+            db.execute("BEGIN IMMEDIATE")
+            self.validate_knowledge_payload_references(
+                db,
+                project_id=project_id,
+                source_id=source_id,
+                payload=payload,
+            )
             for item in payload.get("entities") or []:
                 entity = self.upsert_entity(db, project_id, item, now)
                 if entity:
@@ -8018,7 +9945,11 @@ Vault: {package['vault_dir']}
 
             db.commit()
 
-        self.write_knowledge_wiki_pages(output)
+        self.write_knowledge_wiki_pages(
+            output,
+            project_id=project_id,
+            source_id=source_id,
+        )
         self.append_log(
             "knowledge | "
             f"entities {len(output['entities'])} | claims {len(output['claims'])} | "
@@ -8144,6 +10075,10 @@ Vault: {package['vault_dir']}
         return {"ok": True, "agent_run": run, "records": records, "source": source}
 
     def model_settings_ready(self, settings: dict) -> bool:
+        if settings.get("provider") == "codex":
+            # The Codex CLI carries its own auth (a ChatGPT plan login), so the
+            # only thing that has to be true is that we can find the binary.
+            return bool(self.resolve_codex_command(settings))
         return bool(
             normalize_text(settings.get("api_key") or "")
             and normalize_text(settings.get("base_url") or "")
@@ -8238,6 +10173,8 @@ Vault: {package['vault_dir']}
         return {"estimated_cost_usd": round(cost, 8), "cost_source": "model_settings_per_1m_tokens"}
 
     def call_model_with_messages(self, settings: dict, messages: list[dict]) -> tuple[str, dict]:
+        if settings.get("provider") == "codex":
+            return self.call_codex_cli(settings, "", messages)
         if settings.get("provider") == "anthropic":
             system_parts = [normalize_text(message.get("content") or "") for message in messages if message.get("role") == "system"]
             anthropic_messages = [
@@ -8484,10 +10421,16 @@ CHUNKS:
 
     def llm_chat(self, payload: dict) -> dict:
         settings = self.read_model_settings(include_secret=True)
-        if not settings.get("api_key"):
-            raise ValueError("model API key is not configured in companion service")
-        if not settings.get("base_url") or not settings.get("model"):
-            raise ValueError("model base_url and model are required")
+        if settings.get("provider") == "codex":
+            if not self.resolve_codex_command(settings):
+                raise ValueError(
+                    "codex CLI was not found. Install it, or set codex_command in the companion service model settings."
+                )
+        else:
+            if not settings.get("api_key"):
+                raise ValueError("model API key is not configured in companion service")
+            if not settings.get("base_url") or not settings.get("model"):
+                raise ValueError("model base_url and model are required")
         prompt = normalize_text(payload.get("prompt") or "")
         messages = payload.get("messages")
         if not prompt and not isinstance(messages, list):
@@ -8503,7 +10446,9 @@ CHUNKS:
             "source_id": payload.get("source_id") or "",
         }
         try:
-            if settings.get("provider") == "anthropic":
+            if settings.get("provider") == "codex":
+                answer, raw = self.call_codex_cli(settings, prompt, messages)
+            elif settings.get("provider") == "anthropic":
                 answer, raw = self.call_anthropic(settings, prompt, messages)
             else:
                 answer, raw = self.call_openai_compatible(settings, prompt, messages)
@@ -8528,6 +10473,300 @@ CHUNKS:
                 status="failed",
             )
             raise
+
+    def resolve_codex_command(self, settings: dict) -> list[str]:
+        """Return the argv prefix used to invoke the Codex CLI, or [] if unusable.
+
+        Defaults to `codex exec`. Override with `codex_command` in model settings
+        (a string is split shell-style, a list is used verbatim) when the binary
+        lives outside PATH or needs extra flags.
+        """
+        raw = settings.get("codex_command") or ""
+        if isinstance(raw, list):
+            command = [str(part) for part in raw if str(part).strip()]
+        else:
+            text = normalize_text(str(raw))
+            try:
+                command = shlex.split(text) if text else []
+            except ValueError:
+                return []
+        if not command:
+            binary = shutil.which("codex")
+            if not binary:
+                return []
+            return [binary, "exec"]
+        head = command[0]
+        if not shutil.which(head) and not Path(head).expanduser().is_file():
+            return []
+        return command
+
+    @staticmethod
+    def flatten_messages_for_cli(prompt: str, messages: list | None) -> str:
+        if not isinstance(messages, list) or not messages:
+            return normalize_text(prompt)
+        parts = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = normalize_text(str(message.get("content") or ""))
+            if not content:
+                continue
+            role = normalize_text(str(message.get("role") or "user")).lower()
+            label = {"system": "SYSTEM", "assistant": "ASSISTANT"}.get(role, "USER")
+            parts.append(f"[{label}]\n{content}")
+        return "\n\n".join(parts).strip()
+
+    def call_codex_cli(self, settings: dict, prompt: str, messages: list | None) -> tuple[str, dict]:
+        command = self.resolve_codex_command(settings)
+        if not command:
+            raise ValueError(
+                "codex CLI was not found. Install it, or set codex_command in the companion service model settings."
+            )
+        text = self.flatten_messages_for_cli(prompt, messages)
+        if not text:
+            raise ValueError("codex provider received an empty prompt")
+        try:
+            timeout_seconds = int(settings.get("codex_timeout_seconds") or 300)
+        except (TypeError, ValueError):
+            timeout_seconds = 300
+
+        def build_argv(output_path: Path, skip_git_check: bool) -> list[str]:
+            argv = [part for part in command if part != "-"]
+
+            unsafe_standalone = {
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-bypass-hook-trust",
+                "--full-auto",
+                "--yolo",
+                "--search",
+                "--add-dir",
+                "--cd",
+                "-C",
+            }
+            for index, part in enumerate(argv):
+                if part in unsafe_standalone or any(
+                    part.startswith(f"{option}=")
+                    for option in ("--add-dir", "--cd")
+                ):
+                    raise ValueError(
+                        f"codex_command option {part!r} is incompatible with safe document analysis"
+                    )
+                if part in {"--sandbox", "-s"} or part.startswith("--sandbox="):
+                    raise ValueError(
+                        "codex_command cannot override the isolated document permission profile"
+                    )
+                if part == "--enable" and index + 1 < len(argv):
+                    if argv[index + 1] in {"shell_tool", "multi_agent"}:
+                        raise ValueError(
+                            f"codex_command cannot enable {argv[index + 1]} for document analysis"
+                        )
+                if part in {"--enable=shell_tool", "--enable=multi_agent"}:
+                    raise ValueError(
+                        f"codex_command option {part!r} is incompatible with safe document analysis"
+                    )
+                config_entry = None
+                if part in {"-c", "--config"} and index + 1 < len(argv):
+                    config_entry = argv[index + 1]
+                elif part.startswith("--config="):
+                    config_entry = part.split("=", 1)[1]
+                if config_entry:
+                    config_key = config_entry.split("=", 1)[0].strip()
+                    if config_key == "default_permissions" or config_key == "permissions" or config_key.startswith(
+                        "permissions."
+                    ) or config_key == "tools" or config_key.startswith("tools."):
+                        raise ValueError(
+                            f"codex_command config {config_key!r} cannot override the isolated document permission profile"
+                        )
+
+            def has_option(*names: str) -> bool:
+                return any(
+                    part in names or any(part.startswith(f"{name}=") for name in names if name.startswith("--"))
+                    for part in argv
+                )
+
+            def has_disabled_feature(feature: str) -> bool:
+                for index, part in enumerate(argv):
+                    if part == "--disable" and index + 1 < len(argv) and argv[index + 1] == feature:
+                        return True
+                    if part == f"--disable={feature}":
+                        return True
+                return False
+
+            def config_value(key: str) -> str | None:
+                found = None
+                for index, part in enumerate(argv):
+                    if part in {"-c", "--config"} and index + 1 < len(argv):
+                        candidate = argv[index + 1]
+                        if candidate.split("=", 1)[0].strip() == key:
+                            found = candidate.split("=", 1)[1].strip() if "=" in candidate else ""
+                    if part.startswith("--config="):
+                        value = part.split("=", 1)[1]
+                        if value.split("=", 1)[0].strip() == key:
+                            found = value.split("=", 1)[1].strip() if "=" in value else ""
+                return found
+
+            def enforce_config(key: str, safe_value: str) -> None:
+                if config_value(key) != safe_value:
+                    argv.extend(["-c", f"{key}={safe_value}"])
+
+            model = normalize_text(settings.get("model") or "")
+            if model and not has_option("--model", "-m"):
+                argv += ["--model", model]
+            if not has_option("--ephemeral"):
+                argv.append("--ephemeral")
+            if not has_option("--strict-config"):
+                argv.append("--strict-config")
+            if not has_option("--ignore-user-config"):
+                argv.append("--ignore-user-config")
+            if not has_option("--ignore-rules"):
+                argv.append("--ignore-rules")
+            if not has_disabled_feature("shell_tool"):
+                argv += ["--disable", "shell_tool"]
+            if not has_disabled_feature("multi_agent"):
+                argv += ["--disable", "multi_agent"]
+            for feature in (
+                "apps",
+                "enable_mcp_apps",
+                "plugins",
+                "remote_plugin",
+                "tool_suggest",
+                "skill_mcp_dependency_install",
+                "skill_search",
+                "browser_use",
+                "browser_use_external",
+                "computer_use",
+                "in_app_browser",
+                "image_generation",
+                "memories",
+                "goals",
+            ):
+                if not has_disabled_feature(feature):
+                    argv += ["--disable", feature]
+            enforce_config("agents.enabled", "false")
+            enforce_config("web_search", '"disabled"')
+            enforce_config("shell_environment_policy.inherit", '"none"')
+            # `--sandbox read-only` still permits broad reads on current Codex
+            # builds. A permission profile narrows every filesystem-aware tool,
+            # including view_image, to the empty scratch workspace and minimal
+            # runtime paths. Keep these overrides last so custom commands cannot
+            # broaden them with an earlier -c value.
+            argv += [
+                "-c",
+                'default_permissions="qc_document"',
+                "-c",
+                'permissions.qc_document.description="QC document analysis"',
+                "-c",
+                'permissions.qc_document.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"read\"}}',
+            ]
+            if not has_option("--output-last-message", "-o"):
+                argv += ["--output-last-message", str(output_path)]
+            if skip_git_check and "--skip-git-repo-check" not in argv:
+                argv.append("--skip-git-repo-check")
+            argv.append("-")
+            return argv
+
+        def run_once(
+            work_dir: Path,
+            codex_home: Path,
+            skip_git_check: bool,
+        ) -> tuple[subprocess.CompletedProcess, Path, list[str]]:
+            output_path = work_dir / "codex_last_message.txt"
+            argv = build_argv(output_path, skip_git_check)
+            process_env = os.environ.copy()
+            process_env.update(
+                {
+                    "CODEX_HOME": str(codex_home),
+                    "HOME": str(codex_home),
+                    "TMPDIR": str(work_dir),
+                }
+            )
+            completed = subprocess.run(  # noqa: S603 - argv is operator-configured, never user input
+                argv,
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(work_dir),
+                env=process_env,
+            )
+            return completed, output_path, argv
+
+        with tempfile.TemporaryDirectory(prefix="qc-codex-") as temp_dir, tempfile.TemporaryDirectory(
+            prefix="qc-codex-auth-"
+        ) as auth_dir:
+            work_dir = Path(temp_dir)
+            isolated_codex_home = Path(auth_dir)
+            source_codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+            source_auth = source_codex_home / "auth.json"
+            if source_auth.exists():
+                auth_stat = source_auth.lstat()
+                if (
+                    not stat.S_ISREG(auth_stat.st_mode)
+                    or source_auth.is_symlink()
+                    or auth_stat.st_uid != os.getuid()
+                    or auth_stat.st_mode & 0o077
+                    or auth_stat.st_size > 1024 * 1024
+                ):
+                    raise ValueError("Codex auth.json is unsafe; run codex login to repair it")
+                try:
+                    auth_payload = json.loads(source_auth.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError("Codex auth.json is unreadable; run codex login again") from error
+                if not isinstance(auth_payload, dict):
+                    raise ValueError("Codex auth.json is malformed; run codex login again")
+                isolated_auth = isolated_codex_home / "auth.json"
+                atomic_write_text(
+                    isolated_auth,
+                    json.dumps(auth_payload, ensure_ascii=False, separators=(",", ":")),
+                )
+                os.chmod(isolated_auth, 0o600)
+            try:
+                completed, output_path, argv = run_once(
+                    work_dir,
+                    isolated_codex_home,
+                    skip_git_check=False,
+                )
+            except FileNotFoundError as error:
+                raise ValueError(f"codex CLI could not be executed: {error}") from error
+            except subprocess.TimeoutExpired as error:
+                raise ValueError(f"codex CLI timed out after {timeout_seconds}s") from error
+
+            stderr_text = (completed.stderr or "").strip()
+            # Older/newer builds refuse to run outside a git repository. The
+            # scratch cwd is never a repo, so retry once with the opt-out flag
+            # rather than making every caller configure it by hand.
+            if completed.returncode != 0 and "git" in stderr_text.lower() and "--skip-git-repo-check" not in argv:
+                try:
+                    completed, output_path, argv = run_once(
+                        work_dir,
+                        isolated_codex_home,
+                        skip_git_check=True,
+                    )
+                    stderr_text = (completed.stderr or "").strip()
+                except subprocess.TimeoutExpired as error:
+                    raise ValueError(f"codex CLI timed out after {timeout_seconds}s") from error
+
+            answer = ""
+            if output_path.is_file():
+                answer = output_path.read_text(encoding="utf-8", errors="replace").strip()
+            if not answer:
+                answer = (completed.stdout or "").strip()
+
+            if completed.returncode != 0:
+                raise ValueError(
+                    f"codex CLI exited with code {completed.returncode}: {stderr_text[-500:] or 'no stderr output'}"
+                )
+            if not answer:
+                raise ValueError(f"codex CLI returned no message. stderr: {stderr_text[-500:] or 'empty'}")
+
+            raw = {
+                "provider": "codex",
+                "argv": argv,
+                "exit_code": completed.returncode,
+                "stderr_tail": stderr_text[-2000:],
+                "prompt_chars": len(text),
+            }
+            return answer, raw
 
     def call_openai_compatible(self, settings: dict, prompt: str, messages: list | None) -> tuple[str, dict]:
         endpoint = self.join_model_url(settings.get("base_url") or "", "chat/completions")
@@ -8584,26 +10823,77 @@ CHUNKS:
             headers=headers,
             method="POST",
         )
+        opener = urllib.request.build_opener(_RejectModelRedirects())
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                body = response.read()
+            with opener.open(request, timeout=MODEL_HTTP_TIMEOUT_SECONDS) as response:
+                body = response.read(MAX_MODEL_RESPONSE_BYTES + 1)
+                if len(body) > MAX_MODEL_RESPONSE_BYTES:
+                    raise ValueError(
+                        f"model response exceeded the {MAX_MODEL_RESPONSE_BYTES}-byte limit"
+                    )
         except urllib.error.HTTPError as error:
-            body = error.read()
-            error.close()
+            if 300 <= error.code < 400:
+                error.close()
+                raise ValueError(
+                    f"model HTTP {error.code}: redirects are refused so API credentials cannot be forwarded; "
+                    "configure the final HTTPS endpoint directly"
+                ) from error
+            try:
+                body = error.read(MAX_MODEL_RESPONSE_BYTES + 1)
+            except (OSError, http.client.HTTPException) as read_error:
+                raise ValueError(
+                    f"model HTTP {error.code}: the error response body could not be read"
+                ) from read_error
+            finally:
+                error.close()
             try:
                 data = json.loads(body.decode("utf-8"))
-                message = data.get("error", {}).get("message") or data.get("message") or body[:240].decode("utf-8", errors="replace")
+                nested_error = data.get("error") if isinstance(data, dict) else None
+                message = (
+                    (
+                        nested_error.get("message")
+                        if isinstance(nested_error, dict)
+                        else nested_error
+                    )
+                    or (data.get("message") if isinstance(data, dict) else "")
+                    or body[:240].decode("utf-8", errors="replace")
+                )
             except (json.JSONDecodeError, UnicodeDecodeError):
                 message = body[:240].decode("utf-8", errors="replace")
             raise ValueError(f"model HTTP {error.code}: {message}") from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise ValueError("model endpoint is unreachable; check its URL, TLS certificate, and network") from error
         try:
-            return json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError as error:
+            data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError(f"model returned non-JSON response: {body[:240].decode('utf-8', errors='replace')}") from error
+        if not isinstance(data, dict):
+            raise ValueError("model returned JSON that was not an object")
+        return data
 
     def join_model_url(self, base_url: str, path: str) -> str:
         clean_base = str(base_url or "").rstrip("/")
         clean_path = str(path or "").lstrip("/")
+        try:
+            parsed = urlparse(clean_base)
+            host = (parsed.hostname or "").lower()
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("model base_url is malformed") from error
+        if parsed.scheme not in {"http", "https"} or not host or not parsed.netloc:
+            raise ValueError("model base_url must be an absolute http or https URL")
+        if parsed.username is not None or parsed.password is not None or parsed.fragment:
+            raise ValueError("model base_url must not contain credentials or a fragment")
+        loopback = host == "localhost"
+        if not loopback:
+            try:
+                loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+        if parsed.scheme != "https" and not loopback:
+            raise ValueError("remote model base_url must use HTTPS so API credentials are encrypted")
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("model base_url contains an invalid port")
         if clean_base.endswith("/chat") and clean_path == "chat/completions":
             return f"{clean_base}/completions"
         return f"{clean_base}/{clean_path}"
@@ -8735,18 +11025,34 @@ CHUNKS:
             (project_id, name, kind),
         ).fetchone()
         if existing:
+            try:
+                existing_aliases = json.loads(existing["aliases_json"] or "[]")
+            except json.JSONDecodeError:
+                existing_aliases = []
+            if not isinstance(existing_aliases, list):
+                existing_aliases = []
+            merged_aliases = []
+            for alias in [*existing_aliases, *aliases]:
+                clean_alias = normalize_text(alias)
+                if clean_alias and clean_alias not in merged_aliases:
+                    merged_aliases.append(clean_alias)
             db.execute(
                 """
                 UPDATE entities
                 SET description = COALESCE(NULLIF(?, ''), description),
                     aliases_json = ?,
-                    status = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (description, json.dumps(aliases, ensure_ascii=False), status, now, existing["id"]),
+                (description, json.dumps(merged_aliases, ensure_ascii=False), now, existing["id"]),
             )
-            return {**dict(existing), "description": description or existing["description"], "aliases": aliases, "status": status}
+            return {
+                **dict(existing),
+                "description": description or existing["description"],
+                "aliases": merged_aliases,
+                "updated_at": now,
+                "reused": True,
+            }
         entity_id = f"ent_{uuid4().hex[:12]}"
         db.execute(
             """
@@ -8765,6 +11071,7 @@ CHUNKS:
             "status": status,
             "created_at": now,
             "updated_at": now,
+            "reused": False,
         }
 
     def entity_id_for_ref(self, db: sqlite3.Connection, project_id: str, ref: str | dict, now: str) -> str | None:
@@ -8792,6 +11099,123 @@ CHUNKS:
             return existing["id"]
         entity = self.upsert_entity(db, project_id, {"name": value, "kind": "unknown"}, now)
         return entity["id"] if entity else None
+
+    def knowledge_text_key(self, value: str) -> str:
+        return re.sub(r"\s+", " ", normalize_text(value)).casefold()
+
+    def equivalent_source_knowledge_record(
+        self,
+        db: sqlite3.Connection,
+        *,
+        table: str,
+        project_id: str,
+        source_id: str,
+        claim_id: str | None,
+        normalized_fields: dict[str, str],
+        exact_fields: dict[str, str | None] | None = None,
+        default_status: str,
+    ) -> sqlite3.Row | None:
+        allowed_fields = {
+            "relations": {"subject_entity_id", "predicate", "object_entity_id"},
+            "assumptions": {"text"},
+            "risks": {"text", "severity"},
+            "strategy_ideas": {"title", "thesis"},
+            "tasks": {"title", "acceptance"},
+        }
+        requested_fields = set(normalized_fields) | set(exact_fields or {})
+        if table not in allowed_fields or not requested_fields.issubset(allowed_fields[table]):
+            raise ValueError(f"unsupported knowledge equivalence fields for {table}")
+        clauses = [
+            "project_id = ?",
+            "COALESCE(source_id, '') = ?",
+            "COALESCE(claim_id, '') = ?",
+        ]
+        params: list[object] = [project_id, source_id, claim_id or ""]
+        for field, value in (exact_fields or {}).items():
+            clauses.append(f"COALESCE({field}, '') = ?")
+            params.append(value or "")
+        rows = db.execute(
+            f"""
+            SELECT *
+            FROM {table}
+            WHERE {' AND '.join(clauses)}
+            ORDER BY CASE WHEN status = ? THEN 1 ELSE 0 END, created_at ASC
+            """,
+            (*params, default_status),
+        ).fetchall()
+        field_keys = {
+            field: self.knowledge_text_key(value)
+            for field, value in normalized_fields.items()
+        }
+        return next(
+            (
+                row
+                for row in rows
+                if all(
+                    self.knowledge_text_key(row[field] or "") == expected
+                    for field, expected in field_keys.items()
+                )
+            ),
+            None,
+        )
+
+    def equivalent_claim(
+        self,
+        db: sqlite3.Connection,
+        *,
+        project_id: str,
+        source_id: str,
+        text: str,
+    ) -> sqlite3.Row | None:
+        rows = db.execute(
+            """
+            SELECT *
+            FROM claims
+            WHERE project_id = ? AND COALESCE(source_id, '') = ?
+            ORDER BY CASE status
+              WHEN 'reviewed' THEN 0
+              WHEN 'extracted' THEN 1
+              WHEN 'pending_validation' THEN 2
+              ELSE 3
+            END, created_at ASC
+            """,
+            (project_id, source_id),
+        ).fetchall()
+        text_key = self.knowledge_text_key(text)
+        return next((row for row in rows if self.knowledge_text_key(row["text"] or "") == text_key), None)
+
+    def equivalent_evidence(
+        self,
+        db: sqlite3.Connection,
+        *,
+        claim_id: str,
+        citation: dict,
+    ) -> sqlite3.Row | None:
+        source_id = citation.get("source_id") or ""
+        chunk_id = citation.get("chunk_id") or ""
+        strength = normalize_text(citation.get("strength") or "supporting").casefold()
+        quote_key = self.knowledge_text_key(citation.get("quote") or "")
+        rows = db.execute(
+            """
+            SELECT *
+            FROM evidence
+            WHERE claim_id = ?
+              AND COALESCE(source_id, '') = ?
+              AND COALESCE(chunk_id, '') = ?
+            ORDER BY CASE status WHEN 'reviewed' THEN 0 WHEN 'pending_validation' THEN 1 ELSE 2 END,
+                     created_at ASC
+            """,
+            (claim_id, source_id, chunk_id),
+        ).fetchall()
+        return next(
+            (
+                row
+                for row in rows
+                if self.knowledge_text_key(row["quote"] or "") == quote_key
+                and normalize_text(row["strength"] or "supporting").casefold() == strength
+            ),
+            None,
+        )
 
     def insert_claim_with_evidence(
         self,
@@ -8829,16 +11253,47 @@ CHUNKS:
             status = "extracted" if valid_citations else "pending_validation"
         else:
             status = requested_status or ("extracted" if valid_citations else "pending_validation")
-        claim_id = f"claim_{uuid4().hex[:12]}"
-        db.execute(
-            """
-            INSERT INTO claims(id, project_id, source_id, text, status, confidence, reasoning_chain, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (claim_id, project_id, default_source_id or None, text, status, confidence, reasoning_chain, now, now),
+        existing_claim = self.equivalent_claim(
+            db,
+            project_id=project_id,
+            source_id=default_source_id,
+            text=text,
         )
+        if existing_claim:
+            claim_id = existing_claim["id"]
+            claim = dict(existing_claim)
+            claim["reused"] = True
+        else:
+            claim_id = f"claim_{uuid4().hex[:12]}"
+            db.execute(
+                """
+                INSERT INTO claims(id, project_id, source_id, text, status, confidence, reasoning_chain, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (claim_id, project_id, default_source_id or None, text, status, confidence, reasoning_chain, now, now),
+            )
+            claim = {
+                "id": claim_id,
+                "project_id": project_id,
+                "source_id": default_source_id,
+                "text": text,
+                "status": status,
+                "confidence": confidence,
+                "reasoning_chain": reasoning_chain,
+                "created_at": now,
+                "updated_at": now,
+                "reused": False,
+            }
         evidence_rows = []
         for citation in valid_citations:
+            existing_evidence = self.equivalent_evidence(
+                db,
+                claim_id=claim_id,
+                citation=citation,
+            )
+            if existing_evidence:
+                evidence_rows.append({**dict(existing_evidence), "reused": True})
+                continue
             evidence_id = f"ev_{uuid4().hex[:12]}"
             db.execute(
                 """
@@ -8868,18 +11323,15 @@ CHUNKS:
                     now,
                 ),
             )
-            evidence_rows.append({"id": evidence_id, "claim_id": claim_id, **citation})
-        claim = {
-            "id": claim_id,
-            "project_id": project_id,
-            "source_id": default_source_id,
-            "text": text,
-            "status": status,
-            "confidence": confidence,
-            "reasoning_chain": reasoning_chain,
-            "created_at": now,
-            "updated_at": now,
-        }
+            evidence_rows.append(
+                {
+                    "id": evidence_id,
+                    "claim_id": claim_id,
+                    **citation,
+                    "status": "pending_validation",
+                    "reused": False,
+                }
+            )
         return claim, evidence_rows
 
     def insert_relation(
@@ -8899,8 +11351,23 @@ CHUNKS:
         if not predicate:
             return None
         claim_id = self.resolve_claim_id(item.get("claim_id"), claim_id_by_client_id)
-        relation_id = f"rel_{uuid4().hex[:12]}"
         status = normalize_text(item.get("status") or "extracted")
+        existing = self.equivalent_source_knowledge_record(
+            db,
+            table="relations",
+            project_id=project_id,
+            source_id=default_source_id,
+            claim_id=claim_id,
+            normalized_fields={"predicate": predicate},
+            exact_fields={
+                "subject_entity_id": subject_id,
+                "object_entity_id": object_id,
+            },
+            default_status="extracted",
+        )
+        if existing:
+            return {**dict(existing), "reused": True}
+        relation_id = f"rel_{uuid4().hex[:12]}"
         db.execute(
             """
             INSERT INTO relations(id, project_id, subject_entity_id, predicate, object_entity_id, claim_id, source_id, status, created_at, updated_at)
@@ -8919,6 +11386,7 @@ CHUNKS:
             "status": status,
             "created_at": now,
             "updated_at": now,
+            "reused": False,
         }
 
     def resolve_claim_id(self, value: str | None, claim_id_by_client_id: dict[str, str]) -> str | None:
@@ -8931,28 +11399,71 @@ CHUNKS:
         text = normalize_text(item.get("text") if isinstance(item, dict) else item)
         if not text:
             return None
-        record_id = f"asm_{uuid4().hex[:12]}"
         claim_id = self.resolve_claim_id(item.get("claim_id") if isinstance(item, dict) else None, claim_id_by_client_id)
         status = normalize_text(item.get("status") if isinstance(item, dict) else "") or "pending_validation"
-        db.execute(
-            "INSERT INTO assumptions(id, project_id, claim_id, text, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (record_id, project_id, claim_id, text, status, now, now),
+        existing = self.equivalent_source_knowledge_record(
+            db,
+            table="assumptions",
+            project_id=project_id,
+            source_id=source_id,
+            claim_id=claim_id,
+            normalized_fields={"text": text},
+            default_status="pending_validation",
         )
-        return {"id": record_id, "project_id": project_id, "claim_id": claim_id, "text": text, "status": status}
+        if existing:
+            return {**dict(existing), "reused": True}
+        record_id = f"asm_{uuid4().hex[:12]}"
+        db.execute(
+            "INSERT INTO assumptions(id, project_id, source_id, claim_id, text, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (record_id, project_id, source_id or None, claim_id, text, status, now, now),
+        )
+        return {
+            "id": record_id,
+            "project_id": project_id,
+            "source_id": source_id,
+            "claim_id": claim_id,
+            "text": text,
+            "status": status,
+            "created_at": now,
+            "updated_at": now,
+            "reused": False,
+        }
 
     def insert_risk(self, db, project_id, source_id, item, claim_id_by_client_id, now):
         text = normalize_text(item.get("text") if isinstance(item, dict) else item)
         if not text:
             return None
-        record_id = f"risk_{uuid4().hex[:12]}"
         claim_id = self.resolve_claim_id(item.get("claim_id") if isinstance(item, dict) else None, claim_id_by_client_id)
         severity = normalize_text(item.get("severity") if isinstance(item, dict) else "")
         status = normalize_text(item.get("status") if isinstance(item, dict) else "") or "open"
+        existing = self.equivalent_source_knowledge_record(
+            db,
+            table="risks",
+            project_id=project_id,
+            source_id=source_id,
+            claim_id=claim_id,
+            normalized_fields={"text": text, "severity": severity},
+            default_status="open",
+        )
+        if existing:
+            return {**dict(existing), "reused": True}
+        record_id = f"risk_{uuid4().hex[:12]}"
         db.execute(
             "INSERT INTO risks(id, project_id, source_id, claim_id, text, severity, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (record_id, project_id, source_id or None, claim_id, text, severity, status, now, now),
         )
-        return {"id": record_id, "project_id": project_id, "source_id": source_id, "claim_id": claim_id, "text": text, "severity": severity, "status": status}
+        return {
+            "id": record_id,
+            "project_id": project_id,
+            "source_id": source_id,
+            "claim_id": claim_id,
+            "text": text,
+            "severity": severity,
+            "status": status,
+            "created_at": now,
+            "updated_at": now,
+            "reused": False,
+        }
 
     def insert_strategy_idea(self, db, project_id, source_id, item, claim_id_by_client_id, now):
         if isinstance(item, str):
@@ -8965,14 +11476,36 @@ CHUNKS:
             return None
         if not title:
             return None
-        record_id = f"strat_{uuid4().hex[:12]}"
         claim_id = self.resolve_claim_id(item.get("claim_id") if isinstance(item, dict) else None, claim_id_by_client_id)
         status = normalize_text(item.get("status") if isinstance(item, dict) else "") or "candidate"
+        existing = self.equivalent_source_knowledge_record(
+            db,
+            table="strategy_ideas",
+            project_id=project_id,
+            source_id=source_id,
+            claim_id=claim_id,
+            normalized_fields={"title": title, "thesis": thesis},
+            default_status="candidate",
+        )
+        if existing:
+            return {**dict(existing), "reused": True}
+        record_id = f"strat_{uuid4().hex[:12]}"
         db.execute(
             "INSERT INTO strategy_ideas(id, project_id, source_id, claim_id, title, thesis, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (record_id, project_id, source_id or None, claim_id, title, thesis, status, now, now),
         )
-        return {"id": record_id, "project_id": project_id, "source_id": source_id, "claim_id": claim_id, "title": title, "thesis": thesis, "status": status}
+        return {
+            "id": record_id,
+            "project_id": project_id,
+            "source_id": source_id,
+            "claim_id": claim_id,
+            "title": title,
+            "thesis": thesis,
+            "status": status,
+            "created_at": now,
+            "updated_at": now,
+            "reused": False,
+        }
 
     def insert_task(self, db, project_id, source_id, item, claim_id_by_client_id, now):
         if isinstance(item, str):
@@ -8985,14 +11518,36 @@ CHUNKS:
             return None
         if not title:
             return None
-        record_id = f"task_{uuid4().hex[:12]}"
         claim_id = self.resolve_claim_id(item.get("claim_id") if isinstance(item, dict) else None, claim_id_by_client_id)
         status = normalize_text(item.get("status") if isinstance(item, dict) else "") or "todo"
+        existing = self.equivalent_source_knowledge_record(
+            db,
+            table="tasks",
+            project_id=project_id,
+            source_id=source_id,
+            claim_id=claim_id,
+            normalized_fields={"title": title, "acceptance": acceptance},
+            default_status="todo",
+        )
+        if existing:
+            return {**dict(existing), "reused": True}
+        record_id = f"task_{uuid4().hex[:12]}"
         db.execute(
             "INSERT INTO tasks(id, project_id, source_id, claim_id, title, status, acceptance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (record_id, project_id, source_id or None, claim_id, title, status, acceptance, now, now),
         )
-        return {"id": record_id, "project_id": project_id, "source_id": source_id, "claim_id": claim_id, "title": title, "status": status, "acceptance": acceptance}
+        return {
+            "id": record_id,
+            "project_id": project_id,
+            "source_id": source_id,
+            "claim_id": claim_id,
+            "title": title,
+            "status": status,
+            "acceptance": acceptance,
+            "created_at": now,
+            "updated_at": now,
+            "reused": False,
+        }
 
     def list_knowledge_records(self, limit: int = 50, project_id: str = "") -> dict:
         project_id = self.normalize_project_id(project_id)
@@ -9991,7 +12546,13 @@ CHUNKS:
             row["aliases"] = []
         return row
 
-    def write_knowledge_wiki_pages(self, records: dict) -> None:
+    def write_knowledge_wiki_pages(
+        self,
+        records: dict,
+        *,
+        project_id: str = "",
+        source_id: str = "",
+    ) -> None:
         for entity in records.get("entities") or []:
             path = self.vault_dir / "wiki" / "entities" / f"{slugify(entity['name'])}-{entity['id'][-6:]}.md"
             path.write_text(
@@ -10010,8 +12571,25 @@ Aliases: {', '.join(entity.get('aliases') or [])}
 """,
                 encoding="utf-8",
             )
-        if any(records.get(key) for key in ("claims", "relations", "risks", "strategy_ideas", "tasks")):
-            path = self.vault_dir / "wiki" / "analyses" / f"{today_slug()}-structured-knowledge-{uuid4().hex[:6]}.md"
+        if any(
+            records.get(key)
+            for key in (
+                "claims",
+                "relations",
+                "assumptions",
+                "risks",
+                "strategy_ideas",
+                "tasks",
+            )
+        ):
+            if source_id:
+                filename = (
+                    f"structured-knowledge-{slugify(project_id, 'project')}-"
+                    f"{slugify(source_id, 'source')}.md"
+                )
+            else:
+                filename = f"{today_slug()}-structured-knowledge-{uuid4().hex[:6]}.md"
+            path = self.vault_dir / "wiki" / "analyses" / filename
             claims = "\n".join(
                 f"- {claim['status']} · `{claim['id']}` · {claim['text']}"
                 for claim in records.get("claims") or []
@@ -10020,12 +12598,23 @@ Aliases: {', '.join(entity.get('aliases') or [])}
                 f"- `{relation['id']}` · {relation.get('subject_entity_id') or '?'} {relation['predicate']} {relation.get('object_entity_id') or '?'}"
                 for relation in records.get("relations") or []
             ) or "- No relations."
+            assumptions = "\n".join(
+                f"- `{assumption['id']}` · {assumption['text']}"
+                for assumption in records.get("assumptions") or []
+            ) or "- No assumptions."
             risks = "\n".join(f"- {risk['text']}" for risk in records.get("risks") or []) or "- No risks."
+            strategy_ideas = "\n".join(
+                f"- `{idea['id']}` · {idea['title']} — {idea.get('thesis') or ''}"
+                for idea in records.get("strategy_ideas") or []
+            ) or "- No strategy ideas."
             tasks = "\n".join(f"- {task['title']}" for task in records.get("tasks") or []) or "- No tasks."
-            path.write_text(
+            atomic_write_text(
+                path,
                 f"""---
 type: structured_knowledge
-created_at: {utc_now()}
+project_id: {project_id}
+source_id: {source_id}
+updated_at: {utc_now()}
 ---
 
 # Structured Knowledge Import
@@ -10038,15 +12627,22 @@ created_at: {utc_now()}
 
 {relations}
 
+## Assumptions
+
+{assumptions}
+
 ## Risks
 
 {risks}
+
+## Strategy Ideas
+
+{strategy_ideas}
 
 ## Tasks
 
 {tasks}
 """,
-                encoding="utf-8",
             )
 
     def list_notes(self, limit: int = 50, project_id: str = "") -> list[dict]:
@@ -10238,6 +12834,19 @@ created_at: {utc_now()}
 
     def create_read_job(self, payload: dict) -> dict:
         items = self.normalize_job_items(payload)
+        for item in items:
+            item["project_id"] = self.ensure_project(item.get("project_id") or "")
+        with self.connect() as db:
+            for item in items:
+                capture_plan_id = normalize_text(item.get("capture_plan_id") or "")
+                if capture_plan_id:
+                    self.validate_project_reference(
+                        db,
+                        project_id=item["project_id"],
+                        record_type="capture_plan",
+                        record_id=capture_plan_id,
+                        field="items.capture_plan_id",
+                    )
         job_payload = {**payload, "items": items, "item_count": len(items)}
         job = self.create_job("read", job_payload, status="accepted" if items else "empty", progress=0)
         if not items:
@@ -10291,6 +12900,120 @@ created_at: {utc_now()}
             )
             db.commit()
         return self.get_job(job["id"])
+
+    def audit_source_evidence_before_reextract(self, source_id: str, *, reason: str = "") -> dict:
+        """Demote reviewed evidence whose stored quote no longer matches its chunk."""
+
+        source = self.get_source(source_id)
+        project_id = source.get("project_id") or self.default_project_id
+        now = utc_now()
+        audit_reason = normalize_text(reason) or "source re-extraction"
+        note = f"Evidence failed citation audit before {audit_reason}; revalidation required."
+        invalid_evidence_ids: list[str] = []
+        affected_claim_ids: set[str] = set()
+        downgraded_claim_ids: list[str] = []
+
+        with self.connect() as db:
+            reviewed_rows = db.execute(
+                """
+                SELECT evidence.*
+                FROM evidence
+                WHERE evidence.source_id = ? AND evidence.status = 'reviewed'
+                ORDER BY evidence.created_at ASC
+                """,
+                (source_id,),
+            ).fetchall()
+            invalid_rows = [row for row in reviewed_rows if not self.evidence_citation_is_valid(db, row)]
+            for row in invalid_rows:
+                invalid_evidence_ids.append(row["id"])
+                affected_claim_ids.add(row["claim_id"])
+                db.execute(
+                    """
+                    UPDATE evidence
+                    SET status = 'pending_validation',
+                        review_note = CASE
+                          WHEN COALESCE(review_note, '') = '' THEN ?
+                          ELSE review_note || '\n' || ?
+                        END,
+                        reviewed_at = '',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (note, note, now, row["id"]),
+                )
+                self.insert_claim_event(
+                    db,
+                    project_id=project_id,
+                    claim_id=row["claim_id"],
+                    event_type="evidence_revalidation_required",
+                    note=note,
+                    metadata={"evidence_id": row["id"], "source_id": source_id, "reason": audit_reason},
+                    created_at=now,
+                )
+
+            for claim_id in sorted(affected_claim_ids):
+                claim = db.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
+                if not claim or claim["status"] != "reviewed":
+                    continue
+                valid_rows, _ = self.current_valid_evidence_rows(db, claim_id)
+                if valid_rows:
+                    continue
+                db.execute(
+                    """
+                    UPDATE claims
+                    SET status = 'pending_validation',
+                        review_note = CASE
+                          WHEN COALESCE(review_note, '') = '' THEN ?
+                          ELSE review_note || '\n' || ?
+                        END,
+                        reviewed_at = '',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (note, note, now, claim_id),
+                )
+                downgraded_claim_ids.append(claim_id)
+                self.insert_claim_event(
+                    db,
+                    project_id=project_id,
+                    claim_id=claim_id,
+                    event_type="claim_revalidation_required",
+                    note=note,
+                    metadata={
+                        "source_id": source_id,
+                        "reason": audit_reason,
+                        "invalid_evidence_ids": [
+                            row["id"] for row in invalid_rows if row["claim_id"] == claim_id
+                        ],
+                    },
+                    created_at=now,
+                )
+            db.commit()
+
+        for evidence_id in invalid_evidence_ids:
+            self.mark_lineage_dependents_stale(
+                project_id=project_id,
+                upstream_type="evidence",
+                upstream_id=evidence_id,
+                reason=note,
+            )
+        for claim_id in downgraded_claim_ids:
+            self.mark_lineage_dependents_stale(
+                project_id=project_id,
+                upstream_type="claim",
+                upstream_id=claim_id,
+                reason=note,
+            )
+        if invalid_evidence_ids or downgraded_claim_ids:
+            self.rebuild_index()
+        return {
+            "source_id": source_id,
+            "reviewed_evidence_checked": len(reviewed_rows),
+            "invalid_reviewed_evidence_count": len(invalid_evidence_ids),
+            "claims_revalidation_required": len(downgraded_claim_ids),
+            "invalid_evidence_ids": invalid_evidence_ids,
+            "claim_ids": downgraded_claim_ids,
+        }
 
     def create_reextract_job(self, source_id: str, payload: dict, diff: dict | None = None) -> dict:
         source = self.get_source(source_id)
@@ -10373,6 +13096,10 @@ created_at: {utc_now()}
         return self.get_job(job["id"])
 
     def reextract_source_knowledge(self, source_id: str, payload: dict) -> dict:
+        evidence_audit = self.audit_source_evidence_before_reextract(
+            source_id,
+            reason=normalize_text(payload.get("reason") or "manual source re-extraction"),
+        )
         diff = self.source_version_diff(
             source_id,
             compare_source_id=payload.get("compare_source_id") or payload.get("compareSourceId") or "",
@@ -10446,6 +13173,7 @@ created_at: {utc_now()}
                     "agent_run_id": (result.get("agent_run") or {}).get("id"),
                     "record_counts": counts,
                     "diff": diff,
+                    "evidence_audit": evidence_audit,
                 },
             },
         )
@@ -10460,6 +13188,7 @@ created_at: {utc_now()}
                     "source_id": source_id,
                     "agent_run_id": (result.get("agent_run") or {}).get("id"),
                     "record_counts": counts,
+                    "evidence_audit": evidence_audit,
                 },
             )
             db.commit()
@@ -10469,6 +13198,7 @@ created_at: {utc_now()}
             "item": next((entry for entry in final_job.get("items", []) if entry.get("id") == item_id), None),
             "result": result,
             "diff": diff,
+            "evidence_audit": evidence_audit,
         }
 
     def normalize_job_items(self, payload: dict) -> list[dict]:
@@ -10617,82 +13347,126 @@ created_at: {utc_now()}
         now = now_dt.isoformat()
         lease_expires_at = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
         with self.connect() as db:
-            job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            if not job:
-                raise KeyError(job_id)
-            if job["status"] in {"paused", "canceled", "cleared", "empty"}:
-                return {"ok": True, "job": self.decode_job(dict(job), include_items=True), "item": None, "reason": job["status"]}
-            existing = db.execute(
-                """
-                SELECT *
-                FROM job_items
-                WHERE job_id = ?
-                  AND hidden = 0
-                  AND status = 'running'
-                  AND lease_owner = ?
-                  AND (lease_expires_at IS NULL OR lease_expires_at = '' OR lease_expires_at > ?)
-                ORDER BY item_index ASC
-                LIMIT 1
-                """,
-                (job_id, executor_id, now),
-            ).fetchone()
-            if existing:
-                return {"ok": True, "job": self.get_job(job_id), "item": self.decode_job_item(dict(existing)), "reused": True}
-            candidate = db.execute(
-                """
-                SELECT *
-                FROM job_items
-                WHERE job_id = ?
-                  AND hidden = 0
-                  AND (
-                    status = 'pending'
-                    OR (
-                      status = 'running'
-                      AND (lease_expires_at IS NULL OR lease_expires_at = '' OR lease_expires_at <= ?)
-                    )
-                  )
-                ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, item_index ASC
-                LIMIT 1
-                """,
-                (job_id, now),
-            ).fetchone()
-            if not candidate:
+            item: dict | None = None
+            for _ in range(JOB_CLAIM_CAS_ATTEMPTS):
+                job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if not job:
+                    raise KeyError(job_id)
+                if job["status"] in {"paused", "canceled", "cleared", "empty"}:
+                    return {
+                        "ok": True,
+                        "job": self.decode_job(dict(job), include_items=True),
+                        "item": None,
+                        "reason": job["status"],
+                    }
+                existing = db.execute(
+                    """
+                    SELECT *
+                    FROM job_items
+                    WHERE job_id = ?
+                      AND hidden = 0
+                      AND status = 'running'
+                      AND lease_owner = ?
+                      AND (lease_expires_at IS NULL OR lease_expires_at = '' OR lease_expires_at > ?)
+                    ORDER BY item_index ASC
+                    LIMIT 1
+                    """,
+                    (job_id, executor_id, now),
+                ).fetchone()
+                if existing:
+                    return {
+                        "ok": True,
+                        "job": self.get_job(job_id),
+                        "item": self.decode_job_item(dict(existing)),
+                        "reused": True,
+                    }
+                candidate = db.execute(
+                    """
+                    SELECT *
+                    FROM job_items
+                    WHERE job_id = ?
+                      AND hidden = 0
+                      AND (
+                        status = 'pending'
+                        OR (
+                          status = 'running'
+                          AND (lease_expires_at IS NULL OR lease_expires_at = '' OR lease_expires_at <= ?)
+                        )
+                      )
+                    ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, item_index ASC
+                    LIMIT 1
+                    """,
+                    (job_id, now),
+                ).fetchone()
+                if not candidate:
+                    self.recalculate_job_progress(db, job_id, created_at=now)
+                    db.commit()
+                    return {"ok": True, "job": self.get_job(job_id), "item": None, "reason": "empty"}
+                item = dict(candidate)
+                attempts = int(item.get("attempts") or 0) + 1
+                started_at = item.get("started_at") or now
+                claimed = db.execute(
+                    """
+                    UPDATE job_items
+                    SET status = 'running',
+                        error = '',
+                        error_category = '',
+                        attempts = ?,
+                        started_at = ?,
+                        completed_at = NULL,
+                        lease_owner = ?,
+                        lease_expires_at = ?,
+                        heartbeat_at = ?,
+                        hidden = 0,
+                        cleared_at = NULL,
+                        updated_at = ?
+                    WHERE job_id = ?
+                      AND id = ?
+                      AND hidden = 0
+                      AND (
+                        status = 'pending'
+                        OR (
+                          status = 'running'
+                          AND (lease_expires_at IS NULL OR lease_expires_at = '' OR lease_expires_at <= ?)
+                        )
+                      )
+                      AND EXISTS (
+                        SELECT 1
+                        FROM jobs
+                        WHERE jobs.id = job_items.job_id
+                          AND jobs.status NOT IN ('paused', 'canceled', 'cleared', 'empty')
+                      )
+                    """,
+                    (
+                        attempts,
+                        started_at,
+                        executor_id,
+                        lease_expires_at,
+                        now,
+                        now,
+                        job_id,
+                        item["id"],
+                        now,
+                    ),
+                )
+                if claimed.rowcount != 1:
+                    db.rollback()
+                    item = None
+                    continue
+                self.insert_job_event(
+                    db,
+                    job_id,
+                    item["id"],
+                    "item_claimed",
+                    f"item leased to {executor_id}",
+                    {"executor_id": executor_id, "lease_expires_at": lease_expires_at, "attempts": attempts},
+                    created_at=now,
+                )
                 self.recalculate_job_progress(db, job_id, created_at=now)
                 db.commit()
-                return {"ok": True, "job": self.get_job(job_id), "item": None, "reason": "empty"}
-            item = dict(candidate)
-            attempts = int(item.get("attempts") or 0) + 1
-            started_at = item.get("started_at") or now
-            db.execute(
-                """
-                UPDATE job_items
-                SET status = 'running',
-                    error = '',
-                    error_category = '',
-                    attempts = ?,
-                    started_at = ?,
-                    completed_at = NULL,
-                    lease_owner = ?,
-                    lease_expires_at = ?,
-                    heartbeat_at = ?,
-                    hidden = 0,
-                    cleared_at = NULL,
-                    updated_at = ?
-                WHERE job_id = ? AND id = ?
-                """,
-                (attempts, started_at, executor_id, lease_expires_at, now, now, job_id, item["id"]),
-            )
-            self.insert_job_event(
-                db,
-                job_id,
-                item["id"],
-                "item_claimed",
-                f"item leased to {executor_id}",
-                {"executor_id": executor_id, "lease_expires_at": lease_expires_at, "attempts": attempts},
-                created_at=now,
-            )
-            self.recalculate_job_progress(db, job_id, created_at=now)
-            db.commit()
+                break
+            if item is None:
+                raise RuntimeError("job item claim remained contended after repeated compare-and-swap attempts")
         job = self.get_job(job_id)
         claimed = next((entry for entry in job.get("items", []) if entry["id"] == item["id"]), None)
         return {"ok": True, "job": job, "item": claimed, "reused": False}
@@ -10743,6 +13517,7 @@ created_at: {utc_now()}
     def cancel_job(self, job_id: str) -> dict:
         now = utc_now()
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if not row:
                 raise KeyError(job_id)
@@ -10857,6 +13632,7 @@ created_at: {utc_now()}
                     status,
                     {
                         "status": status,
+                        "attempted_status": status,
                         "previous_status": old_status,
                         "reason": "item already canceled",
                         "executor_id": executor_id,
@@ -10874,6 +13650,29 @@ created_at: {utc_now()}
             title = payload.get("title") or item.get("title") or ""
             source_id = payload.get("source_id") or item.get("source_id") or ""
             result_json = payload.get("result") or {}
+            try:
+                item_input = json.loads(item.get("input_json") or "{}")
+            except json.JSONDecodeError:
+                item_input = {}
+            item_project_id = self.ensure_project(item_input.get("project_id") or "")
+            if source_id:
+                self.validate_project_reference(
+                    db,
+                    project_id=item_project_id,
+                    record_type="source",
+                    record_id=source_id,
+                    field="source_id",
+                    required=False,
+                )
+            capture_plan_id = normalize_text(item_input.get("capture_plan_id") or "")
+            if capture_plan_id:
+                self.validate_project_reference(
+                    db,
+                    project_id=item_project_id,
+                    record_type="capture_plan",
+                    record_id=capture_plan_id,
+                    field="capture_plan_id",
+                )
             attempts = int(item.get("attempts") or 0)
             started_at = item.get("started_at") or None
             completed_at = item.get("completed_at") or None
@@ -10895,14 +13694,17 @@ created_at: {utc_now()}
                 lease_owner = ""
                 lease_expires_at = ""
                 heartbeat_at = ""
-            db.execute(
+            updated = db.execute(
                 """
                 UPDATE job_items
                 SET status = ?, error = ?, error_category = ?, title = ?, source_id = ?, result_json = ?,
                     attempts = ?, started_at = ?, completed_at = ?,
                     lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?,
                     hidden = 0, cleared_at = NULL, updated_at = ?
-                WHERE job_id = ? AND id = ?
+                WHERE job_id = ?
+                  AND id = ?
+                  AND status = ?
+                  AND COALESCE(lease_owner, '') = ?
                 """,
                 (
                     status,
@@ -10920,13 +13722,40 @@ created_at: {utc_now()}
                     now,
                     job_id,
                     item_id,
+                    old_status,
+                    item.get("lease_owner") or "",
                 ),
             )
-            try:
-                item_input = json.loads(item.get("input_json") or "{}")
-            except json.JSONDecodeError:
-                item_input = {}
-            capture_plan_id = normalize_text(item_input.get("capture_plan_id") or "")
+            if updated.rowcount != 1:
+                db.rollback()
+                current = db.execute(
+                    "SELECT * FROM job_items WHERE job_id = ? AND id = ?",
+                    (job_id, item_id),
+                ).fetchone()
+                if not current:
+                    raise KeyError(item_id)
+                current_item = dict(current)
+                if current_item["status"] == "canceled" and status != "canceled":
+                    self.insert_job_event(
+                        db,
+                        job_id,
+                        item_id,
+                        "item_status_ignored",
+                        status,
+                        {
+                            "status": status,
+                            "attempted_status": status,
+                            "previous_status": current_item["status"],
+                            "reason": "item already canceled",
+                            "executor_id": executor_id,
+                        },
+                        created_at=now,
+                    )
+                    db.commit()
+                    return self.get_job(job_id)
+                if current_item["status"] == status:
+                    return self.get_job(job_id)
+                raise ValueError("job item changed concurrently; retry the status update")
             if capture_plan_id and status == "success":
                 db.execute(
                     """
@@ -12103,20 +14932,33 @@ class RequestHandler(BaseHTTPRequestHandler):
             return json_response(self, 500, {"ok": False, "error": str(error)})
 
     def read_json_body(self) -> dict:
-        length = int(self.headers.get("content-length") or "0")
+        try:
+            length = int(self.headers.get("content-length") or "0")
+        except (TypeError, ValueError) as error:
+            raise ValueError("content-length must be a non-negative integer") from error
+        if length < 0:
+            raise ValueError("content-length must be a non-negative integer")
         if length > MAX_BODY_BYTES:
             raise ValueError("request body too large")
         raw = self.rfile.read(length)
         if not raw:
             return {}
         try:
-            return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError as error:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid JSON: {error}") from error
+        if not isinstance(payload, dict):
+            raise ValueError("JSON request body must be an object")
+        return payload
 
     def log_message(self, fmt: str, *args: object) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] {self.address_string()} {fmt % args}")
+        status = str(args[1]) if len(args) > 1 else ""
+        path = urlparse(self.path or "").path
+        print(
+            f"[{timestamp}] {self.address_string()} "
+            f"{self.command or '-'} {path or '/'} {status}".rstrip()
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -12125,12 +14967,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--data-dir", type=Path, default=default_data_dir)
-    return parser.parse_args()
+    parser.add_argument(
+        "--allow-pdf-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Additional local directory allowed for PDF imports. May be repeated; "
+            "Desktop, Documents, Downloads, and the data directory are always allowed."
+        ),
+    )
+    parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help=(
+            "Explicitly allow binding outside localhost. This exposes the token-protected "
+            "service to the network and is not used by the Chrome extension workflow."
+        ),
+    )
+    args = parser.parse_args()
+    host = str(args.host or "").strip().lower()
+    loopback = host == "localhost"
+    if not loopback:
+        try:
+            loopback = ipaddress.ip_address(host.strip("[]")).is_loopback
+        except ValueError:
+            loopback = False
+    if not loopback and not args.allow_non_loopback:
+        parser.error(
+            "--host must be a loopback address unless --allow-non-loopback is explicitly provided"
+        )
+    return args
 
 
 def main() -> None:
+    os.umask(0o077)
     args = parse_args()
-    store = Store(args.data_dir)
+    store = Store(args.data_dir, allowed_pdf_dirs=args.allow_pdf_dir)
     RequestHandler.store = store
     server = ThreadingHTTPServer((args.host, args.port), RequestHandler)
     print(f"{APP_NAME} companion service listening on http://{args.host}:{args.port}")

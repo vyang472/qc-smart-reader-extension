@@ -4,10 +4,10 @@
   --panel: #ffffff;
   --line: #d9e2ec;
   --text: #1c2733;
-  --muted: #66758a;
+  --muted: #58687c;
   --blue: #1267e3;
   --blue-soft: #e8f1ff;
-  --green: #0f9f6e;
+  --green: #087a58;
   --green-soft: #e8f7f1;
   --danger: #c03434;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -145,6 +145,56 @@ main {
   width: 100%;
 }
 
+.option-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.option-row input[type="checkbox"] {
+  width: auto;
+  margin: 3px 0 0;
+}
+
+.option-row span {
+  display: grid;
+  gap: 3px;
+}
+
+.option-row small {
+  line-height: 1.4;
+}
+
+.setup-guide {
+  margin: 10px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid #94bef8;
+  border-radius: 10px;
+  background: var(--blue-soft);
+}
+
+.setup-guide h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.setup-guide ol {
+  margin: 0;
+  padding-left: 22px;
+  line-height: 1.55;
+}
+
+.privacy-consent {
+  border-color: #94bef8;
+  background: #f4f8ff;
+}
+
 button {
   padding: 9px 12px;
 }
@@ -159,6 +209,14 @@ button.primary {
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #0b57d0;
+  outline-offset: 2px;
 }
 
 .source-card,
@@ -227,6 +285,55 @@ textarea {
 .status {
   min-height: 22px;
   margin: 8px 0;
+}
+
+.import-status:not(:empty) {
+  padding: 8px 10px;
+  border-left: 3px solid var(--blue);
+  border-radius: 4px;
+  background: var(--blue-soft);
+  color: var(--text);
+}
+
+.settings-status {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 2px 8px rgb(28 39 51 / 8%);
+}
+
+.settings-status:empty {
+  display: none;
+}
+
+.pending-notes-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.pending-notes-bar .status {
+  min-width: 0;
+  margin: 0;
+}
+
+.pending-notes-bar button {
+  flex: 0 0 auto;
+}
+
+.kb-item.pending-sync {
+  border-color: #d9a441;
+  background: #fffaf0;
 }
 
 .answers {

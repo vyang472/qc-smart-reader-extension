@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">QC Smart Reader</title>
+  <desc id="desc">A white Q on a blue-to-green rounded square.</desc>
+  <defs>
+    <linearGradient id="brand" x1="24" y1="20" x2="104" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1267E3"/>
+      <stop offset="1" stop-color="#087A58"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="96" height="96" rx="23" fill="url(#brand)"/>
+  <circle cx="62" cy="61" r="26" fill="none" stroke="#FFFFFF" stroke-width="12"/>
+  <path d="M77 77 93 93" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round"/>
+</svg>

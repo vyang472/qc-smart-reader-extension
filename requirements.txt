@@ -1,0 +1,10 @@
+# QC Smart Reader companion service dependencies.
+#
+# The HTTP service itself is stdlib-only. The supported launcher/installer still
+# requires this complete, exact set so PDF ingestion works rather than silently
+# shipping a partially functional runtime. requirements.lock authenticates the
+# corresponding wheel bytes.
+# Exact version validated by scripts/test_all.sh on Python 3.9 and the launcher's
+# selected Python. Upgrade this deliberately together with the release version.
+pypdf==6.16.0
+typing_extensions==4.15.0

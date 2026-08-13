@@ -1,39 +1,9 @@
 import assert from "node:assert/strict";
-import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseSiteProfileHtml } from "../extractors/site_profiles.mjs";
-
-const require = createRequire(import.meta.url);
-
-function loadPlaywright() {
-  try {
-    return require("playwright");
-  } catch {
-    // Continue to the bundled Codex runtime path used in this desktop environment.
-  }
-  const pnpmRoot = join(
-    homedir(),
-    ".cache",
-    "codex-runtimes",
-    "codex-primary-runtime",
-    "dependencies",
-    "node",
-    "node_modules",
-    ".pnpm"
-  );
-  try {
-    const entry = readdirSync(pnpmRoot).find((name) => name.startsWith("playwright@"));
-    if (!entry) return null;
-    return require(join(pnpmRoot, entry, "node_modules", "playwright"));
-  } catch {
-    return null;
-  }
-}
+import { launchChromium } from "./browser_runtime.mjs";
 
 async function fixture(name) {
   return readFile(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
@@ -67,20 +37,21 @@ async function extractWithBrowserBundle(browser, fixtureName, url) {
   }
 }
 
-test("browser site profile bundle matches registry fixtures for supported sites", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
-  let browser;
+async function extractHtmlWithBrowserBundle(browser, html, url) {
+  const page = await browser.newPage();
   try {
-    browser = await playwright.chromium.launch({ headless: true });
-  } catch (error) {
-    t.skip(`Chromium is unavailable: ${error.message}`);
-    return;
+    await page.route(url, (route) => route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: html }));
+    await page.goto(url);
+    await page.addScriptTag({ path: fileURLToPath(new URL("../extractors/browser_site_profiles.js", import.meta.url)) });
+    return await page.evaluate(() => window.QCSmartReaderProfiles.extractReadablePage());
+  } finally {
+    await page.close();
   }
+}
+
+test("browser site profile bundle matches registry fixtures for supported sites", async (t) => {
+  const browser = await launchChromium(t, { headless: true });
+  if (!browser) return;
 
   try {
     for (const [fixtureName, url] of PROFILE_PARITY_CASES) {
@@ -108,19 +79,8 @@ test("browser site profile bundle matches registry fixtures for supported sites"
 });
 
 test("browser site profile bundle extracts QuantClass fixture in Chromium", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
-  let browser;
-  try {
-    browser = await playwright.chromium.launch({ headless: true });
-  } catch (error) {
-    t.skip(`Chromium is unavailable: ${error.message}`);
-    return;
-  }
+  const browser = await launchChromium(t, { headless: true });
+  if (!browser) return;
 
   try {
     const html = await fixture("quantclass_thread.html");
@@ -154,19 +114,8 @@ test("browser site profile bundle extracts QuantClass fixture in Chromium", asyn
 });
 
 test("browser site profile bundle preserves QuantClass multi-page continuation semantics", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
-  let browser;
-  try {
-    browser = await playwright.chromium.launch({ headless: true });
-  } catch (error) {
-    t.skip(`Chromium is unavailable: ${error.message}`);
-    return;
-  }
+  const browser = await launchChromium(t, { headless: true });
+  if (!browser) return;
 
   try {
     const page1Html = await fixture("quantclass_thread_multipage_page1.html");
@@ -197,6 +146,130 @@ test("browser site profile bundle preserves QuantClass multi-page continuation s
     assert.match(page2.blocks[1].codeBlocks[0], /revised_filter/);
     assert.equal(page2.images[0].src, expectedPage2.images[0].src);
     assert.equal(page2.attachments[0].href, expectedPage2.attachments[0].href);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("browser generic profile keeps extraction scoped to the specific article root", async (t) => {
+  const browser = await launchChromium(t, { headless: true });
+  if (!browser) return;
+
+  try {
+    const result = await extractHtmlWithBrowserBundle(browser, `
+      <!doctype html>
+      <html>
+        <head><title>Research Page</title></head>
+        <body>
+          <aside><h2>Account</h2><p>PRIVATE-SIDEBAR-TOKEN-1234567890</p></aside>
+          <article>
+            <h1>Scoped Research</h1>
+            <p>First evidence paragraph.</p>
+            <p>Second evidence paragraph.</p>
+            <pre><code>const scoped = true;</code></pre>
+            <img src="/chart.png" alt="research chart">
+          </article>
+        </body>
+      </html>
+    `, "https://research.example/scoped");
+
+    assert.equal(result.title, "Scoped Research");
+    assert.match(result.text, /First evidence paragraph\.\n\nSecond evidence paragraph\./);
+    assert.doesNotMatch(result.text, /PRIVATE-SIDEBAR-TOKEN/);
+    assert.doesNotMatch(result.text, /## Account/);
+    assert.deepEqual(result.images.map((item) => item.src), ["https://research.example/chart.png"]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("browser extraction preserves code indentation exactly", async (t) => {
+  const browser = await launchChromium(t, { headless: true });
+  if (!browser) return;
+
+  try {
+    const code = "def evaluate(value):\n\tif value:\n        return value\n\treturn 0";
+    const result = await extractHtmlWithBrowserBundle(browser, `
+      <!doctype html><title>Code fidelity</title>
+      <article><h1>Code fidelity</h1><p>Runnable example.</p><pre><code>${code}</code></pre></article>
+    `, "https://research.example/code-fidelity");
+
+    assert.equal(result.blocks.length, 0);
+    assert.equal(result.text.includes(`\`\`\`\n${code}\n\`\`\``), true);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("browser extraction distinguishes empty and restricted shells from short real content", async (t) => {
+  const browser = await launchChromium(t, { headless: true });
+  if (!browser) return;
+
+  try {
+    const empty = await extractHtmlWithBrowserBundle(
+      browser,
+      "<!doctype html><title>Empty article</title><body></body>",
+      "https://research.example/empty"
+    );
+    assert.equal(empty.text, "");
+    assert.equal(empty.markdown, "");
+    assert.equal(empty.stats.textChars, 0);
+    assert.equal(empty.stats.emptyContent, true);
+    assert.equal(empty.quality_flags.empty_content, true);
+    assert.equal(empty.quality_flags.auth_required, false);
+
+    const login = await extractHtmlWithBrowserBundle(browser, `
+      <!doctype html><title>Sign in</title>
+      <main><h1>Sign in to continue</h1><button>Sign in</button></main>
+    `, "https://research.example/login");
+    assert.equal(login.text, "");
+    assert.equal(login.stats.authRequired, true);
+    assert.equal(login.quality_flags.auth_required, true);
+
+    const challenge = await extractHtmlWithBrowserBundle(browser, `
+      <!doctype html><title>Checking your browser...</title>
+      <main><p>Verify you are human</p></main>
+    `, "https://research.example/challenge");
+    assert.equal(challenge.text, "");
+    assert.equal(challenge.stats.authRequired, true);
+
+    const shortReal = await extractHtmlWithBrowserBundle(browser, `
+      <!doctype html><title>Brief note</title>
+      <article><h1>Brief note</h1><p>One concise but genuine observation.</p></article>
+    `, "https://research.example/brief");
+    assert.match(shortReal.text, /One concise but genuine observation\./);
+    assert.equal(shortReal.stats.emptyContent, false);
+    assert.equal(shortReal.stats.authRequired, false);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("browser extraction enforces UTF-8 byte budgets for hostile oversized pages", async (t) => {
+  const browser = await launchChromium(t, { headless: true });
+  if (!browser) return;
+
+  try {
+    const hugeBody = "研究证据。".repeat(240_000);
+    const hugeCode = `def oversized():\n${"    return evidence\n".repeat(120_000)}`;
+    const result = await extractHtmlWithBrowserBundle(browser, `
+      <!doctype html><title>Oversized page</title>
+      <article><h1>Oversized page</h1><p>${hugeBody}</p><pre><code>${hugeCode}</code></pre></article>
+    `, "https://research.example/oversized");
+    const bytes = (value) => new TextEncoder().encode(value).length;
+
+    assert.ok(bytes(result.text) <= 768 * 1024, `text bytes=${bytes(result.text)}`);
+    assert.ok(bytes(result.markdown) <= 768 * 1024, `markdown bytes=${bytes(result.markdown)}`);
+    assert.ok(bytes(result.text) < bytes(hugeBody) + bytes(hugeCode), "oversized body/code were duplicated into output");
+    assert.ok(bytes(result.text.match(/```[\s\S]*?```/)?.[0] || "") <= 64 * 1024 + 16);
+    assert.equal(result.stats.truncated, true);
+    assert.equal(result.quality_flags.truncated, true);
+    for (const key of ["bodyTextBytes", "codeBlockBytes", "codeBytes", "textBytes", "markdownBytes"]) {
+      const record = result.stats.truncation[key];
+      assert.ok(record, `missing ${key}`);
+      assert.ok(record.originalBytes >= record.outputBytes, key);
+      assert.ok(record.outputBytes <= record.limitBytes, key);
+    }
   } finally {
     await browser.close();
   }

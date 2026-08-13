@@ -1,0 +1,7 @@
+# Fully hashed, wheel-only install inputs for the macOS companion runtime.
+# Keep versions synchronized with requirements.txt. Hashes are the official
+# PyPI py3-none-any wheel SHA-256 digests.
+pypdf==6.16.0 \
+    --hash=sha256:8c47581faa1cba7006ac269da30075c929c251cc4ffbafb2bcbe260306631118
+typing_extensions==4.15.0 \
+    --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548

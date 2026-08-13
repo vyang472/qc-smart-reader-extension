@@ -45,6 +45,13 @@ const BATCH_RETRY_BASE_DELAY_MS = 1500;
 const BATCH_MAX_CONCURRENCY = 3;
 const DEFAULT_BATCH_HEARTBEAT_INTERVAL_MS = 30000;
 const MIN_BATCH_HEARTBEAT_INTERVAL_MS = 100;
+const SELECTION_QUEUED_MESSAGE = "qc-smart-reader-selection-queued";
+const CLAIM_SELECTION_MESSAGE = "qc-smart-reader-claim-selection";
+const FALLBACK_LEGACY_PROJECT_ID = "default";
+const PENDING_NOTE_SYNC_TAG_PREFIX = "qc-local-note:";
+const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.0";
+const REQUIRED_COMPANION_API_VERSION = 1;
+const MODEL_DATA_CONSENT_VERSION = "2026-08-14-v1";
 const BATCH_RETRYABLE_FAILURE_LIMITS = {
   page_timeout: 3,
   network_error: 3,
@@ -98,6 +105,8 @@ const STRATEGY_REVIEW_CHECKLISTS = {
 const state = {
   source: null,
   lastAnswer: "",
+  lastAnswerSourceFingerprint: "",
+  busyDepth: 0,
   settings: null,
   batchQueue: [],
   batchRunning: false,
@@ -105,6 +114,8 @@ const state = {
   batchCancelRequested: false,
   batchExecutorId: "",
   batchConcurrency: 1,
+  batchProjectId: "",
+  busy: false,
   currentBatchJobId: "",
   batchMetrics: {
     startedAt: "",
@@ -136,6 +147,9 @@ const state = {
   claimReviewQueue: []
 };
 
+let pendingSelectionConsumption = Promise.resolve();
+let pendingSelectionMessagesBound = false;
+
 const $ = (id) => document.getElementById(id);
 
 function sourceFingerprint(source) {
@@ -146,19 +160,67 @@ function sourceFingerprint(source) {
     normalizeUrl(source?.url || ""),
     source?.title || "",
     text.length,
-    text.slice(0, 512),
-    text.slice(-512)
+    stableTextDigest(text)
   ].join("\n---\n");
+}
+
+function stableTextDigest(text) {
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (let index = 0; index < text.length; index += 1) {
+    const value = text.charCodeAt(index);
+    left = Math.imul(left ^ value, 0x01000193) >>> 0;
+    right = Math.imul(right ^ (value + index), 0x85ebca6b) >>> 0;
+  }
+  return `${left.toString(16).padStart(8, "0")}${right.toString(16).padStart(8, "0")}`;
 }
 
 function markCurrentSourceFingerprint() {
   if (state.source) {
-    state.source.sourceFingerprint = sourceFingerprint(state.source);
+    const fingerprint = sourceFingerprint(state.source);
+    if (state.lastAnswer && state.lastAnswerSourceFingerprint !== fingerprint) {
+      state.lastAnswer = "";
+      state.lastAnswerSourceFingerprint = "";
+      const answers = $("answers");
+      if (answers) answers.textContent = "";
+    }
+    state.source.sourceFingerprint = fingerprint;
   }
 }
 
 function currentProjectId() {
   return state.settings?.projectId || "default";
+}
+
+function currentSourceProjectId() {
+  return String(state.source?.projectId || state.source?.project_id || "").trim();
+}
+
+function assertCurrentSourceProject() {
+  if (!state.source) return;
+  const projectId = currentProjectId();
+  const sourceProjectId = currentSourceProjectId();
+  if (!sourceProjectId) {
+    state.source.projectId = projectId;
+    return;
+  }
+  if (sourceProjectId !== projectId) {
+    throw new Error(`当前来源属于项目 ${sourceProjectId}，不能写入当前项目 ${projectId}；请重新读取来源。`);
+  }
+}
+
+function resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId) {
+  if (!state.source || previousProjectId === nextProjectId) return false;
+  state.source = null;
+  state.lastAnswer = "";
+  state.lastAnswerSourceFingerprint = "";
+  state.currentSourceDetailId = "";
+  state.currentSourceDetail = null;
+  state.sourceDiffs = {};
+  $("answers").textContent = "";
+  renderSource();
+  setStatus(`已切换到项目 ${nextProjectId}；请重新读取该项目的来源。`);
+  return true;
 }
 
 function queryWithProject(params = {}) {
@@ -173,6 +235,23 @@ async function init() {
   renderAgents();
   bindEvents();
   await loadSettings();
+  bindPendingSelectionMessages();
+  await queuePendingSelectionHydration({ automatic: true });
+  if (!state.settings?.pairingToken) {
+    showTab("settings");
+    setSettingsStatus("尚未完成配对。请按上方 3 步首次使用指引连接本地服务。");
+    await loadBatchQueue();
+    return;
+  }
+  try {
+    const health = await companionRequest("/health", { method: "GET" });
+    assertCompatibleCompanion(health);
+  } catch (error) {
+    showTab("settings");
+    setSettingsStatus(`本地服务尚未就绪：${error.message}`);
+    await loadBatchQueue();
+    return;
+  }
   await loadProjects();
   await loadProjectBrief();
   await loadCapturePlans();
@@ -181,16 +260,33 @@ async function init() {
   await loadDeliverables();
   await loadStrategyWorkspace();
   await loadBatchQueue();
-  await hydratePendingSelection();
 }
 
 function bindTabs() {
-  document.querySelectorAll(".tab").forEach((tab) => {
+  const tabs = Array.from(document.querySelectorAll(".tab"));
+  tabs.forEach((tab, index) => {
     tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+      tabs.forEach((item) => {
+        item.classList.remove("active");
+        item.setAttribute("aria-selected", "false");
+        item.tabIndex = -1;
+      });
       document.querySelectorAll(".panel").forEach((panel) => panel.classList.remove("active"));
       tab.classList.add("active");
+      tab.setAttribute("aria-selected", "true");
+      tab.tabIndex = 0;
       $(tab.dataset.tab).classList.add("active");
+    });
+    tab.addEventListener("keydown", (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      let nextIndex = index;
+      if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+      if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = tabs.length - 1;
+      tabs[nextIndex].click();
+      tabs[nextIndex].focus();
     });
   });
 }
@@ -225,13 +321,16 @@ function bindEvents() {
   $("clearBtn").addEventListener("click", () => {
     $("answers").textContent = "";
     state.lastAnswer = "";
+    state.lastAnswerSourceFingerprint = "";
     setStatus("");
   });
   $("saveNoteBtn").addEventListener("click", saveCurrentNote);
-  $("saveSettingsBtn").addEventListener("click", saveSettings);
+  $("saveSettingsBtn").addEventListener("click", () => saveSettings().catch(() => {}));
   $("testSettingsBtn").addEventListener("click", testSettings);
   $("clearApiKeyBtn").addEventListener("click", clearServiceApiKey);
   $("testCompanionBtn").addEventListener("click", testCompanion);
+  $("providerSelect").addEventListener("change", syncProviderControls);
+  $("modelDataConsentInput").addEventListener("change", persistModelDataConsent);
   $("runVaultDoctorBtn").addEventListener("click", runVaultDoctor);
   $("rebuildLineageBtn").addEventListener("click", rebuildLineage);
   $("projectSelect").addEventListener("change", changeProject);
@@ -244,6 +343,7 @@ function bindEvents() {
   $("refreshCapturePlansBtn").addEventListener("click", loadCapturePlans);
   $("enqueueApprovedPlansBtn").addEventListener("click", enqueueApprovedCapturePlans);
   $("refreshKbBtn").addEventListener("click", refreshKnowledgeWorkspace);
+  $("syncPendingNotesBtn").addEventListener("click", syncPendingNotes);
   $("refreshReviewQueueBtn").addEventListener("click", loadReviewQueue);
   $("sourceStatusFilter").addEventListener("change", loadSourceLibrary);
   $("searchSourcesBtn").addEventListener("click", searchSourcesAndChunks);
@@ -265,6 +365,11 @@ function bindEvents() {
   $("clearBatchBtn").addEventListener("click", clearBatchQueue);
   $("ingestPdfBtn").addEventListener("click", ingestPdf);
   $("ingestYoutubeBtn").addEventListener("click", ingestYoutubeTranscript);
+  $("pdfOcrInput").addEventListener("change", syncPdfImportMode);
+  $("youtubeTranscriptInput").addEventListener("input", syncYoutubeImportMode);
+  $("youtubeLanguageInput").addEventListener("input", syncYoutubeImportMode);
+  syncPdfImportMode();
+  syncYoutubeImportMode();
   $("exportMarkdownBtn").addEventListener("click", () => exportKnowledgeBase("markdown"));
   $("exportJsonBtn").addEventListener("click", () => exportKnowledgeBase("json"));
   $("clearKbBtn").addEventListener("click", clearKnowledgeBase);
@@ -296,23 +401,128 @@ function bindEvents() {
   $("splitSelectedClaimBtn").addEventListener("click", splitSelectedClaim);
 }
 
-async function hydratePendingSelection() {
-  const session = await chrome.storage.session.get("pendingSelection");
-  const pending = session.pendingSelection;
-  if (!pending?.text) return false;
+function bindPendingSelectionMessages() {
+  if (pendingSelectionMessagesBound || !chrome.runtime?.onMessage?.addListener) return;
+  pendingSelectionMessagesBound = true;
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== SELECTION_QUEUED_MESSAGE) return false;
+    queuePendingSelectionHydration({
+      automatic: true,
+      selectionId: message.selectionId || "",
+      noticeId: message.noticeId || "",
+      expectedTabId: message.tabId,
+      expectedWindowId: message.windowId
+    }).catch((error) => {
+      console.warn("Pending selection live delivery failed.", error);
+    });
+    return false;
+  });
+}
 
-    state.source = {
-      title: pending.title || "选中文本",
-      projectId: currentProjectId(),
-      url: pending.url || "",
-      text: pending.text,
-      kind: "selection",
-      site: inferSiteFromUrl(pending.url || ""),
-      stats: { profile: "selection", textChars: countCjkAwareChars(pending.text), quality: 30 },
-      capturedAt: pending.capturedAt || new Date().toISOString()
-    };
+function queuePendingSelectionHydration(options = {}) {
+  const consume = () => hydratePendingSelection(options);
+  const current = pendingSelectionConsumption.then(consume, consume);
+  pendingSelectionConsumption = current.catch(() => false);
+  return current;
+}
+
+function integerChromeId(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+async function currentSidePanelTarget() {
+  let windowId = null;
+  let tab = null;
+  try {
+    if (chrome.windows?.getCurrent) {
+      const currentWindow = await chrome.windows.getCurrent();
+      windowId = integerChromeId(currentWindow?.id);
+    }
+  } catch (_error) {
+    // The active tab below still gives us a reliable target on older Chrome versions.
+  }
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch (_error) {
+    tab = null;
+  }
+  return {
+    tabId: integerChromeId(tab?.id),
+    windowId: windowId ?? integerChromeId(tab?.windowId)
+  };
+}
+
+function notificationTargetsCurrentPanel(options, target) {
+  const expectedTabId = integerChromeId(options.expectedTabId);
+  const expectedWindowId = integerChromeId(options.expectedWindowId);
+  if (expectedTabId !== null && target.tabId !== null && expectedTabId === target.tabId) return true;
+  if (expectedWindowId !== null && target.windowId !== null && expectedWindowId === target.windowId) return true;
+  return expectedTabId === null && expectedWindowId === null;
+}
+
+async function hydratePendingSelection(options = {}) {
+  await ensureSettingsLoaded();
+  if (state.busy && !options.automatic) {
+    setStatus("当前操作尚未完成，暂不能切换来源。");
+    return false;
+  }
+  const target = await currentSidePanelTarget();
+  const targetsThisPanel = notificationTargetsCurrentPanel(options, target);
+  if (options.automatic && state.source) {
+    if (targetsThisPanel) {
+      setStatus("收到新的右键选中文本，已保留在待载入队列；点击“使用选中文本”切换来源。");
+    }
+    return false;
+  }
+  if (options.automatic && !targetsThisPanel) return false;
+
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: CLAIM_SELECTION_MESSAGE,
+      selectionId: options.selectionId || "",
+      noticeId: options.noticeId || "",
+      tabId: target.tabId,
+      windowId: target.windowId,
+      projectId: currentProjectId()
+    });
+  } catch (error) {
+    console.warn("Pending selection claim failed.", error);
+    if (!options.automatic) setStatus(`读取待选文本失败：${error.message}`);
+    return false;
+  }
+  if (!response?.ok) {
+    if (!options.automatic) setStatus(`读取待选文本失败：${response?.error || "后台服务未响应"}`);
+    return false;
+  }
+  if (!response.selection) {
+    if (response.reason === "queue_full") {
+      setStatus(`待载入选中文本已达上限（${Number(response.pendingCount || 20)} 条），本次选择未入队且没有覆盖旧内容。请先点击“使用选中文本”处理队列后再试。`);
+    }
+    if (response.reason === "project_mismatch") {
+      setStatus(`有一条右键选中文本属于项目 ${response.selectionProjectId || "其他项目"}；切回该项目后再载入。`);
+    }
+    return false;
+  }
+
+  const pending = response.selection;
+  const pendingProjectId = String(pending.projectId || currentProjectId()).trim() || currentProjectId();
+  if (pendingProjectId !== currentProjectId()) {
+    setStatus(`右键选中文本属于项目 ${pendingProjectId}，不能载入当前项目 ${currentProjectId()}。`);
+    return false;
+  }
+  state.source = {
+    title: pending.title || "选中文本",
+    projectId: pendingProjectId,
+    url: pending.url || "",
+    text: pending.text,
+    kind: "selection",
+    site: inferSiteFromUrl(pending.url || ""),
+    stats: { profile: "selection", textChars: countCjkAwareChars(pending.text), quality: 30 },
+    capturedAt: pending.capturedAt || new Date().toISOString()
+  };
   markCurrentSourceFingerprint();
-  chrome.storage.session.remove("pendingSelection");
   renderSource();
   setStatus("已载入右键选中的文本。");
   return true;
@@ -1005,7 +1215,11 @@ function renderSource() {
   $("sourceTitle").textContent = source?.title || "尚未读取内容";
   $("sourceStats").textContent = `${countCjkAwareChars(source?.text || "")} 字`;
   $("sourceUrl").textContent = source?.url || "";
-  $("sourceLine").textContent = source?.kind === "selection" ? "当前来源：选中文本" : "当前来源：网页正文";
+  $("sourceLine").textContent = !source
+    ? "读取网页、帖子、论文片段"
+    : source.kind === "selection"
+      ? "当前来源：选中文本"
+      : "当前来源：网页正文";
   renderSourcePreview(source);
 }
 
@@ -1030,7 +1244,8 @@ function renderSourcePreview(source) {
     ["评论", stats.comments ?? 0],
     ["分页", stats.nextPages ?? source.nextPages?.length ?? 0],
     ["PDF页", stats.pages ?? 0],
-    ["字幕段", stats.transcriptSegments ?? 0]
+    ["字幕段", stats.transcriptSegments ?? 0],
+    ...(stats.ocrPagesReplaced === undefined ? [] : [["OCR替换页", stats.ocrPagesReplaced]])
   ];
   for (const [label, value] of items) {
     const node = document.createElement("span");
@@ -1058,20 +1273,101 @@ function renderSourcePreview(source) {
 }
 
 async function loadBatchQueue() {
-  const { batchQueue = [], batchMetrics = null, batchConcurrency = 1 } = await chrome.storage.local.get(["batchQueue", "batchMetrics", "batchConcurrency"]);
-  state.batchQueue = Array.isArray(batchQueue) ? batchQueue : [];
-  state.batchConcurrency = normalizeBatchConcurrency(batchConcurrency);
-  state.batchMetrics = normalizeBatchMetrics(batchMetrics);
+  const projectId = currentProjectId();
+  const {
+    batchQueue = [],
+    batchMetrics = null,
+    batchConcurrency = 1,
+    batchMetricsByProject = {},
+    batchConcurrencyByProject = {}
+  } = await chrome.storage.local.get([
+    "batchQueue",
+    "batchMetrics",
+    "batchConcurrency",
+    "batchMetricsByProject",
+    "batchConcurrencyByProject"
+  ]);
+  const storedQueue = Array.isArray(batchQueue) ? batchQueue : [];
+  let migratedLegacyItems = false;
+  const scopedQueue = storedQueue.map((item) => {
+    const itemProjectId = batchItemProjectId(item);
+    if (itemProjectId) {
+      return item.projectId === itemProjectId ? item : { ...item, projectId: itemProjectId };
+    }
+    migratedLegacyItems = true;
+    return { ...item, projectId };
+  });
+  const metricsByProject = isRecord(batchMetricsByProject) ? batchMetricsByProject : {};
+  const concurrencyByProject = isRecord(batchConcurrencyByProject) ? batchConcurrencyByProject : {};
+  const hasScopedMetrics = Object.keys(metricsByProject).length > 0;
+  const hasScopedConcurrency = Object.keys(concurrencyByProject).length > 0;
+  state.batchProjectId = projectId;
+  state.batchQueue = scopedQueue.filter((item) => item.projectId === projectId);
+  state.batchConcurrency = normalizeBatchConcurrency(
+    concurrencyByProject[projectId] ?? (!hasScopedConcurrency ? batchConcurrency : 1)
+  );
+  state.batchMetrics = normalizeBatchMetrics(
+    metricsByProject[projectId] ?? (!hasScopedMetrics ? batchMetrics : null)
+  );
+  state.currentBatchJobId = "";
   syncBatchConcurrencyInput();
   renderBatchQueue();
+  if (migratedLegacyItems || !(projectId in metricsByProject) || !(projectId in concurrencyByProject)) {
+    await saveBatchQueue(projectId);
+  }
 }
 
-async function saveBatchQueue() {
+async function saveBatchQueue(projectId = state.batchProjectId || currentProjectId()) {
+  const normalizedProjectId = String(projectId || "default");
+  const stored = await chrome.storage.local.get([
+    "batchQueue",
+    "batchMetricsByProject",
+    "batchConcurrencyByProject"
+  ]);
+  const otherProjectItems = (Array.isArray(stored.batchQueue) ? stored.batchQueue : [])
+    .filter((item) => {
+      const itemProjectId = batchItemProjectId(item);
+      return itemProjectId && itemProjectId !== normalizedProjectId;
+    })
+    .map((item) => ({ ...item, projectId: batchItemProjectId(item) }));
+  const currentProjectItems = state.batchQueue.map((item) => ({
+    ...item,
+    projectId: normalizedProjectId
+  }));
+  const metricsByProject = {
+    ...(isRecord(stored.batchMetricsByProject) ? stored.batchMetricsByProject : {}),
+    [normalizedProjectId]: state.batchMetrics
+  };
+  const concurrencyByProject = {
+    ...(isRecord(stored.batchConcurrencyByProject) ? stored.batchConcurrencyByProject : {}),
+    [normalizedProjectId]: state.batchConcurrency
+  };
   await chrome.storage.local.set({
-    batchQueue: state.batchQueue,
+    batchQueue: [...otherProjectItems, ...currentProjectItems],
     batchMetrics: state.batchMetrics,
-    batchConcurrency: state.batchConcurrency
+    batchConcurrency: state.batchConcurrency,
+    batchMetricsByProject: metricsByProject,
+    batchConcurrencyByProject: concurrencyByProject
   });
+  state.batchProjectId = normalizedProjectId;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function batchItemProjectId(item) {
+  return String(item?.projectId || item?.project_id || "").trim();
+}
+
+function batchJobProjectId(job) {
+  const topLevel = String(job?.input?.project_id || job?.input?.projectId || "").trim();
+  if (topLevel) return topLevel;
+  for (const item of job?.items || []) {
+    const itemProjectId = String(item?.input?.project_id || item?.input?.projectId || "").trim();
+    if (itemProjectId) return itemProjectId;
+  }
+  return "";
 }
 
 async function enqueueBatchUrls() {
@@ -1105,6 +1401,7 @@ function addUrlsToQueue(urls) {
     existing.add(normalized);
     state.batchQueue.push({
       id: crypto.randomUUID(),
+      projectId: currentProjectId(),
       url: normalized,
       canonicalUrl: normalized,
       title: normalized,
@@ -1136,7 +1433,12 @@ async function restoreBatchFromCompanion() {
   setBatchStatus("正在从本地服务恢复最近任务...");
   try {
     const jobsResponse = await companionRequest("/v1/jobs?limit=20", { method: "GET" });
-    const jobs = (jobsResponse.jobs || []).filter((job) => job.type === "read");
+    const projectId = currentProjectId();
+    const jobs = (jobsResponse.jobs || []).filter((job) => {
+      if (job.type !== "read") return false;
+      const jobProjectId = batchJobProjectId(job);
+      return jobProjectId ? jobProjectId === projectId : projectId === "default";
+    });
     if (!jobs.length) {
       setBatchStatus("本地服务里没有可恢复的 read job。");
       return;
@@ -1149,6 +1451,7 @@ async function restoreBatchFromCompanion() {
         body: { max_age_seconds: 300 }
       });
       const job = recovered.job || detail.job;
+      if (batchJobProjectId(job) && batchJobProjectId(job) !== projectId) continue;
       if ((job.items || []).some((item) => ["pending", "failed", "running"].includes(item.status))) {
         selectedJob = job;
         break;
@@ -1170,6 +1473,8 @@ async function restoreBatchFromCompanion() {
 }
 
 function mergeJobIntoBatchQueue(job) {
+  const jobProjectId = batchJobProjectId(job);
+  if (jobProjectId && jobProjectId !== currentProjectId()) return 0;
   updateBatchQualityGateFromJob(job);
   const existing = new Map(state.batchQueue.map((item) => [normalizeUrl(item.url), item]));
   let restored = 0;
@@ -1194,6 +1499,7 @@ function mergeJobIntoBatchQueue(job) {
     const nextPages = paginationCheckpoint?.next_pages || normalizeBatchNextPages(existingItem?.nextPages || []);
     const next = {
       id: existingItem?.id || jobItem.input?.client_id || crypto.randomUUID(),
+      projectId: jobProjectId || currentProjectId(),
       url,
       canonicalUrl: jobItem.input?.canonical_url || normalizeUrl(url),
       title: jobItem.title || jobItem.input?.title || url,
@@ -1201,6 +1507,7 @@ function mergeJobIntoBatchQueue(job) {
       error: jobItem.error || "",
       errorCategory: jobItem.error_category || "",
       browserAttempts: Number(jobItem.result?.browser_attempts || existingItem?.browserAttempts || 0),
+      retryable: typeof result.retryable === "boolean" ? result.retryable : existingItem?.retryable,
       lastAttemptAt: existingItem?.lastAttemptAt || jobItem.started_at || "",
       startedAt: jobItem.started_at || existingItem?.startedAt || "",
       completedAt: jobItem.completed_at || existingItem?.completedAt || (["success", "failed"].includes(localStatus) ? jobItem.updated_at || "" : ""),
@@ -1480,11 +1787,14 @@ async function processBatchQueue() {
   startBatchRun(processable.length, concurrency);
   setBusy(true);
   try {
-    const serviceReady = await prepareServiceBackedBatch(processable);
-    if (serviceReady) {
+    const preparation = await prepareServiceBackedBatch(processable);
+    if (preparation.ready) {
       await processBatchQueueFromService(processable, concurrency);
     } else {
-      await processBatchQueueLocally(processable, concurrency);
+      setBatchStatus(preparation.message);
+      await processBatchQueueLocally(processable, concurrency, {
+        preparationMessage: preparation.message
+      });
     }
   } finally {
     state.batchRunning = false;
@@ -1523,6 +1833,10 @@ function batchExecutorId() {
   return state.batchExecutorId;
 }
 
+function batchWorkerExecutorId(workerIndex) {
+  return `${batchExecutorId()}-worker-${Number(workerIndex) + 1}`;
+}
+
 function batchHeartbeatIntervalMs() {
   const configured = Number(
     state.settings?.batchHeartbeatIntervalMs ||
@@ -1536,11 +1850,18 @@ function batchHeartbeatIntervalMs() {
 }
 
 async function prepareServiceBackedBatch(items) {
+  const configured = companionServiceConfigured();
   try {
     await ensureBatchJobItems(items);
     const jobIds = uniqueJobIds(items);
-    if (!jobIds.length) return false;
+    if (!jobIds.length) {
+      const message = configured
+        ? "服务端批量准备失败：未能创建或关联服务端任务。已明确切换为浏览器本地队列，每条结果仍会尝试写入 Vault。"
+        : "未完成 Companion 配置，已使用浏览器本地队列；写入 Vault 前仍需有效的 Pairing Token。";
+      return { ready: false, configured, message };
+    }
     for (const jobId of jobIds) {
+      const preparationErrors = [];
       try {
         const recovered = await companionRequest(`/v1/jobs/${encodeURIComponent(jobId)}/recover`, {
           method: "POST",
@@ -1548,6 +1869,7 @@ async function prepareServiceBackedBatch(items) {
         });
         mergeJobIntoBatchQueue(recovered.job);
       } catch (error) {
+        preparationErrors.push(error);
         console.warn("Companion job recovery before batch failed.", error);
       }
       try {
@@ -1557,6 +1879,7 @@ async function prepareServiceBackedBatch(items) {
         });
         mergeJobIntoBatchQueue(retried.job);
       } catch (error) {
+        preparationErrors.push(error);
         console.warn("Companion failed-item reset before batch failed.", error);
       }
       try {
@@ -1566,29 +1889,76 @@ async function prepareServiceBackedBatch(items) {
         });
         mergeJobIntoBatchQueue(resumed.job);
       } catch (error) {
+        preparationErrors.push(error);
         console.warn("Companion job resume before batch failed.", error);
       }
+      if (preparationErrors.length) throw preparationErrors[0];
     }
     await saveBatchQueue();
     renderBatchQueue();
-    return true;
+    return { ready: true, configured, message: "" };
   } catch (error) {
     console.warn("Companion claim-next preparation failed; falling back to local batch loop.", error);
-    return false;
+    const detail = shortText(error?.message || String(error || "未知错误"), 160);
+    const message = configured
+      ? `服务端批量准备失败（${detail}）。已明确切换为浏览器本地队列，每条结果仍会尝试写入 Vault。`
+      : `Companion 未配置或不可用（${detail}）。已使用浏览器本地队列。`;
+    return { ready: false, configured, message };
   }
+}
+
+function companionServiceConfigured() {
+  return Boolean(String(state.settings?.serviceUrl || "").trim() && String(state.settings?.pairingToken || "").trim());
+}
+
+function isBatchItemRetryable(item) {
+  if (item?.status !== "failed") return false;
+  if (typeof item.retryable === "boolean") return item.retryable;
+  return shouldRetryBatchFailure(item.errorCategory || "unknown", Number(item.browserAttempts || 0));
+}
+
+function batchCompletionCounts(items) {
+  const counts = { success: 0, failed: 0, retryable: 0, canceled: 0, unfinished: 0 };
+  for (const item of Array.isArray(items) ? items : []) {
+    if (item?.status === "success") counts.success += 1;
+    else if (item?.status === "failed") {
+      counts.failed += 1;
+      if (isBatchItemRetryable(item)) counts.retryable += 1;
+    } else if (item?.status === "canceled") counts.canceled += 1;
+    else counts.unfinished += 1;
+  }
+  return counts;
+}
+
+function formatBatchCompletionSummary(items) {
+  const counts = batchCompletionCounts(items);
+  const parts = [
+    `成功 ${counts.success}`,
+    `失败 ${counts.failed}`,
+    `可重试 ${counts.retryable}`,
+    `已取消 ${counts.canceled}`
+  ];
+  if (counts.unfinished) parts.push(`未完成 ${counts.unfinished}`);
+  return parts.join(" · ");
+}
+
+function setBatchCompletionStatus(items, lead = "批量处理结束", contextMessage = "") {
+  const prefix = contextMessage ? `${contextMessage} ` : "";
+  setBatchStatus(`${prefix}${lead}：${formatBatchCompletionSummary(items)}。`);
 }
 
 async function processBatchQueueFromService(initialItems, concurrency = 1) {
   const total = initialItems.length;
   let completed = 0;
   let stopReason = "";
+  let dispatchError = null;
   const jobIds = uniqueJobIds(initialItems);
   const workerCount = Math.min(normalizeBatchConcurrency(concurrency), Math.max(1, total));
 
-  async function claimNextFromAnyJob() {
+  async function claimNextFromAnyJob(executorId) {
     for (const jobId of jobIds) {
       if (state.batchCancelRequested || state.batchPaused || stopReason) break;
-      const claim = await claimNextBatchJobItem(jobId);
+      const claim = await claimNextBatchJobItem(jobId, executorId);
       if (claim.item) return claim;
       if (claim.reason === "paused" || claim.reason === "canceled") {
         stopReason = claim.reason;
@@ -1598,39 +1968,50 @@ async function processBatchQueueFromService(initialItems, concurrency = 1) {
     return { item: null, reason: stopReason || "drained" };
   }
 
-  async function worker() {
-    while (!state.batchCancelRequested && !state.batchPaused && !stopReason) {
-      const claim = await claimNextFromAnyJob();
-      if (!claim.item) break;
-      const item = localItemForJobItem(claim.job, claim.item);
-      if (!item) continue;
-      completed += 1;
-      const index = completed;
-      await processClaimedBatchItem(item, index, total);
+  async function worker(workerIndex) {
+    const executorId = batchWorkerExecutorId(workerIndex);
+    try {
+      while (!state.batchCancelRequested && !state.batchPaused && !stopReason) {
+        const claim = await claimNextFromAnyJob(executorId);
+        if (!claim.item) break;
+        const item = localItemForJobItem(claim.job, claim.item);
+        if (!item) continue;
+        completed += 1;
+        const index = completed;
+        await processClaimedBatchItem(item, index, total, executorId);
+      }
+    } catch (error) {
+      dispatchError = dispatchError || error;
+      stopReason = "error";
     }
   }
 
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => worker(workerIndex)));
 
   if (state.batchCancelRequested) {
-    setBatchStatus("批量任务已取消。");
+    setBatchCompletionStatus(initialItems, "批量任务已取消");
   } else if (state.batchPaused) {
     await pauseBatchJobForItems(initialItems);
-    setBatchStatus("批量任务已暂停。");
+    setBatchCompletionStatus(initialItems, "批量任务已暂停");
   } else if (stopReason === "paused") {
-    setBatchStatus("服务端任务已暂停。");
+    setBatchCompletionStatus(initialItems, "服务端任务已暂停");
   } else if (stopReason === "canceled") {
-    setBatchStatus("服务端任务已取消。");
+    setBatchCompletionStatus(initialItems, "服务端任务已取消");
+  } else if (dispatchError) {
+    setBatchCompletionStatus(
+      initialItems,
+      `服务端批量执行中断（${shortText(dispatchError.message || String(dispatchError), 140)}）`
+    );
   } else {
-    setBatchStatus(`批量处理完成：${completed} 个 URL。`);
+    setBatchCompletionStatus(initialItems);
   }
 }
 
-async function claimNextBatchJobItem(jobId) {
+async function claimNextBatchJobItem(jobId, executorId = batchExecutorId()) {
   const response = await companionRequest(`/v1/jobs/${encodeURIComponent(jobId)}/claim-next`, {
     method: "POST",
     body: {
-      executor_id: batchExecutorId(),
+      executor_id: executorId,
       lease_seconds: 180
     }
   });
@@ -1650,13 +2031,13 @@ function localItemForJobItem(job, jobItem) {
   return item || null;
 }
 
-async function processClaimedBatchItem(item, index, total) {
+async function processClaimedBatchItem(item, index, total, executorId = batchExecutorId()) {
   markBatchItemRunning(item);
   await saveBatchQueue();
   renderBatchQueue();
   setBatchStatus(`正在处理 ${index}/${total}: ${item.url}`);
 
-  const heartbeat = startBatchItemHeartbeat(item);
+  const heartbeat = startBatchItemHeartbeat(item, executorId);
   try {
     const { extracted, capture, browserAttempts } = await captureBatchItemWithRetries(item, { index, total });
     markBatchItemCompleted(item, "success");
@@ -1665,9 +2046,10 @@ async function processClaimedBatchItem(item, index, total) {
     item.error = "";
     item.errorCategory = "";
     item.browserAttempts = browserAttempts;
+    item.retryable = false;
     const paginationCheckpoint = applyBatchPaginationCheckpoint(item, buildBatchPaginationCheckpoint(item, extracted, capture));
     await updateBatchJobItem(item, "success", {
-      executor_id: batchExecutorId(),
+      executor_id: executorId,
       title: item.title,
       source_id: item.sourceId,
       result: {
@@ -1686,8 +2068,9 @@ async function processClaimedBatchItem(item, index, total) {
     item.error = error.message || String(error);
     item.errorCategory = error.errorCategory || inferBatchFailureCategory(item.error);
     item.browserAttempts = error.browserAttempts || item.browserAttempts || 1;
+    item.retryable = shouldRetryBatchFailure(item.errorCategory, item.browserAttempts);
     await updateBatchJobItem(item, "failed", {
-      executor_id: batchExecutorId(),
+      executor_id: executorId,
       error: item.error,
       error_category: item.errorCategory,
       title: item.title || item.url,
@@ -1733,14 +2116,14 @@ function recordBatchHeartbeat(item, heartbeatAt) {
   };
 }
 
-function startBatchItemHeartbeat(item) {
+function startBatchItemHeartbeat(item, executorId = batchExecutorId()) {
   return setInterval(async () => {
     if (!item.jobId || !item.jobItemId || item.status !== "running") return;
     try {
       const response = await companionRequest(`/v1/jobs/${encodeURIComponent(item.jobId)}/items/${encodeURIComponent(item.jobItemId)}/heartbeat`, {
         method: "POST",
         body: {
-          executor_id: batchExecutorId(),
+          executor_id: executorId,
           lease_seconds: 180
         }
       });
@@ -1754,7 +2137,7 @@ function startBatchItemHeartbeat(item) {
   }, batchHeartbeatIntervalMs());
 }
 
-async function processBatchQueueLocally(items, concurrency = 1) {
+async function processBatchQueueLocally(items, concurrency = 1, options = {}) {
   let completed = 0;
   let nextIndex = 0;
   const workerCount = Math.min(normalizeBatchConcurrency(concurrency), Math.max(1, items.length));
@@ -1782,6 +2165,7 @@ async function processBatchQueueLocally(items, concurrency = 1) {
         item.error = "";
         item.errorCategory = "";
         item.browserAttempts = browserAttempts;
+        item.retryable = false;
         const paginationCheckpoint = applyBatchPaginationCheckpoint(item, buildBatchPaginationCheckpoint(item, extracted, capture));
         await updateBatchJobItem(item, "success", {
           title: item.title,
@@ -1802,6 +2186,7 @@ async function processBatchQueueLocally(items, concurrency = 1) {
         item.error = error.message || String(error);
         item.errorCategory = error.errorCategory || inferBatchFailureCategory(item.error);
         item.browserAttempts = error.browserAttempts || item.browserAttempts || 1;
+        item.retryable = shouldRetryBatchFailure(item.errorCategory, item.browserAttempts);
         await updateBatchJobItem(item, "failed", {
           error: item.error,
           error_category: item.errorCategory,
@@ -1825,13 +2210,13 @@ async function processBatchQueueLocally(items, concurrency = 1) {
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   if (state.batchCancelRequested) {
-    setBatchStatus("批量任务已取消。");
+    setBatchCompletionStatus(items, "批量任务已取消", options.preparationMessage || "");
   } else if (state.batchPaused) {
     await pauseBatchJobForItems(items);
-    setBatchStatus("批量任务已暂停。");
+    setBatchCompletionStatus(items, "批量任务已暂停", options.preparationMessage || "");
   }
   if (!state.batchPaused && !state.batchCancelRequested) {
-    setBatchStatus(`批量处理完成：${completed} 个 URL。`);
+    setBatchCompletionStatus(items, "批量处理结束", options.preparationMessage || "");
   }
 }
 
@@ -1946,6 +2331,10 @@ async function injectSiteProfileBundle(tabId) {
 }
 
 async function saveExtractedToCompanion(extracted, tab) {
+  const qualityFlags = extracted.quality_flags || extracted.qualityFlags || {};
+  if (extracted.stats?.authRequired || extracted.stats?.auth_required || qualityFlags.authRequired || qualityFlags.auth_required) {
+    throw new Error("页面需要登录或权限，无法采集正文。");
+  }
   if (!extracted.text?.trim()) {
     throw new Error("没有抽取到正文。");
   }
@@ -1982,31 +2371,25 @@ async function saveExtractedToCompanion(extracted, tab) {
 }
 
 async function createBatchJob(items) {
-  try {
-    const response = await companionRequest("/v1/jobs/read", {
-      method: "POST",
-      body: {
+  const response = await companionRequest("/v1/jobs/read", {
+    method: "POST",
+    body: {
+      project_id: currentProjectId(),
+      items: items.map((item) => ({
+        id: item.id,
+        url: item.url,
+        canonical_url: item.canonicalUrl || normalizeUrl(item.url),
+        title: item.title || item.url,
+        kind: "url",
         project_id: currentProjectId(),
-        items: items.map((item) => ({
-          id: item.id,
-          url: item.url,
-          canonical_url: item.canonicalUrl || normalizeUrl(item.url),
-          title: item.title || item.url,
-          kind: "url",
-          project_id: currentProjectId(),
-          added_at: item.addedAt
-        })),
-        created_at: new Date().toISOString(),
-        source: "extension-batch"
-      }
-    });
-    state.currentBatchJobId = response.job?.id || "";
-    return response.job || null;
-  } catch (error) {
-    console.warn("Companion job tracking failed; continuing local batch queue.", error);
-    state.currentBatchJobId = "";
-    return null;
-  }
+        added_at: item.addedAt
+      })),
+      created_at: new Date().toISOString(),
+      source: "extension-batch"
+    }
+  });
+  state.currentBatchJobId = response.job?.id || "";
+  return response.job || null;
 }
 
 async function ensureBatchJobItems(items) {
@@ -2061,12 +2444,14 @@ async function pauseBatchQueue() {
     return;
   }
   state.batchPaused = true;
-  await pauseBatchJobForItems(state.batchQueue);
-  setBatchStatus("收到暂停请求；当前 URL 处理完后停止。");
+  const outcome = await pauseBatchJobForItems(state.batchQueue);
+  setBatchStatus(outcome.failed.length
+    ? `本地处理已暂停，但 ${outcome.failed.length} 个服务端任务暂停失败；恢复前请先测试本地服务。`
+    : "收到暂停请求；当前 URL 处理完后停止。");
 }
 
 async function pauseBatchJobForItems(items) {
-  await postBatchJobActionForItems(items, "pause");
+  return postBatchJobActionForItems(items, "pause");
 }
 
 async function cancelBatchQueue() {
@@ -2074,8 +2459,19 @@ async function cancelBatchQueue() {
     setBatchStatus("没有可取消的批量任务。");
     return;
   }
+  if (!confirm("确认取消当前批量任务？尚未完成的 URL 会被标记为已取消。")) return;
   state.batchCancelRequested = true;
   const cancelable = state.batchQueue.filter((item) => !["success", "canceled"].includes(item.status));
+  const previousStates = new Map(cancelable.map((item) => [item.id, {
+    status: item.status,
+    error: item.error,
+    errorCategory: item.errorCategory,
+    browserAttempts: item.browserAttempts,
+    lastAttemptAt: item.lastAttemptAt,
+    completedAt: item.completedAt,
+    lastHeartbeatAt: item.lastHeartbeatAt,
+    updatedAt: item.updatedAt
+  }]));
   for (const item of cancelable) {
     if (item.status !== "running") {
       item.status = "canceled";
@@ -2089,10 +2485,17 @@ async function cancelBatchQueue() {
       item.updatedAt = new Date().toISOString();
     }
   }
-  await postBatchJobActionForItems(state.batchQueue, "cancel");
+  const outcome = await postBatchJobActionForItems(state.batchQueue, "cancel");
+  const failedJobs = new Set(outcome.failed);
+  for (const item of cancelable) {
+    if (!item.jobId || !failedJobs.has(item.jobId)) continue;
+    Object.assign(item, previousStates.get(item.id));
+  }
   await saveBatchQueue();
   renderBatchQueue();
-  setBatchStatus("已请求取消；当前 URL 如已开始会先收尾。");
+  setBatchStatus(outcome.failed.length
+    ? `本地队列已停止，但 ${outcome.failed.length} 个服务端任务取消失败；请恢复连接后再次取消。`
+    : "已请求取消；当前 URL 如已开始会先收尾。");
 }
 
 async function clearCompletedBatchItems() {
@@ -2102,25 +2505,36 @@ async function clearCompletedBatchItems() {
   }
   const before = state.batchQueue.length;
   const completed = state.batchQueue.filter((item) => ["success", "canceled"].includes(item.status));
-  await postBatchJobActionForItems(completed, "clear-completed");
-  state.batchQueue = state.batchQueue.filter((item) => !["success", "canceled"].includes(item.status));
+  const outcome = await postBatchJobActionForItems(completed, "clear-completed");
+  const failedJobs = new Set(outcome.failed);
+  state.batchQueue = state.batchQueue.filter((item) => {
+    if (!["success", "canceled"].includes(item.status)) return true;
+    return item.jobId && failedJobs.has(item.jobId);
+  });
   await saveBatchQueue();
   renderBatchQueue();
-  setBatchStatus(`已清理 ${before - state.batchQueue.length} 个已完成项。`);
+  setBatchStatus(outcome.failed.length
+    ? `已清理 ${before - state.batchQueue.length} 个已完成项；${outcome.failed.length} 个服务端任务清理失败并保留在列表中。`
+    : `已清理 ${before - state.batchQueue.length} 个已完成项。`);
 }
 
 async function postBatchJobActionForItems(items, action) {
   const jobIds = [...new Set(items.map((item) => item.jobId).filter(Boolean))];
+  const succeeded = [];
+  const failed = [];
   for (const jobId of jobIds) {
     try {
       await companionRequest(`/v1/jobs/${encodeURIComponent(jobId)}/${action}`, {
         method: "POST",
         body: {}
       });
+      succeeded.push(jobId);
     } catch (error) {
       console.warn(`Companion job ${action} failed.`, error);
+      failed.push(jobId);
     }
   }
+  return { succeeded, failed };
 }
 
 function uniqueJobIds(items) {
@@ -2147,6 +2561,17 @@ function sleep(ms) {
 async function clearBatchQueue() {
   if (state.batchRunning) {
     setBatchStatus("批量任务运行中，不能清空。");
+    return;
+  }
+  if (!state.batchQueue.length) {
+    setBatchStatus("队列已经是空的。");
+    return;
+  }
+  if (!confirm("确认清空当前项目的批量队列？未完成的服务端任务会先取消，此操作不能撤销。")) return;
+  const cancelable = state.batchQueue.filter((item) => !["success", "skipped", "canceled"].includes(item.status));
+  const outcome = await postBatchJobActionForItems(cancelable, "cancel");
+  if (outcome.failed.length) {
+    setBatchStatus(`清空未执行：${outcome.failed.length} 个服务端任务取消失败，队列已原样保留。`);
     return;
   }
   state.batchQueue = [];
@@ -2193,14 +2618,17 @@ async function retryBatchItem(itemId) {
 async function ingestPdf() {
   const value = $("pdfInput").value.trim();
   if (!value) {
-    setBatchStatus("请输入 PDF 路径或 URL。");
+    setPdfImportStatus("请输入 PDF 路径或 URL。");
     return;
   }
+  const useOcr = Boolean($("pdfOcrInput").checked);
   setBusy(true);
-  setBatchStatus("正在导入 PDF...");
+  $("ingestPdfBtn").textContent = useOcr ? "正在导入（自动 OCR）..." : "正在导入（不使用 OCR）...";
+  setPdfImportStatus(`正在导入 PDF；${useOcr ? "已启用扫描件自动 OCR" : "OCR 已关闭"}...`);
   try {
     const payload = /^https?:\/\//i.test(value) ? { url: value } : { path: value };
     payload.project_id = currentProjectId();
+    payload.ocr = useOcr;
     const result = await companionRequest("/v1/pdfs/extract", {
       method: "POST",
       body: payload
@@ -2218,8 +2646,9 @@ async function ingestPdf() {
       chunks: result.chunks || [],
       markdownPath: source.markdown_path || "",
       stats: {
-        profile: "pdf-pypdf",
+        profile: result.pdf?.profile || "pdf-pypdf",
         pages: result.pdf?.pages || 0,
+        ocrPagesReplaced: Number(result.pdf?.ocr?.pages_replaced || 0),
         quality: result.pdf?.low_text ? 25 : 75
       },
       capturedAt: source.captured_at || new Date().toISOString()
@@ -2227,29 +2656,111 @@ async function ingestPdf() {
     markCurrentSourceFingerprint();
     renderSource();
     await loadKnowledgeBase();
-    setBatchStatus(`PDF 已导入：${result.pdf?.pages || 0} 页${result.pdf?.low_text ? "，文本层较少，可能需要 OCR" : ""}`);
-    showTab("chat");
+    const ocrStatus = formatPdfOcrStatus(result.pdf, useOcr);
+    setPdfImportStatus(`PDF 已导入：${result.pdf?.pages || 0} 页；${ocrStatus}`);
   } catch (error) {
-    setBatchStatus(`PDF 导入失败：${error.message}`);
+    setPdfImportStatus(`PDF 导入失败：${error.message}`);
   } finally {
     setBusy(false);
+    syncPdfImportMode();
   }
+}
+
+function formatPdfOcrStatus(pdf = {}, requested = true) {
+  if (!requested) return "OCR 已关闭，使用 PDF 文本层";
+  const ocr = pdf?.ocr;
+  if (!ocr || typeof ocr !== "object") {
+    return pdf?.low_text
+      ? "OCR 状态未知，文本层较少（服务端未返回 OCR 结果）"
+      : "OCR 状态未知（服务端未返回 OCR 结果）";
+  }
+  const engine = String(ocr.engine || "").trim();
+  const error = String(ocr.error || "").trim();
+  const reason = String(ocr.reason || "").trim().toLowerCase();
+  if (ocr.applied) {
+    return `OCR 已应用${engine ? `（${engine}）` : ""}`;
+  }
+  if (error) {
+    return `OCR 失败，已回退到可用文本${engine ? `（${engine}）` : ""}：${error}`;
+  }
+  if (reason === "not_needed") {
+    return "未需 OCR（PDF 已有可用文本层）";
+  }
+  if (reason === "disabled") {
+    return "OCR 未执行（服务端已禁用），已使用 PDF 文本层";
+  }
+  if (ocr.attempted) {
+    return `OCR 未应用，已回退到 PDF 文本层${engine ? `（${engine}）` : ""}`;
+  }
+  return "未需 OCR（PDF 已有可用文本层）";
+}
+
+function syncPdfImportMode() {
+  const button = $("ingestPdfBtn");
+  if (!button || state.busy) return;
+  button.textContent = $("pdfOcrInput")?.checked ? "导入 PDF（自动 OCR）" : "导入 PDF（不使用 OCR）";
+}
+
+function isValidYouTubeUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    let videoId = "";
+    if (host === "youtu.be") {
+      videoId = parsed.pathname.split("/").filter(Boolean)[0] || "";
+    } else if (["youtube.com", "m.youtube.com", "music.youtube.com"].includes(host)) {
+      if (parsed.pathname === "/watch") {
+        videoId = parsed.searchParams.get("v") || "";
+      } else {
+        videoId = parsed.pathname.match(/^\/(?:shorts|embed)\/([^/?#]+)/)?.[1] || "";
+      }
+    }
+    return /^[A-Za-z0-9_-]{11}$/.test(videoId);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function youtubeImportMode() {
+  return $("youtubeTranscriptInput").value.trim() ? "manual" : "automatic";
+}
+
+function youtubeLanguageLabel() {
+  return $("youtubeLanguageInput").value.trim() || "自动选择";
+}
+
+function syncYoutubeImportMode() {
+  const button = $("ingestYoutubeBtn");
+  if (!button || state.busy) return;
+  const mode = youtubeImportMode();
+  const language = youtubeLanguageLabel();
+  button.dataset.importMode = mode;
+  button.textContent = mode === "manual"
+    ? `导入手工字幕（manual · ${language}）`
+    : `自动获取字幕（automatic · ${language}）`;
 }
 
 async function ingestYoutubeTranscript() {
   const url = $("youtubeUrlInput").value.trim();
   const title = $("youtubeTitleInput").value.trim();
   const transcript = $("youtubeTranscriptInput").value.trim();
-  if (!url && !title) {
-    setBatchStatus("请输入 YouTube URL 或标题。");
-    return;
-  }
-  if (!transcript) {
-    setBatchStatus("请先粘贴字幕文本；当前版本不做音频转写。");
+  const language = $("youtubeLanguageInput").value.trim();
+  const mode = transcript ? "manual" : "automatic";
+  syncYoutubeImportMode();
+  if (!isValidYouTubeUrl(url)) {
+    setYoutubeImportStatus("请输入有效的 YouTube URL；标题不能替代来源地址。支持 watch、shorts、embed 和 youtu.be 链接。");
     return;
   }
   setBusy(true);
-  setBatchStatus("正在导入 YouTube 字幕...");
+  $("ingestYoutubeBtn").textContent = mode === "manual"
+    ? `正在导入手工字幕（manual · ${language || "未指定语言"}）...`
+    : `正在获取公开字幕（automatic · ${language || "自动选择"}）...`;
+  setYoutubeImportStatus(
+    mode === "manual"
+      ? `正在导入手工字幕：manual · 语言 ${language || "未指定"}...`
+      : `正在自动获取公开字幕：automatic · 语言优先 ${language || "自动选择"}...`
+  );
   try {
     const result = await companionRequest("/v1/youtube/transcripts", {
       method: "POST",
@@ -2258,10 +2769,13 @@ async function ingestYoutubeTranscript() {
         url,
         title,
         transcript,
+        language,
         captured_at: new Date().toISOString()
       }
     });
     const source = result.source || {};
+    const captionSource = String(result.youtube?.caption_source || result.youtube?.source || mode).trim() || mode;
+    const captionLanguage = String(result.youtube?.language || language || "未标注").trim();
     state.source = {
       title: source.title || title || url || "YouTube 字幕",
       projectId: source.project_id || currentProjectId(),
@@ -2276,19 +2790,25 @@ async function ingestYoutubeTranscript() {
       stats: {
         profile: "youtube-transcript",
         quality: source.extraction_quality || 75,
-        transcriptSegments: result.youtube?.segments || 0
+        transcriptSegments: result.youtube?.segments || 0,
+        captionSource,
+        language: captionLanguage
       },
       capturedAt: source.captured_at || new Date().toISOString()
     };
     markCurrentSourceFingerprint();
     renderSource();
     await refreshKnowledgeWorkspace();
-    setBatchStatus(`YouTube 字幕已导入：${result.youtube?.segments || 0} 段。`);
-    showTab("chat");
+    setYoutubeImportStatus(
+      `YouTube 字幕已导入：${result.youtube?.segments || 0} 段；${captionSource} · 语言 ${captionLanguage}。`
+    );
   } catch (error) {
-    setBatchStatus(`YouTube 字幕导入失败：${error.message}`);
+    setYoutubeImportStatus(
+      `YouTube 字幕导入失败（${mode} · ${language || (mode === "automatic" ? "自动选择" : "未指定语言")}）：${error.message}`
+    );
   } finally {
     setBusy(false);
+    syncYoutubeImportMode();
   }
 }
 
@@ -2473,6 +2993,20 @@ function setBatchStatus(message) {
   if (node) node.textContent = message || "";
 }
 
+function setPdfImportStatus(message) {
+  const text = message || "";
+  const node = $("pdfImportStatus");
+  if (node) node.textContent = text;
+  setBatchStatus(text);
+}
+
+function setYoutubeImportStatus(message) {
+  const text = message || "";
+  const node = $("youtubeImportStatus");
+  if (node) node.textContent = text;
+  setBatchStatus(text);
+}
+
 function setDeliverableStatus(message) {
   const node = $("deliverableStatus");
   if (node) node.textContent = message || "";
@@ -2513,10 +3047,22 @@ async function askAgents() {
     setStatus("请先读取当前页或使用选中文本。");
     return;
   }
+  try {
+    assertCurrentSourceProject();
+  } catch (error) {
+    setStatus(error.message);
+    return;
+  }
   await loadSettings();
   if (!state.settings?.pairingToken) {
     setStatus("请先在设置里填写 Pairing Token。");
     showTab("settings");
+    return;
+  }
+  if (!hasCurrentModelDataConsent()) {
+    setStatus("首次调用模型前，请在设置中阅读并勾选材料外发同意。采集和本地保存不受影响。");
+    showTab("settings");
+    $("modelDataConsentInput")?.focus?.();
     return;
   }
 
@@ -2529,10 +3075,15 @@ async function askAgents() {
 
   setBusy(true);
   setStatus("Agent 正在阅读...");
+  const requestFingerprint = sourceFingerprint(state.source);
   try {
     const prompt = buildPrompt(selectedAgents);
     const answer = await callLlm(prompt);
+    if (!state.source || sourceFingerprint(state.source) !== requestFingerprint) {
+      throw new Error("阅读期间来源已经切换，本次答案未绑定也未保存；请在当前来源重新运行。");
+    }
     state.lastAnswer = answer;
+    state.lastAnswerSourceFingerprint = requestFingerprint;
     renderAnswer("综合讨论", "🤖", answer);
     setStatus("阅读完成。");
   } catch (error) {
@@ -2619,31 +3170,61 @@ async function saveCurrentNote() {
     setStatus("没有可保存的来源。");
     return;
   }
+  if (state.lastAnswer && state.lastAnswerSourceFingerprint !== sourceFingerprint(state.source)) {
+    setStatus("当前答案属于另一个来源，已阻止错绑保存；请对当前来源重新运行阅读。");
+    return;
+  }
   const note = {
     id: crypto.randomUUID(),
+    projectId: currentProjectId(),
     title: state.source.title || "未命名条目",
     url: state.source.url || "",
     kind: state.source.kind || "page",
     capturedAt: state.source.capturedAt || new Date().toISOString(),
     question: $("questionInput").value.trim(),
     answer: state.lastAnswer || "",
-    excerpt: (state.source.text || "").slice(0, 4000)
+    excerpt: (state.source.text || "").slice(0, 4000),
+    sourceId: state.source.sourceId || "",
+    site: state.source.site || inferSiteFromUrl(state.source.url || ""),
+    author: state.source.author || "",
+    publishedAt: state.source.publishedAt || ""
   };
 
+  let saved = null;
   try {
-    const saved = await saveNoteToCompanion(note);
-    await refreshKnowledgeWorkspace();
-    setStatus(`已保存到本地 Vault：${saved?.note?.id || "ok"}`);
-    return;
+    saved = await saveNoteToCompanion(note);
   } catch (error) {
-    console.warn("Companion save failed; falling back to Chrome storage.", error);
+    if (!isOfflineFallbackError(error)) {
+      console.warn("Companion note save failed without offline fallback.", error);
+      setStatus(`保存失败，未加入本地待同步队列：${error.message}`);
+      return;
+    }
+    console.warn("Companion save is temporarily unavailable; queueing a pending local note.", error);
+  }
+  if (saved?.note?.id) {
+    try {
+      await refreshKnowledgeWorkspace();
+      setStatus(`已保存到本地 Vault：${saved.note.id}`);
+    } catch (error) {
+      console.warn("Note save was acknowledged, but workspace refresh failed.", error);
+      setStatus(`已保存到本地 Vault：${saved.note.id}；列表刷新失败，可手动刷新。`);
+    }
+    return;
+  }
+  if (saved) {
+    setStatus("保存失败，未加入本地待同步队列：Vault 响应缺少笔记确认标识。");
+    return;
   }
 
-  const { knowledgeBase = [] } = await chrome.storage.local.get("knowledgeBase");
+  note.sourceId = state.source?.sourceId || note.sourceId || "";
+  note.pendingSync = true;
+  note.syncId = note.id;
+  note.pendingSince = new Date().toISOString();
+  const knowledgeBase = await loadFallbackKnowledgeNotes();
   knowledgeBase.unshift(note);
   await chrome.storage.local.set({ knowledgeBase });
   await loadKnowledgeBase();
-  setStatus("本地服务不可用，已保存到 Chrome 本地知识库。");
+  setStatus("本地服务暂时不可达，笔记已安全保存到 Chrome 待同步队列。");
 }
 
 async function refreshKnowledgeWorkspace() {
@@ -2771,6 +3352,10 @@ function renderSourceLibrary(sources) {
 
 async function loadSourceDetail(sourceId, options = {}) {
   if (!sourceId) return null;
+  if (options.setCurrent && state.busy) {
+    setSourceLibraryStatus("当前操作尚未完成，暂不能切换来源。");
+    return null;
+  }
   setBusy(true);
   setSourceLibraryStatus("正在读取来源详情...");
   try {
@@ -2781,6 +3366,7 @@ async function loadSourceDetail(sourceId, options = {}) {
     renderSourceDetail(source);
     if (options.setCurrent) {
       state.source = sourceDetailToCurrentSource(source);
+      markCurrentSourceFingerprint();
       renderSource();
       setSourceLibraryStatus("已设为当前来源，可以回到聊天页继续阅读或生成交付物。");
       showTab("chat");
@@ -3111,39 +3697,184 @@ function setSourceSearchStatus(message) {
 }
 
 async function loadKnowledgeBase() {
+  const localNotes = fallbackKnowledgeNotesForProject(await loadFallbackKnowledgeNotes());
   try {
     const data = await companionRequest(`/v1/notes${queryWithProject({ limit: "100" })}`, { method: "GET" });
-    renderKnowledgeBase(data.notes || [], "companion");
+    renderKnowledgeBase(data.notes || [], "Vault", localNotes);
+    setPendingNotesStatus(localNotes.length, { serviceAvailable: true });
     return;
   } catch (error) {
-    console.warn("Companion list failed; using Chrome storage.", error);
+    console.warn("Companion note list failed; keeping pending Chrome notes visible.", error);
+    renderKnowledgeBase([], "Vault", localNotes);
+    setPendingNotesStatus(localNotes.length, {
+      serviceAvailable: false,
+      error,
+      offline: isOfflineFallbackError(error)
+    });
   }
-
-  const { knowledgeBase = [] } = await chrome.storage.local.get("knowledgeBase");
-  renderKnowledgeBase(knowledgeBase, "chrome");
 }
 
-function renderKnowledgeBase(knowledgeBase, sourceType) {
+function fallbackKnowledgeNoteProjectId(note) {
+  return String(note?.projectId || note?.project_id || "").trim();
+}
+
+async function loadFallbackKnowledgeNotes() {
+  const { knowledgeBase = [] } = await chrome.storage.local.get("knowledgeBase");
+  const stored = Array.isArray(knowledgeBase) ? knowledgeBase : [];
+  let migrated = !Array.isArray(knowledgeBase);
+  const normalized = stored
+    .filter((note) => {
+      const valid = isRecord(note);
+      if (!valid) migrated = true;
+      return valid;
+    })
+    .map((note) => {
+      const projectId = fallbackKnowledgeNoteProjectId(note) || FALLBACK_LEGACY_PROJECT_ID;
+      const id = String(note.id || "").trim() || `local-note-${crypto.randomUUID()}`;
+      const pendingSync = true;
+      const syncId = String(note.syncId || id).trim();
+      if (note.id === id && note.projectId === projectId && note.pendingSync === pendingSync && note.syncId === syncId) return note;
+      migrated = true;
+      return { ...note, id, projectId, pendingSync, syncId };
+    });
+  if (migrated) await chrome.storage.local.set({ knowledgeBase: normalized });
+  return normalized;
+}
+
+function fallbackKnowledgeNotesForProject(notes, projectId = currentProjectId()) {
+  const normalizedProjectId = String(projectId || FALLBACK_LEGACY_PROJECT_ID);
+  return (Array.isArray(notes) ? notes : []).filter(
+    (note) => fallbackKnowledgeNoteProjectId(note) === normalizedProjectId
+  );
+}
+
+function renderKnowledgeBase(knowledgeBase, sourceType, pendingNotes = []) {
   const list = $("kbList");
   list.textContent = "";
-  if (!knowledgeBase.length) {
+  const entries = [
+    ...(Array.isArray(pendingNotes) ? pendingNotes : []).map((item) => ({ item, pending: true })),
+    ...(Array.isArray(knowledgeBase) ? knowledgeBase : []).map((item) => ({ item, pending: false }))
+  ];
+  if (!entries.length) {
     list.innerHTML = '<p class="hint">还没有知识库条目。阅读完成后点击“保存笔记”。</p>';
     return;
   }
 
-  for (const item of knowledgeBase) {
+  for (const entry of entries) {
+    const { item, pending } = entry;
     const node = document.createElement("article");
-    node.className = "kb-item";
+    node.className = pending ? "kb-item pending-sync" : "kb-item";
     const createdAt = item.created_at || item.capturedAt || "";
     const sourceUrl = item.source_url || item.url || "";
     const body = item.answer || item.summary || item.excerpt || "";
+    const location = pending ? "Chrome · 待同步" : sourceType;
     node.innerHTML = `
       <h3>${escapeHtml(item.title)}</h3>
-      <div class="meta">${escapeHtml(sourceType)} · ${escapeHtml(createdAt)} · ${escapeHtml(sourceUrl)}</div>
+      <div class="meta">${escapeHtml(location)} · ${escapeHtml(createdAt)} · ${escapeHtml(sourceUrl)}</div>
       <pre>${escapeHtml(body)}</pre>
     `;
     list.appendChild(node);
   }
+}
+
+function pendingNoteSyncTag(note) {
+  const syncId = String(note?.syncId || note?.id || "").trim();
+  return syncId ? `${PENDING_NOTE_SYNC_TAG_PREFIX}${syncId}` : "";
+}
+
+function vaultNoteHasPendingSyncTag(note, tag) {
+  return Boolean(tag && Array.isArray(note?.tags) && note.tags.includes(tag));
+}
+
+function setPendingNotesStatus(count, options = {}) {
+  const pendingCount = Math.max(0, Number(count || 0));
+  const status = $("pendingNotesStatus");
+  const button = $("syncPendingNotesBtn");
+  if (button) button.disabled = pendingCount === 0 || Boolean(options.syncing);
+  if (!status) return;
+  if (options.message) {
+    status.textContent = options.message;
+    return;
+  }
+  if (!pendingCount) {
+    status.textContent = "待同步 0 条本地笔记。";
+    return;
+  }
+  if (options.serviceAvailable) {
+    status.textContent = `待同步 ${pendingCount} 条本地笔记；Vault 已连接，可立即同步。`;
+    return;
+  }
+  const detail = shortText(options.error?.message || "本地服务不可用", 140);
+  status.textContent = options.offline
+    ? `待同步 ${pendingCount} 条本地笔记；Vault 暂时不可达：${detail}`
+    : `待同步 ${pendingCount} 条本地笔记；Vault 连接错误，未自动降级：${detail}`;
+}
+
+async function syncPendingNotes() {
+  const projectId = currentProjectId();
+  const pending = fallbackKnowledgeNotesForProject(await loadFallbackKnowledgeNotes(), projectId);
+  if (!pending.length) {
+    setPendingNotesStatus(0);
+    return;
+  }
+
+  setPendingNotesStatus(pending.length, {
+    syncing: true,
+    message: `正在同步 ${pending.length} 条本地笔记到 Vault...`
+  });
+  let vaultNotes;
+  try {
+    const data = await companionRequest(`/v1/notes${queryWithProject({ limit: "1000" })}`, { method: "GET" });
+    vaultNotes = data.notes || [];
+  } catch (error) {
+    setPendingNotesStatus(pending.length, {
+      message: `同步未开始，待同步 ${pending.length} 条：${error.message}`
+    });
+    return;
+  }
+
+  const acknowledgedIds = new Set();
+  let posted = 0;
+  let alreadyPresent = 0;
+  let syncError = null;
+  for (const note of pending) {
+    const tag = pendingNoteSyncTag(note);
+    if (vaultNotes.some((vaultNote) => vaultNoteHasPendingSyncTag(vaultNote, tag))) {
+      acknowledgedIds.add(note.id);
+      alreadyPresent += 1;
+      continue;
+    }
+    try {
+      const saved = await savePendingNoteToCompanion(note, tag);
+      if (!saved?.note?.id) throw new Error("Vault 未确认笔记已写入。");
+      acknowledgedIds.add(note.id);
+      posted += 1;
+      vaultNotes.push(saved.note);
+    } catch (error) {
+      syncError = error;
+      break;
+    }
+  }
+
+  if (acknowledgedIds.size) {
+    const latest = await loadFallbackKnowledgeNotes();
+    const remaining = latest.filter((note) => (
+      fallbackKnowledgeNoteProjectId(note) !== projectId || !acknowledgedIds.has(note.id)
+    ));
+    await chrome.storage.local.set({ knowledgeBase: remaining });
+  }
+
+  await loadKnowledgeBase();
+  const remainingCount = fallbackKnowledgeNotesForProject(await loadFallbackKnowledgeNotes(), projectId).length;
+  if (syncError) {
+    setPendingNotesStatus(remainingCount, {
+      message: `同步暂停：${syncError.message}。已确认 ${acknowledgedIds.size} 条，待同步 ${remainingCount} 条。`
+    });
+    return;
+  }
+  setPendingNotesStatus(remainingCount, {
+    message: `同步完成：新增 ${posted} 条，已在 Vault ${alreadyPresent} 条，待同步 ${remainingCount} 条。`
+  });
 }
 
 async function loadDeliverables() {
@@ -3697,14 +4428,15 @@ async function extractKnowledgeFromCurrentSource() {
   }
 
   setBusy(true);
-  setKnowledgeRecordStatus("正在抽取结构化知识...");
+  const extractionMode = hasCurrentModelDataConsent() ? "provider" : "mock";
+  setKnowledgeRecordStatus(extractionMode === "mock" ? "正在生成本地 Mock 模板（未调用模型）..." : "正在调用已配置模型抽取结构化知识...");
   try {
     const capture = await ensureCurrentSourceCaptured();
     const sourceId = capture?.source?.id || state.source.sourceId;
     if (!sourceId) throw new Error("本地服务没有返回 source id。");
     const result = await companionRequest(`/v1/sources/${encodeURIComponent(sourceId)}/extract-knowledge`, {
       method: "POST",
-      body: { mode: "auto", max_claims: 5, project_id: currentProjectId() }
+      body: { mode: extractionMode, max_claims: 5, project_id: currentProjectId() }
     });
     await applyKnowledgeExtractionResult(sourceId, result, "已抽取草稿");
   } catch (error) {
@@ -3724,8 +4456,12 @@ async function applyKnowledgeExtractionResult(sourceId, result, label) {
   const records = result.records || {};
   const counts = knowledgeRecordCounts(records);
   const run = result.agent_run || {};
+  const runInput = run.input || {};
+  const modeLabel = runInput.effective_mode === "mock" || run.agent_id === "mock_structured_extractor"
+    ? "Mock 模板 · 未调用外部模型"
+    : `${runInput.provider || "provider"}${run.model ? ` · ${run.model}` : ""}`;
   await refreshKnowledgeListsAfterMutation();
-  setKnowledgeRecordStatus(`${label}：${formatKnowledgeCounts(counts)}${run.id ? `；run ${run.id}` : ""}`);
+  setKnowledgeRecordStatus(`${label}：${formatKnowledgeCounts(counts)}；${modeLabel}${run.id ? `；run ${run.id}` : ""}`);
   return { counts, run };
 }
 
@@ -3734,10 +4470,11 @@ async function reextractSource(sourceId) {
   setBusy(true);
   setKnowledgeRecordStatus("正在重跑结构化抽取...");
   try {
+    const extractionMode = hasCurrentModelDataConsent() ? "provider" : "mock";
     const data = await companionRequest(`/v1/sources/${encodeURIComponent(sourceId)}/reextract`, {
       method: "POST",
       body: {
-        mode: "auto",
+        mode: extractionMode,
         max_claims: 5,
         project_id: currentProjectId(),
         reason: "source detail re-extraction"
@@ -4461,6 +5198,9 @@ async function createDeliverableFromCurrentSource() {
   setBusy(true);
   setDeliverableStatus("正在生成交付物...");
   try {
+    if (!topicPackageIds.length && state.lastAnswer && !currentSourceBoundAnswer()) {
+      throw new Error("当前答案属于另一个来源，已阻止生成交付物；请对当前来源重新运行阅读。");
+    }
     const payload = topicPackageIds.length
       ? buildTopicPackageDeliverablePayload(topicPackageIds)
       : buildDeliverablePayload(await ensureCurrentSourceCaptured());
@@ -4484,6 +5224,7 @@ async function ensureCurrentSourceCaptured() {
   if (!state.source?.text?.trim()) {
     throw new Error("没有可入库的来源。");
   }
+  assertCurrentSourceProject();
   const fingerprint = sourceFingerprint(state.source);
   if (state.source.sourceId && !state.source.sourceFingerprint) {
     state.source.sourceFingerprint = fingerprint;
@@ -4546,18 +5287,19 @@ function buildDeliverablePayload(capture) {
   const label = deliverableKindLabel(kind);
   const sourceId = capture?.source?.id || state.source.sourceId;
   const title = $("deliverableTitleInput").value.trim() || `${state.source.title || "未命名专题"} - ${label}`;
-  const claims = buildDeliverableClaims(sourceId, capture?.chunks || []);
-  const nextSteps = extractActionLines(state.lastAnswer);
+  const answer = currentSourceBoundAnswer();
+  const claims = buildDeliverableClaims(sourceId, capture?.chunks || [], answer);
+  const nextSteps = extractActionLines(answer);
   return {
     kind,
     title,
     status: $("deliverableStatusSelect").value || "draft",
     project_id: currentProjectId(),
     source_ids: sourceId ? [sourceId] : [],
-    background: state.lastAnswer || `基于当前来源《${state.source.title || "未命名来源"}》生成的交付物草稿。`,
-    summary: state.lastAnswer || "",
+    background: answer || `基于当前来源《${state.source.title || "未命名来源"}》生成的交付物草稿。`,
+    summary: answer || "",
     claims,
-    risks: extractRiskLines(state.lastAnswer),
+    risks: extractRiskLines(answer),
     next_steps: nextSteps,
     strategy: {
       hypothesis: claims[0]?.text || "当前资料提示存在可验证的策略假设，仍需补充数据和回测。",
@@ -4602,8 +5344,8 @@ function buildTopicPackageDeliverablePayload(topicPackageIds) {
   };
 }
 
-function buildDeliverableClaims(sourceId, chunks) {
-  const candidates = extractClaimLines(state.lastAnswer);
+function buildDeliverableClaims(sourceId, chunks, answer = currentSourceBoundAnswer()) {
+  const candidates = extractClaimLines(answer);
   const fallback = state.source.title
     ? [`需要围绕《${state.source.title}》继续提炼可验证结论。`]
     : ["当前资料需要继续提炼可验证结论。"];
@@ -4622,6 +5364,13 @@ function buildDeliverableClaims(sourceId, chunks) {
     }
     return claim;
   });
+}
+
+function currentSourceBoundAnswer() {
+  if (!state.lastAnswer || !state.source) return "";
+  return state.lastAnswerSourceFingerprint === sourceFingerprint(state.source)
+    ? state.lastAnswer
+    : "";
 }
 
 function extractClaimLines(text) {
@@ -4667,6 +5416,11 @@ async function saveNoteToCompanion(note) {
   const capture = await ensureCurrentSourceCaptured();
   const sourceId = capture?.source?.id;
   if (!sourceId) throw new Error("本地服务没有返回 source id。");
+  const syncTag = pendingNoteSyncTag(note);
+  const tags = [...new Set([
+    ...(Array.isArray(note.tags) ? note.tags : []),
+    syncTag
+  ].filter(Boolean))];
 
   return companionRequest("/v1/notes", {
     method: "POST",
@@ -4677,7 +5431,66 @@ async function saveNoteToCompanion(note) {
       question: note.question,
       answer: note.answer,
       excerpt: note.excerpt,
-      tags: []
+      tags
+    }
+  });
+}
+
+async function savePendingNoteToCompanion(note, syncTag = pendingNoteSyncTag(note)) {
+  const noteProjectId = fallbackKnowledgeNoteProjectId(note);
+  if (!noteProjectId || noteProjectId !== currentProjectId()) {
+    throw new Error("待同步笔记不属于当前项目。");
+  }
+  if (!syncTag) throw new Error("待同步笔记缺少稳定同步标识。");
+
+  let sourceId = note.sourceId || "";
+  const sourceText = String(note.excerpt || "").trim();
+  if (sourceText) {
+    const capture = await companionRequest("/v1/captures", {
+      method: "POST",
+      body: {
+        project_id: noteProjectId,
+        source: {
+          project_id: noteProjectId,
+          kind: note.kind || "page",
+          url: note.url || "",
+          title: note.title || "未命名来源",
+          site: note.site || inferSiteFromUrl(note.url || ""),
+          author: note.author || "",
+          published_at: note.publishedAt || "",
+          captured_at: note.capturedAt || note.pendingSince || new Date().toISOString()
+        },
+        content: {
+          text: sourceText,
+          markdown: sourceText,
+          blocks: [],
+          images: [],
+          attachments: [],
+          links: [],
+          next_pages: [],
+          stats: {}
+        },
+        browser: {}
+      }
+    });
+    sourceId = capture?.source?.id || sourceId;
+  }
+  if (!sourceId) throw new Error("Vault 未确认待同步笔记的来源。");
+
+  const tags = [...new Set([
+    ...(Array.isArray(note.tags) ? note.tags : []),
+    syncTag
+  ].filter(Boolean))];
+  return companionRequest("/v1/notes", {
+    method: "POST",
+    body: {
+      project_id: noteProjectId,
+      source_id: sourceId,
+      title: note.title,
+      question: note.question,
+      answer: note.answer,
+      excerpt: note.excerpt,
+      tags
     }
   });
 }
@@ -4701,7 +5514,7 @@ async function exportKnowledgeBase(format) {
     console.warn("Companion export failed; falling back to Chrome storage.", error);
   }
 
-  const { knowledgeBase = [] } = await chrome.storage.local.get("knowledgeBase");
+  const knowledgeBase = fallbackKnowledgeNotesForProject(await loadFallbackKnowledgeNotes());
   if (!knowledgeBase.length) {
     setStatus("本地服务不可用，且 Chrome 本地知识库为空。");
     return;
@@ -4744,15 +5557,19 @@ ${note.excerpt || ""}`;
 }
 
 async function clearKnowledgeBase() {
-  if (!confirm("确认清空 Chrome 本地知识库？本地 Vault 文件不会被删除。")) return;
-  await chrome.storage.local.set({ knowledgeBase: [] });
+  if (!confirm("确认清空当前项目的 Chrome 本地知识库？本地 Vault 文件不会被删除。")) return;
+  const projectId = currentProjectId();
+  const knowledgeBase = await loadFallbackKnowledgeNotes();
+  const remaining = knowledgeBase.filter((note) => fallbackKnowledgeNoteProjectId(note) !== projectId);
+  await chrome.storage.local.set({ knowledgeBase: remaining });
   await loadKnowledgeBase();
-  setStatus("Chrome 本地知识库已清空；本地 Vault 请在文件系统中管理。");
+  setStatus(`已清空项目 ${projectId} 的 Chrome 本地知识库；其他项目与本地 Vault 未受影响。`);
 }
 
 async function loadSettings() {
   const { settings } = await chrome.storage.local.get("settings");
-  const { apiKey: _legacyApiKey, provider: savedProvider, baseUrl: savedBaseUrl, model: savedModel, temperature: savedTemperature, ...localSettings } = settings || {};
+  const { apiKey: _legacyApiKey, ...localSettings } = settings || {};
+  state.legacyApiKeyPending = String(_legacyApiKey || "").trim();
   state.settings = {
     serviceUrl: "http://127.0.0.1:37621",
     pairingToken: "",
@@ -4760,9 +5577,17 @@ async function loadSettings() {
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-5",
     temperature: 0.2,
+    codexCommand: "",
+    codexTimeoutSeconds: 300,
+    modelDataConsent: false,
+    modelDataConsentVersion: "",
+    modelDataConsentAt: "",
     projectId: "default",
     ...localSettings
   };
+  if (!hasCurrentModelDataConsent(state.settings)) {
+    state.settings.modelDataConsent = false;
+  }
   $("serviceUrlInput").value = state.settings.serviceUrl;
   $("pairingTokenInput").value = state.settings.pairingToken || "";
   $("providerSelect").value = state.settings.provider;
@@ -4770,27 +5595,53 @@ async function loadSettings() {
   $("apiKeyInput").value = "";
   $("modelInput").value = state.settings.model;
   $("temperatureInput").value = state.settings.temperature;
+  $("codexCommandInput").value = state.settings.codexCommand || "";
+  $("codexTimeoutInput").value = normalizeCodexTimeout(state.settings.codexTimeoutSeconds);
+  $("modelDataConsentInput").checked = Boolean(state.settings.modelDataConsent);
   $("projectSelect").value = state.settings.projectId || "default";
   if (state.settings.pairingToken) {
     await loadModelSettings();
+    if (state.legacyApiKeyPending) {
+      try {
+        await saveModelSettingsToCompanion();
+        setSettingsStatus("旧版 Chrome API Key 已安全迁移到本地 companion service。");
+      } catch (error) {
+        setSettingsStatus(`旧版 API Key 尚未迁移：${error.message}`);
+      }
+    }
   }
+  syncProviderControls();
 }
 
 async function saveSettings(options = {}) {
-  state.settings = {
-    serviceUrl: $("serviceUrlInput").value.trim() || "http://127.0.0.1:37621",
-    pairingToken: $("pairingTokenInput").value.trim(),
-    provider: state.settings?.provider || $("providerSelect").value,
-    baseUrl: state.settings?.baseUrl || $("baseUrlInput").value.trim(),
-    model: state.settings?.model || $("modelInput").value.trim(),
-    temperature: Number(state.settings?.temperature ?? $("temperatureInput").value ?? 0.2),
-    projectId: $("projectSelect").value || state.settings?.projectId || "default"
-  };
-  await chrome.storage.local.set({ settings: state.settings });
-  if (options?.saveModel !== false) {
-    await saveModelSettingsToCompanion();
+  try {
+    const consent = modelDataConsentFields(Boolean($("modelDataConsentInput").checked));
+    state.settings = {
+      ...state.settings,
+      serviceUrl: $("serviceUrlInput").value.trim() || "http://127.0.0.1:37621",
+      pairingToken: $("pairingTokenInput").value.trim(),
+      provider: $("providerSelect").value || state.settings?.provider || "openai",
+      baseUrl: $("baseUrlInput").value.trim(),
+      model: $("modelInput").value.trim(),
+      temperature: Number($("temperatureInput").value || 0.2),
+      codexCommand: $("codexCommandInput").value.trim(),
+      codexTimeoutSeconds: normalizeCodexTimeout($("codexTimeoutInput").value),
+      ...consent,
+      projectId: $("projectSelect").value || state.settings?.projectId || "default"
+    };
+    await chrome.storage.local.set({ settings: state.settings });
+    let modelSaved = false;
+    if (options?.saveModel !== false) {
+      modelSaved = Boolean(await saveModelSettingsToCompanion());
+    }
+    setSettingsStatus(modelSaved || options?.saveModel === false
+      ? "设置已保存。"
+      : "本地设置已保存；尚未配对，模型设置未写入 companion service。");
+    return state.settings;
+  } catch (error) {
+    setSettingsStatus(`保存设置失败：${error.message}`);
+    throw error;
   }
-  setStatus("设置已保存。");
 }
 
 async function loadModelSettings() {
@@ -4803,18 +5654,44 @@ async function loadModelSettings() {
 }
 
 function applyModelSettings(settings) {
-  state.settings.provider = settings.provider || state.settings.provider || "openai";
-  state.settings.baseUrl = settings.base_url || state.settings.baseUrl || "https://api.openai.com/v1";
-  state.settings.model = settings.model || state.settings.model || "gpt-5";
+  state.settings.provider = settings.provider ?? state.settings.provider ?? "openai";
+  state.settings.baseUrl = settings.base_url ?? state.settings.baseUrl ?? "https://api.openai.com/v1";
+  state.settings.model = settings.model ?? state.settings.model ?? "gpt-5";
   state.settings.temperature = Number(settings.temperature ?? state.settings.temperature ?? 0.2);
+  state.settings.codexCommand = settings.codex_command ?? state.settings.codexCommand ?? "";
+  state.settings.codexTimeoutSeconds = normalizeCodexTimeout(
+    settings.codex_timeout_seconds ?? state.settings.codexTimeoutSeconds
+  );
   $("providerSelect").value = state.settings.provider;
   $("baseUrlInput").value = state.settings.baseUrl;
   $("modelInput").value = state.settings.model;
   $("temperatureInput").value = state.settings.temperature;
+  $("codexCommandInput").value = state.settings.codexCommand;
+  $("codexTimeoutInput").value = state.settings.codexTimeoutSeconds;
   $("apiKeyInput").value = "";
   $("apiKeyInput").placeholder = settings.has_api_key
     ? `服务端已保存 ${settings.api_key_hint || "API Key"}；留空不修改`
     : "留空表示不设置 API Key";
+  syncProviderControls();
+}
+
+function normalizeCodexTimeout(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return 300;
+  return Math.max(10, Math.min(3600, parsed));
+}
+
+function syncProviderControls() {
+  const isCodex = $("providerSelect")?.value === "codex";
+  const busy = Boolean(state.busy);
+  for (const id of ["baseUrlInput", "apiKeyInput", "clearApiKeyBtn"]) {
+    const node = $(id);
+    if (node) node.disabled = busy || isCodex;
+  }
+  for (const id of ["codexCommandInput", "codexTimeoutInput"]) {
+    const node = $(id);
+    if (node) node.disabled = busy || !isCodex;
+  }
 }
 
 async function saveModelSettingsToCompanion(options = {}) {
@@ -4823,12 +5700,15 @@ async function saveModelSettingsToCompanion(options = {}) {
     provider: $("providerSelect").value,
     base_url: $("baseUrlInput").value.trim(),
     model: $("modelInput").value.trim(),
-    temperature: Number($("temperatureInput").value || 0.2)
+    temperature: Number($("temperatureInput").value || 0.2),
+    codex_command: $("codexCommandInput").value.trim(),
+    codex_timeout_seconds: normalizeCodexTimeout($("codexTimeoutInput").value)
   };
-  const apiKey = $("apiKeyInput").value.trim();
+  const apiKey = $("apiKeyInput").value.trim() || state.legacyApiKeyPending || "";
   if (apiKey) body.api_key = apiKey;
   if (options.clearApiKey) body.clear_api_key = true;
   const data = await companionRequest("/v1/model-settings", { method: "POST", body });
+  state.legacyApiKeyPending = "";
   applyModelSettings(data.settings || {});
   await chrome.storage.local.set({
     settings: {
@@ -4838,6 +5718,11 @@ async function saveModelSettingsToCompanion(options = {}) {
       baseUrl: state.settings.baseUrl,
       model: state.settings.model,
       temperature: state.settings.temperature,
+      codexCommand: state.settings.codexCommand,
+      codexTimeoutSeconds: state.settings.codexTimeoutSeconds,
+      modelDataConsent: Boolean(state.settings.modelDataConsent),
+      modelDataConsentVersion: state.settings.modelDataConsentVersion || "",
+      modelDataConsentAt: state.settings.modelDataConsentAt || "",
       projectId: state.settings.projectId
     }
   });
@@ -4878,7 +5763,12 @@ function renderProjectSelect() {
 }
 
 async function changeProject() {
+  const previousProjectId = state.batchProjectId || currentProjectId();
+  await saveBatchQueue(previousProjectId);
   await saveSettings({ saveModel: false });
+  const nextProjectId = currentProjectId();
+  resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId);
+  await loadBatchQueue();
   await loadProjectBrief();
   await loadCapturePlans();
   await refreshKnowledgeWorkspace();
@@ -4898,15 +5788,19 @@ async function createProject() {
   setBusy(true);
   setProjectStatus("正在创建项目...");
   try {
+    const previousProjectId = state.batchProjectId || currentProjectId();
     const result = await companionRequest("/v1/projects", {
       method: "POST",
       body: { name }
     });
     $("newProjectNameInput").value = "";
+    await saveBatchQueue(previousProjectId);
     await loadProjects();
     state.settings.projectId = result.project?.id || state.settings.projectId || "default";
     $("projectSelect").value = state.settings.projectId;
     await chrome.storage.local.set({ settings: state.settings });
+    resetCurrentSourceAfterProjectChange(previousProjectId, state.settings.projectId);
+    await loadBatchQueue();
     await loadProjectBrief();
     await loadCapturePlans();
     await refreshKnowledgeWorkspace();
@@ -5690,63 +6584,141 @@ function renderLineage(lineage) {
 }
 
 async function testCompanion() {
-  await saveSettings({ saveModel: false });
   setBusy(true);
-  setStatus("正在测试本地服务...");
+  setSettingsStatus("正在测试本地服务和 Pairing Token...");
   try {
+    await saveSettings({ saveModel: false });
+    setSettingsStatus("正在测试本地服务和 Pairing Token...");
     const health = await companionRequest("/health", { method: "GET" });
+    assertCompatibleCompanion(health);
     if (health.pairing_required && !state.settings?.pairingToken) {
-      setStatus(`本地服务正常。请复制 Pairing Token：${health.pairing_token_path || "state/pairing_token.txt"}`);
+      setSettingsStatus(`本地服务已启动；请填写 Pairing Token：${health.pairing_token_path || "state/pairing_token.txt"}`);
       return;
     }
-    await loadProjects();
-    setStatus(`本地服务正常：${health.vault_dir || health.data_dir}`);
+    const projectsResponse = await companionRequest("/v1/projects", { method: "GET" });
+    state.projects = projectsResponse.projects || [];
+    renderProjectSelect();
+    setSettingsStatus(`本地服务和 Pairing Token 均正常：扩展 ${EXTENSION_VERSION} · 服务 ${health.service_version || health.version} · API ${health.api_version} · ${health.vault_dir || health.data_dir}`);
   } catch (error) {
-    setStatus(`本地服务不可用：${error.message}`);
+    const pairingHint = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message)
+      ? "Pairing Token 无效或未填写："
+      : "本地服务不可用：";
+    setSettingsStatus(`${pairingHint}${error.message}`);
   } finally {
     setBusy(false);
   }
 }
 
 async function testSettings() {
-  await saveSettings();
   setBusy(true);
-  setStatus("正在测试模型...");
+  setSettingsStatus("正在保存并测试模型...");
   try {
+    await saveSettings();
+    if (!hasCurrentModelDataConsent()) {
+      throw new Error("请先勾选材料外发同意；模型测试会向所选服务商发送测试提示。");
+    }
+    setSettingsStatus("正在测试模型...");
     const answer = await callLlm("请只回复：QC Smart Reader 连接成功。");
-    setStatus(answer.slice(0, 120));
+    setSettingsStatus(`模型连接成功：${answer.slice(0, 120)}`);
   } catch (error) {
-    setStatus(`测试失败：${error.message}`);
+    setSettingsStatus(`模型测试失败：${error.message}`);
   } finally {
     setBusy(false);
   }
 }
 
-async function clearServiceApiKey() {
-  await saveSettings({ saveModel: false });
-  if (!state.settings?.pairingToken) {
-    setStatus("请先填写 Pairing Token。");
-    return;
+async function persistModelDataConsent() {
+  await ensureSettingsLoaded();
+  Object.assign(state.settings, modelDataConsentFields(Boolean($("modelDataConsentInput").checked)));
+  await chrome.storage.local.set({ settings: state.settings });
+  setSettingsStatus(hasCurrentModelDataConsent() ? "已记录当前隐私说明下的模型数据使用同意。" : "已取消模型数据使用同意；模型调用将被阻止。");
+}
+
+function hasCurrentModelDataConsent(settings = state.settings) {
+  return Boolean(settings?.modelDataConsent)
+    && settings.modelDataConsentVersion === MODEL_DATA_CONSENT_VERSION;
+}
+
+function modelDataConsentFields(checked) {
+  if (!checked) {
+    return {
+      modelDataConsent: false,
+      modelDataConsentVersion: "",
+      modelDataConsentAt: ""
+    };
   }
+  const alreadyCurrent = hasCurrentModelDataConsent();
+  return {
+    modelDataConsent: true,
+    modelDataConsentVersion: MODEL_DATA_CONSENT_VERSION,
+    modelDataConsentAt: alreadyCurrent && state.settings?.modelDataConsentAt
+      ? state.settings.modelDataConsentAt
+      : new Date().toISOString()
+  };
+}
+
+function assertCompatibleCompanion(health) {
+  if (!health || health.ok !== true || health.app !== "QC Smart Reader") {
+    throw new Error("连接到的不是 QC Smart Reader companion service。");
+  }
+  const apiVersion = Number(health.api_version);
+  if (apiVersion !== REQUIRED_COMPANION_API_VERSION) {
+    throw new Error(`版本不兼容：扩展 ${EXTENSION_VERSION} 需要 Companion API ${REQUIRED_COMPANION_API_VERSION}，当前为 ${health.api_version ?? "旧版/未知"}。请更新并重启 companion service。`);
+  }
+  const minimumExtension = String(health.min_extension_version || "").trim();
+  if (minimumExtension && compareProductVersions(EXTENSION_VERSION, minimumExtension) < 0) {
+    throw new Error(`扩展版本过旧：Companion 要求扩展 ${minimumExtension} 或更高，当前为 ${EXTENSION_VERSION}。请更新扩展。`);
+  }
+}
+
+function compareProductVersions(left, right) {
+  const parse = (value) => String(value || "")
+    .split(".")
+    .slice(0, 4)
+    .map((part) => Number.parseInt(part, 10) || 0);
+  const leftParts = parse(left);
+  const rightParts = parse(right);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (difference) return difference < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+async function clearServiceApiKey() {
+  if (!confirm("确认清除 companion service 中保存的模型 API Key？清除后需要重新填写才能调用该服务商。")) return;
   setBusy(true);
-  setStatus("正在清除服务端 API Key...");
+  setSettingsStatus("正在清除服务端 API Key...");
   try {
+    await saveSettings({ saveModel: false });
+    if (!state.settings?.pairingToken) {
+      setSettingsStatus("请先填写 Pairing Token。");
+      return;
+    }
+    setSettingsStatus("正在清除服务端 API Key...");
     await saveModelSettingsToCompanion({ clearApiKey: true });
-    setStatus("服务端 API Key 已清除。");
+    setSettingsStatus("服务端 API Key 已清除。");
   } catch (error) {
-    setStatus(`清除失败：${error.message}`);
+    setSettingsStatus(`清除失败：${error.message}`);
   } finally {
     setBusy(false);
   }
 }
 
 function showTab(tabId) {
-  document.querySelector(`.tab[data-tab="${tabId}"]`)?.click();
+  const tab = document.querySelector(`.tab[data-tab="${tabId}"]`);
+  tab?.click();
+  tab?.focus?.();
 }
 
 function setBusy(isBusy) {
+  state.busyDepth = Math.max(0, Number(state.busyDepth || 0) + (isBusy ? 1 : -1));
+  state.busy = state.busyDepth > 0;
   const ids = [
     "readPageBtn",
+    "useSelectionBtn",
+    "saveNoteBtn",
     "manualSelectorInput",
     "readSelectorBtn",
     "enqueueNextPagesBtn",
@@ -5755,6 +6727,14 @@ function setBusy(isBusy) {
     "testCompanionBtn",
     "saveSettingsBtn",
     "clearApiKeyBtn",
+    "providerSelect",
+    "baseUrlInput",
+    "apiKeyInput",
+    "modelInput",
+    "temperatureInput",
+    "codexCommandInput",
+    "codexTimeoutInput",
+    "modelDataConsentInput",
     "pairingTokenInput",
     "runVaultDoctorBtn",
     "rebuildLineageBtn",
@@ -5781,6 +6761,7 @@ function setBusy(isBusy) {
     "refreshProjectsBtn",
     "createProjectBtn",
     "refreshKbBtn",
+    "syncPendingNotesBtn",
     "refreshReviewQueueBtn",
     "exportMarkdownBtn",
     "exportJsonBtn",
@@ -5797,7 +6778,13 @@ function setBusy(isBusy) {
     "cancelBatchBtn",
     "clearCompletedBatchBtn",
     "clearBatchBtn",
+    "pdfInput",
+    "pdfOcrInput",
     "ingestPdfBtn",
+    "youtubeUrlInput",
+    "youtubeTitleInput",
+    "youtubeLanguageInput",
+    "youtubeTranscriptInput",
     "ingestYoutubeBtn",
     "createDeliverableBtn",
     "refreshDeliverablesBtn",
@@ -5852,12 +6839,18 @@ function setBusy(isBusy) {
       node.disabled = !state.batchRunning;
       return;
     }
-    node.disabled = isBusy;
+    node.disabled = state.busy;
   });
+  syncProviderControls();
 }
 
 function setStatus(message) {
   $("status").textContent = message || "";
+}
+
+function setSettingsStatus(message) {
+  const node = $("settingsStatus");
+  if (node) node.textContent = message || "";
 }
 
 function countCjkAwareChars(text) {
@@ -5873,6 +6866,46 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+function isOfflineFallbackError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  const status = Number(error?.status || 0);
+  const isAuthOrVersionError = [
+    "401",
+    "403",
+    "unauthorized",
+    "forbidden",
+    "pairing token",
+    "auth",
+    "version",
+    "incompatible",
+    "upgrade",
+    "鉴权",
+    "权限",
+    "版本",
+    "升级"
+  ].some((marker) => message.includes(marker));
+  if (isAuthOrVersionError) return false;
+  if (status >= 400 && status < 500) return false;
+  if (status >= 500 && status < 600) return true;
+  if (error?.isNetworkError === true) return true;
+  return [
+    "failed to fetch",
+    "fetch failed",
+    "networkerror",
+    "network error",
+    "connection refused",
+    "connection reset",
+    "err_connection_refused",
+    "econnrefused",
+    "enotfound",
+    "dns",
+    "offline",
+    "unreachable",
+    "网络不可达",
+    "无法连接"
+  ].some((marker) => message.includes(marker));
+}
+
 async function companionRequest(path, options = {}) {
   await ensureSettingsLoaded();
   const base = (state.settings?.serviceUrl || "http://127.0.0.1:37621").replace(/\/+$/, "");
@@ -5882,17 +6915,78 @@ async function companionRequest(path, options = {}) {
   if (state.settings?.pairingToken) {
     headers["x-qc-pairing-token"] = state.settings.pairingToken;
   }
-  const response = await fetch(`${base}${path}`, {
-    method: options.method || "GET",
-    headers,
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  let parsedBase;
+  try {
+    parsedBase = new URL(base);
+  } catch (_error) {
+    throw new Error("Companion URL 格式无效。");
+  }
+  if (parsedBase.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]", "::1"].includes(parsedBase.hostname)) {
+    throw new Error("为保护 Pairing Token，Companion URL 仅允许本机 http://127.0.0.1 或 localhost 地址。");
+  }
+  const timeoutMs = companionRequestTimeoutMs(path, options);
+  const controller = typeof globalThis.AbortController === "function"
+    ? new globalThis.AbortController()
+    : null;
+  const timeoutId = controller && timeoutMs > 0
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  let response;
+  let text;
+  try {
+    response = await fetch(`${base}${path}`, {
+      method: options.method || "GET",
+      headers,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller?.signal
+    });
+    text = await response.text();
+  } catch (cause) {
+    const timedOut = cause?.name === "AbortError";
+    const error = new Error(timedOut
+      ? `Companion 请求超时（${Math.round(timeoutMs / 1000)} 秒）；服务可能仍在处理，请先检查状态再重试。`
+      : cause?.message || "Companion 网络不可达。");
+    error.isNetworkError = true;
+    error.code = timedOut ? "companion_timeout" : "companion_network_error";
+    error.cause = cause;
+    throw error;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (cause) {
+    const error = new Error(`Companion 返回了无法解析的响应（HTTP ${response.status}）。`);
+    error.status = response.status;
+    error.code = "invalid_response";
+    error.cause = cause;
+    throw error;
+  }
   if (!response.ok || data.ok === false) {
-    throw new Error(data.error || `HTTP ${response.status}`);
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = data.code || "companion_error";
+    throw error;
   }
   return data;
+}
+
+function companionRequestTimeoutMs(path, options = {}) {
+  const explicit = Number(options.timeoutMs);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return Math.max(1000, Math.min(explicit, 60 * 60 * 1000));
+  }
+  if (/\/v1\/(?:llm\/chat|sources\/[^/]+\/(?:extract-knowledge|reextract))/.test(path)) {
+    const codexSeconds = normalizeCodexTimeout(state.settings?.codexTimeoutSeconds || 300);
+    return Math.min((codexSeconds + 30) * 1000, 60 * 60 * 1000);
+  }
+  if (path.startsWith("/v1/pdfs/extract")) return 4 * 60 * 1000;
+  if (path.startsWith("/v1/youtube/transcripts")) return 2 * 60 * 1000;
+  if (path.startsWith("/v1/vault/doctor") || path.startsWith("/v1/lineage/rebuild")) {
+    return 3 * 60 * 1000;
+  }
+  return 45 * 1000;
 }
 
 async function ensureSettingsLoaded() {
