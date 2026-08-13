@@ -4,6 +4,26 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qc-test-all.XXXXXX")"
+TEST_SCOPE="${QC_TEST_SCOPE:-all}"
+
+case "$TEST_SCOPE" in
+  all)
+    RUN_CORE=1
+    RUN_NODE=1
+    ;;
+  core)
+    RUN_CORE=1
+    RUN_NODE=0
+    ;;
+  node)
+    RUN_CORE=0
+    RUN_NODE=1
+    ;;
+  *)
+    printf '[x] QC_TEST_SCOPE must be all, core, or node (received: %s)\n' "$TEST_SCOPE" >&2
+    exit 1
+    ;;
+esac
 
 cleanup() {
   if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
@@ -97,7 +117,7 @@ done < <(find "$ROOT/tests" -maxdepth 1 -type f -name 'test_*.mjs' | sort)
 [ "${#JS_FILES[@]}" -gt 0 ] || fail "No JavaScript files were found for syntax validation."
 [ "${#NODE_TEST_FILES[@]}" -gt 0 ] || fail "No Node test files were found."
 
-printf 'QC Smart Reader full validation\n'
+printf 'QC Smart Reader %s validation\n' "$TEST_SCOPE"
 printf '  root:   %s\n' "$ROOT"
 printf '  python: %s (%s)\n' "$PYTHON" "$("$PYTHON" -V 2>&1)"
 printf '  node:   %s (%s)\n' "$NODE" "$("$NODE" --version)"
@@ -119,45 +139,62 @@ bash -n \
   "$ROOT/tests/test_install_lifecycle.sh" \
   "$ROOT/tests/test_start_command.sh"
 
-printf '\n[2/6] Python unittest suite\n'
-PYTHON_LOG="$RUN_DIR/python-tests.log"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m unittest discover -s "$ROOT/tests" -v 2>&1 | tee "$PYTHON_LOG"
-PYTHON_TESTS="$(sed -n 's/^Ran \([0-9][0-9]*\) tests.*$/\1/p' "$PYTHON_LOG" | tail -n 1)"
-[ -n "$PYTHON_TESTS" ] || fail "Could not read the Python test count."
-PYTHON_RESULT="$(sed -n '/^OK/p' "$PYTHON_LOG" | tail -n 1)"
-[ "$PYTHON_RESULT" = "OK" ] \
-  || fail "Python validation must finish without skipped or expected-failure tests (reported: ${PYTHON_RESULT:-missing OK status})."
+if [ "$RUN_CORE" -eq 1 ]; then
+  printf '\n[2/6] Python unittest suite\n'
+  PYTHON_LOG="$RUN_DIR/python-tests.log"
+  PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m unittest discover -s "$ROOT/tests" -v 2>&1 | tee "$PYTHON_LOG"
+  PYTHON_TESTS="$(sed -n 's/^Ran \([0-9][0-9]*\) tests.*$/\1/p' "$PYTHON_LOG" | tail -n 1)"
+  [ -n "$PYTHON_TESTS" ] || fail "Could not read the Python test count."
+  PYTHON_RESULT="$(sed -n '/^OK/p' "$PYTHON_LOG" | tail -n 1)"
+  [ "$PYTHON_RESULT" = "OK" ] \
+    || fail "Python validation must finish without skipped or expected-failure tests (reported: ${PYTHON_RESULT:-missing OK status})."
 
-printf '\n[3/6] start.command integration suite\n'
-STARTUP_LOG="$RUN_DIR/startup-tests.log"
-QC_TEST_PYTHON="$PYTHON" bash "$ROOT/tests/test_start_command.sh" 2>&1 | tee "$STARTUP_LOG"
-STARTUP_TESTS="$(sed -n 's/^start\.command tests passed (\([0-9][0-9]*\) cases)\.$/\1/p' "$STARTUP_LOG" | tail -n 1)"
-[ -n "$STARTUP_TESTS" ] || fail "Could not read the start.command integration test count."
+  printf '\n[3/6] start.command integration suite\n'
+  STARTUP_LOG="$RUN_DIR/startup-tests.log"
+  QC_TEST_PYTHON="$PYTHON" bash "$ROOT/tests/test_start_command.sh" 2>&1 | tee "$STARTUP_LOG"
+  STARTUP_TESTS="$(sed -n 's/^start\.command tests passed (\([0-9][0-9]*\) cases)\.$/\1/p' "$STARTUP_LOG" | tail -n 1)"
+  [ -n "$STARTUP_TESTS" ] || fail "Could not read the start.command integration test count."
 
-printf '\n[4/6] macOS install / upgrade / uninstall lifecycle suite\n'
-LIFECYCLE_LOG="$RUN_DIR/install-lifecycle-tests.log"
-QC_TEST_PYTHON="$PYTHON" bash "$ROOT/tests/test_install_lifecycle.sh" 2>&1 | tee "$LIFECYCLE_LOG"
-LIFECYCLE_TESTS="$(sed -n 's/^install lifecycle tests passed (\([0-9][0-9]*\) cases)\.$/\1/p' "$LIFECYCLE_LOG" | tail -n 1)"
-[ -n "$LIFECYCLE_TESTS" ] || fail "Could not read the install lifecycle integration test count."
+  printf '\n[4/6] macOS install / upgrade / uninstall lifecycle suite\n'
+  LIFECYCLE_LOG="$RUN_DIR/install-lifecycle-tests.log"
+  QC_TEST_PYTHON="$PYTHON" bash "$ROOT/tests/test_install_lifecycle.sh" 2>&1 | tee "$LIFECYCLE_LOG"
+  LIFECYCLE_TESTS="$(sed -n 's/^install lifecycle tests passed (\([0-9][0-9]*\) cases)\.$/\1/p' "$LIFECYCLE_LOG" | tail -n 1)"
+  [ -n "$LIFECYCLE_TESTS" ] || fail "Could not read the install lifecycle integration test count."
+fi
 
-printf '\n[5/6] Node test suite (%s files, browser strict by default)\n' "${#NODE_TEST_FILES[@]}"
-NODE_LOG="$RUN_DIR/node-tests.log"
-BROWSER_REQUIREMENT="${QC_REQUIRE_BROWSER:-1}"
-QC_REQUIRE_BROWSER="$BROWSER_REQUIREMENT" "$NODE" --test --test-reporter=tap "${NODE_TEST_FILES[@]}" 2>&1 | tee "$NODE_LOG"
-NODE_TESTS="$(sed -n 's/^# tests \([0-9][0-9]*\)$/\1/p' "$NODE_LOG" | tail -n 1)"
-NODE_FAILURES="$(sed -n 's/^# fail \([0-9][0-9]*\)$/\1/p' "$NODE_LOG" | tail -n 1)"
-NODE_SKIPS="$(sed -n 's/^# skipped \([0-9][0-9]*\)$/\1/p' "$NODE_LOG" | tail -n 1)"
-[ -n "$NODE_TESTS" ] && [ -n "$NODE_FAILURES" ] && [ -n "$NODE_SKIPS" ] \
-  || fail "Could not read Node test totals."
-[ "$NODE_FAILURES" -eq 0 ] || fail "Node reported $NODE_FAILURES failed tests."
-case "$BROWSER_REQUIREMENT" in
-  1|true|TRUE|yes|YES|on|ON)
-    [ "$NODE_SKIPS" -eq 0 ] || fail "Strict browser validation reported $NODE_SKIPS skipped tests."
+if [ "$RUN_NODE" -eq 1 ]; then
+  printf '\n[5/6] Node test suite (%s files, browser strict by default)\n' "${#NODE_TEST_FILES[@]}"
+  NODE_LOG="$RUN_DIR/node-tests.log"
+  BROWSER_REQUIREMENT="${QC_REQUIRE_BROWSER:-1}"
+  QC_REQUIRE_BROWSER="$BROWSER_REQUIREMENT" "$NODE" --test --test-reporter=tap "${NODE_TEST_FILES[@]}" 2>&1 | tee "$NODE_LOG"
+  NODE_TESTS="$(sed -n 's/^# tests \([0-9][0-9]*\)$/\1/p' "$NODE_LOG" | tail -n 1)"
+  NODE_FAILURES="$(sed -n 's/^# fail \([0-9][0-9]*\)$/\1/p' "$NODE_LOG" | tail -n 1)"
+  NODE_SKIPS="$(sed -n 's/^# skipped \([0-9][0-9]*\)$/\1/p' "$NODE_LOG" | tail -n 1)"
+  [ -n "$NODE_TESTS" ] && [ -n "$NODE_FAILURES" ] && [ -n "$NODE_SKIPS" ] \
+    || fail "Could not read Node test totals."
+  [ "$NODE_FAILURES" -eq 0 ] || fail "Node reported $NODE_FAILURES failed tests."
+  case "$BROWSER_REQUIREMENT" in
+    1|true|TRUE|yes|YES|on|ON)
+      [ "$NODE_SKIPS" -eq 0 ] || fail "Strict browser validation reported $NODE_SKIPS skipped tests."
+      ;;
+  esac
+fi
+
+if [ "$RUN_CORE" -eq 1 ]; then
+  printf '\n[6/6] Companion-service evidence-chain smoke test\n'
+  PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$ROOT/scripts/smoke_e2e.py"
+fi
+
+case "$TEST_SCOPE" in
+  all)
+    printf '\nAll validation passed: %s Python tests, %s Node tests, %s Node skips, %s startup cases, %s lifecycle cases, 1 E2E smoke.\n' \
+      "$PYTHON_TESTS" "$NODE_TESTS" "$NODE_SKIPS" "$STARTUP_TESTS" "$LIFECYCLE_TESTS"
+    ;;
+  core)
+    printf '\nCore validation passed: %s Python tests, %s startup cases, %s lifecycle cases, 1 E2E smoke.\n' \
+      "$PYTHON_TESTS" "$STARTUP_TESTS" "$LIFECYCLE_TESTS"
+    ;;
+  node)
+    printf '\nNode validation passed: %s tests, %s skips.\n' "$NODE_TESTS" "$NODE_SKIPS"
     ;;
 esac
-
-printf '\n[6/6] Companion-service evidence-chain smoke test\n'
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$ROOT/scripts/smoke_e2e.py"
-
-printf '\nAll validation passed: %s Python tests, %s Node tests, %s Node skips, %s startup cases, %s lifecycle cases, 1 E2E smoke.\n' \
-  "$PYTHON_TESTS" "$NODE_TESTS" "$NODE_SKIPS" "$STARTUP_TESTS" "$LIFECYCLE_TESTS"

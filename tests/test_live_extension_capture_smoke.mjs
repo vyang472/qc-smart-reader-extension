@@ -307,13 +307,14 @@ finally:
 function terminate(child) {
   if (child.exitCode !== null || child.signalCode) return Promise.resolve();
   return new Promise((resolve) => {
-    const timeout = setTimeout(resolve, 2000);
-    timeout.unref?.();
+    const forceTimer = setTimeout(() => {
+      if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL");
+    }, 2000);
     child.once("exit", () => {
-      clearTimeout(timeout);
+      clearTimeout(forceTimer);
       resolve();
     });
-    child.kill();
+    child.kill("SIGTERM");
   });
 }
 
