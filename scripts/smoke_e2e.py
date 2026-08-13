@@ -11,6 +11,7 @@ Use it to answer "is my install actually working?" in about ten seconds.
 
     python3 scripts/smoke_e2e.py                 # start a temp service, tear it down
     python3 scripts/smoke_e2e.py --keep          # keep the temp vault for inspection
+    python3 scripts/smoke_e2e.py --startup-timeout 90
     python3 scripts/smoke_e2e.py --base-url http://127.0.0.1:37621 --token <token>
 
 Exit code is 0 only if every step passed.
@@ -99,7 +100,15 @@ def main() -> int:
     parser.add_argument("--base-url", default="", help="test an already-running service instead of starting one")
     parser.add_argument("--token", default="", help="pairing token for --base-url")
     parser.add_argument("--keep", action="store_true", help="keep the temporary vault directory")
+    parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=25.0,
+        help="seconds to wait for companion health (default: 25)",
+    )
     args = parser.parse_args()
+    if args.startup_timeout <= 0:
+        parser.error("--startup-timeout must be greater than zero")
 
     process: subprocess.Popen | None = None
     data_dir: Path | None = None
@@ -112,7 +121,7 @@ def main() -> int:
     try:
         if args.base_url:
             base_url = args.base_url.rstrip("/")
-            health = wait_for_health(base_url, None)
+            health = wait_for_health(base_url, None, timeout=args.startup_timeout)
             token = args.token
             if not token:
                 token_path = Path(health.get("pairing_token_path", ""))
@@ -130,7 +139,7 @@ def main() -> int:
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            health = wait_for_health(base_url, process)
+            health = wait_for_health(base_url, process, timeout=args.startup_timeout)
             token = (data_dir / "state" / "pairing_token.txt").read_text(encoding="utf-8").strip()
 
         record("service healthy", f"v{health.get('version')} vault={health.get('vault_dir')}")

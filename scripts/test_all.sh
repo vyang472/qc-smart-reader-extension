@@ -149,13 +149,17 @@ if [ "$RUN_CORE" -eq 1 ]; then
   [ "$PYTHON_RESULT" = "OK" ] \
     || fail "Python validation must finish without skipped or expected-failure tests (reported: ${PYTHON_RESULT:-missing OK status})."
 
-  printf '\n[3/6] start.command integration suite\n'
+  printf '\n[3/6] Companion-service evidence-chain smoke test\n'
+  PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$ROOT/scripts/smoke_e2e.py" \
+    --startup-timeout "${QC_SMOKE_START_TIMEOUT_SECONDS:-25}"
+
+  printf '\n[4/6] start.command integration suite\n'
   STARTUP_LOG="$RUN_DIR/startup-tests.log"
   QC_TEST_PYTHON="$PYTHON" bash "$ROOT/tests/test_start_command.sh" 2>&1 | tee "$STARTUP_LOG"
   STARTUP_TESTS="$(sed -n 's/^start\.command tests passed (\([0-9][0-9]*\) cases)\.$/\1/p' "$STARTUP_LOG" | tail -n 1)"
   [ -n "$STARTUP_TESTS" ] || fail "Could not read the start.command integration test count."
 
-  printf '\n[4/6] macOS install / upgrade / uninstall lifecycle suite\n'
+  printf '\n[5/6] macOS install / upgrade / uninstall lifecycle suite\n'
   LIFECYCLE_LOG="$RUN_DIR/install-lifecycle-tests.log"
   QC_TEST_PYTHON="$PYTHON" bash "$ROOT/tests/test_install_lifecycle.sh" 2>&1 | tee "$LIFECYCLE_LOG"
   LIFECYCLE_TESTS="$(sed -n 's/^install lifecycle tests passed (\([0-9][0-9]*\) cases)\.$/\1/p' "$LIFECYCLE_LOG" | tail -n 1)"
@@ -163,7 +167,7 @@ if [ "$RUN_CORE" -eq 1 ]; then
 fi
 
 if [ "$RUN_NODE" -eq 1 ]; then
-  printf '\n[5/6] Node test suite (%s files, browser strict by default)\n' "${#NODE_TEST_FILES[@]}"
+  printf '\n[6/6] Node test suite (%s files, browser strict by default)\n' "${#NODE_TEST_FILES[@]}"
   NODE_LOG="$RUN_DIR/node-tests.log"
   BROWSER_REQUIREMENT="${QC_REQUIRE_BROWSER:-1}"
   QC_REQUIRE_BROWSER="$BROWSER_REQUIREMENT" "$NODE" --test --test-reporter=tap "${NODE_TEST_FILES[@]}" 2>&1 | tee "$NODE_LOG"
@@ -178,11 +182,6 @@ if [ "$RUN_NODE" -eq 1 ]; then
       [ "$NODE_SKIPS" -eq 0 ] || fail "Strict browser validation reported $NODE_SKIPS skipped tests."
       ;;
   esac
-fi
-
-if [ "$RUN_CORE" -eq 1 ]; then
-  printf '\n[6/6] Companion-service evidence-chain smoke test\n'
-  PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$ROOT/scripts/smoke_e2e.py"
 fi
 
 case "$TEST_SCOPE" in
