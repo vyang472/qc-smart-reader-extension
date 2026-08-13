@@ -34,7 +34,13 @@ function createMockNode(id = "") {
   };
 }
 
-async function createSidepanelHarness({ fetchHandler, extractionResult } = {}) {
+async function createSidepanelHarness({
+  fetchHandler,
+  extractionResult,
+  runtimeMessageHandler,
+  confirmHandler = () => true,
+  currentTab = { id: 41, windowId: 7, url: "https://example.com/current", title: "Current tab" }
+} = {}) {
   const js = (await projectFile("sidepanel.js")).replace("\ninit();\n", "\n");
   const nodes = new Map();
   const storageState = {};
@@ -42,6 +48,7 @@ async function createSidepanelHarness({ fetchHandler, extractionResult } = {}) {
   let nextTimerId = 1;
   let nextUuid = 1;
   const fetchCalls = [];
+  const runtimeListeners = [];
 
   const context = {
     console: {
@@ -61,8 +68,10 @@ async function createSidepanelHarness({ fetchHandler, extractionResult } = {}) {
     URLSearchParams,
     Array,
     Boolean,
+    AbortController,
     Math,
     Object,
+    confirm: confirmHandler,
     crypto: {
       randomUUID: () => `uuid-${nextUuid++}`
     },
@@ -82,6 +91,16 @@ async function createSidepanelHarness({ fetchHandler, extractionResult } = {}) {
       }
     },
     chrome: {
+      runtime: {
+        onMessage: {
+          addListener(listener) {
+            runtimeListeners.push(listener);
+          }
+        },
+        async sendMessage(message) {
+          return runtimeMessageHandler ? runtimeMessageHandler(message) : { ok: true, selection: null };
+        }
+      },
       storage: {
         local: {
           async get(keys) {
@@ -104,6 +123,9 @@ async function createSidepanelHarness({ fetchHandler, extractionResult } = {}) {
         }
       },
       tabs: {
+        async query() {
+          return [currentTab];
+        },
         async create({ url }) {
           return { id: 42, url, title: "Fixture Page", windowId: 7 };
         },
@@ -111,6 +133,11 @@ async function createSidepanelHarness({ fetchHandler, extractionResult } = {}) {
           return { status: "complete" };
         },
         async remove() {}
+      },
+      windows: {
+        async getCurrent() {
+          return { id: currentTab.windowId };
+        }
       },
       scripting: {
         async executeScript() {
@@ -181,6 +208,7 @@ async function createSidepanelHarness({ fetchHandler, extractionResult } = {}) {
     context,
     fetchCalls,
     nodes,
+    runtimeListeners,
     storageState,
     intervalCallbacks,
     run(expression) {
@@ -221,16 +249,18 @@ test("sidepanel wires service-owned batch dispatch and heartbeat controls", asyn
   assert.match(js, /updateBatchJobItem[\s\S]*mergeJobIntoBatchQueue\(response\.job\)/);
   assert.match(js, /batchConcurrencyInput"\)\.addEventListener\("change", updateBatchConcurrency\)/);
   assert.match(js, /processBatchQueue[\s\S]*prepareServiceBackedBatch\(processable\)/);
-  assert.match(js, /serviceReady[\s\S]*processBatchQueueFromService\(processable, concurrency\)/);
-  assert.match(js, /processBatchQueue[\s\S]*processBatchQueueLocally\(processable, concurrency\)/);
+  assert.match(js, /preparation\.ready[\s\S]*processBatchQueueFromService\(processable, concurrency\)/);
+  assert.match(js, /processBatchQueue[\s\S]*processBatchQueueLocally\(processable, concurrency, \{/);
   assert.match(js, /prepareServiceBackedBatch[\s\S]*\/recover/);
   assert.match(js, /prepareServiceBackedBatch[\s\S]*\/retry-failed/);
   assert.match(js, /prepareServiceBackedBatch[\s\S]*\/resume/);
   assert.match(js, /processBatchQueueFromService[\s\S]*while \(!state\.batchCancelRequested && !state\.batchPaused\)/);
+  assert.match(js, /function batchWorkerExecutorId/);
+  assert.match(js, /worker\(workerIndex\)[\s\S]*batchWorkerExecutorId\(workerIndex\)/);
   assert.match(js, /claimNextBatchJobItem[\s\S]*\/claim-next/);
-  assert.match(js, /claimNextBatchJobItem[\s\S]*executor_id: batchExecutorId\(\)/);
+  assert.match(js, /claimNextBatchJobItem[\s\S]*executor_id: executorId/);
   assert.match(js, /claimNextBatchJobItem[\s\S]*lease_seconds: 180/);
-  assert.match(js, /processClaimedBatchItem[\s\S]*startBatchItemHeartbeat\(item\)/);
+  assert.match(js, /processClaimedBatchItem[\s\S]*startBatchItemHeartbeat\(item, executorId\)/);
   assert.match(js, /processClaimedBatchItem[\s\S]*clearInterval\(heartbeat\)/);
   assert.match(js, /startBatchItemHeartbeat[\s\S]*\/heartbeat/);
   assert.match(js, /startBatchItemHeartbeat[\s\S]*recordBatchHeartbeat\(item, heartbeatAt\)/);
@@ -243,12 +273,1008 @@ test("sidepanel wires service-owned batch dispatch and heartbeat controls", asyn
   assert.match(js, /id === "pauseBatchBtn" \|\| id === "cancelBatchBtn"[\s\S]*node\.disabled = !state\.batchRunning/);
 });
 
+test("batch completion summaries report outcomes truthfully in service and local fallback paths", async () => {
+  const localHarness = await createSidepanelHarness({
+    extractionResult: {
+      text: "",
+      markdown: "",
+      stats: { authRequired: true },
+      quality_flags: { auth_required: true }
+    },
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/jobs/read") {
+        return { ok: false, status: 503, error: "job service unavailable" };
+      }
+      return { ok: true };
+    }
+  });
+  localHarness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
+    batchQueue: [{
+      id: "local-failure",
+      projectId: "project-1",
+      url: "https://example.com/login",
+      canonicalUrl: "https://example.com/login",
+      title: "Login required",
+      status: "pending",
+      error: "",
+      errorCategory: "",
+      browserAttempts: 0,
+      addedAt: "2026-06-28T01:00:00.000Z",
+      updatedAt: "2026-06-28T01:00:00.000Z"
+    }]
+  });
+
+  await localHarness.context.processBatchQueue();
+
+  assert.match(localHarness.nodes.get("batchStatus").textContent, /服务端批量准备失败/);
+  assert.match(localHarness.nodes.get("batchStatus").textContent, /成功 0.*失败 1.*可重试 0.*已取消 0/);
+  assert.doesNotMatch(localHarness.nodes.get("batchStatus").textContent, /完成：1 个 URL/);
+
+  let claimCount = 0;
+  const job = {
+    id: "job-all-failed",
+    type: "read",
+    status: "running",
+    items: [{
+      id: "job-item-all-failed",
+      url: "https://example.com/login",
+      status: "pending",
+      input: { client_id: "service-failure", canonical_url: "https://example.com/login" },
+      result: {}
+    }]
+  };
+  const serviceHarness = await createSidepanelHarness({
+    extractionResult: {
+      text: "",
+      markdown: "",
+      stats: { authRequired: true },
+      quality_flags: { auth_required: true }
+    },
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/jobs/read") return { ok: true, job };
+      if (call.path.endsWith("/recover") || call.path.endsWith("/retry-failed") || call.path.endsWith("/resume")) {
+        return { ok: true, job };
+      }
+      if (call.path.endsWith("/claim-next")) {
+        claimCount += 1;
+        if (claimCount === 1) {
+          job.items[0].status = "running";
+          return { ok: true, job, item: job.items[0] };
+        }
+        return { ok: true, job, item: null, reason: "drained" };
+      }
+      if (call.path.endsWith("/heartbeat")) return { ok: true, job, item: job.items[0] };
+      if (call.path.endsWith("/status")) {
+        job.items[0].status = call.body.status;
+        job.items[0].error = call.body.error || "";
+        job.items[0].error_category = call.body.error_category || "";
+        job.items[0].result = call.body.result || {};
+        return { ok: true, job, item: job.items[0] };
+      }
+      return { ok: true };
+    }
+  });
+  serviceHarness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
+    batchQueue: [{
+      id: "service-failure",
+      projectId: "project-1",
+      url: "https://example.com/login",
+      canonicalUrl: "https://example.com/login",
+      title: "Login required",
+      status: "pending",
+      error: "",
+      errorCategory: "",
+      browserAttempts: 0,
+      addedAt: "2026-06-28T01:00:00.000Z",
+      updatedAt: "2026-06-28T01:00:00.000Z"
+    }]
+  });
+
+  await serviceHarness.context.processBatchQueue();
+
+  assert.match(serviceHarness.nodes.get("batchStatus").textContent, /成功 0.*失败 1.*可重试 0.*已取消 0/);
+  assert.doesNotMatch(serviceHarness.nodes.get("batchStatus").textContent, /完成：1 个 URL/);
+  assert.equal(
+    serviceHarness.context.formatBatchCompletionSummary([
+      { status: "success" },
+      { status: "failed", retryable: true },
+      { status: "failed", retryable: false },
+      { status: "canceled" }
+    ]),
+    "成功 1 · 失败 2 · 可重试 1 · 已取消 1"
+  );
+});
+
+test("destructive controls require confirmation and preserve queues when server cancellation fails", async () => {
+  const queueHarness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/jobs/job-1/cancel") {
+        return { ok: false, status: 503, error: "cancel unavailable" };
+      }
+      return { ok: true };
+    }
+  });
+  queueHarness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-1" },
+    batchQueue: [{
+      id: "item-1",
+      projectId: "project-1",
+      jobId: "job-1",
+      jobItemId: "job-item-1",
+      url: "https://example.com/pending",
+      status: "pending"
+    }]
+  });
+  await queueHarness.context.cancelBatchQueue();
+  assert.equal(queueHarness.stateSnapshot().queue[0].status, "pending");
+  assert.match(queueHarness.nodes.get("batchStatus").textContent, /取消失败|再次取消/);
+
+  await queueHarness.context.clearBatchQueue();
+  assert.equal(queueHarness.stateSnapshot().queue.length, 1);
+  assert.match(queueHarness.nodes.get("batchStatus").textContent, /清空未执行|原样保留/);
+
+  const deniedHarness = await createSidepanelHarness({ confirmHandler: () => false });
+  deniedHarness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-1" }
+  });
+  await deniedHarness.context.clearServiceApiKey();
+  assert.equal(deniedHarness.fetchCalls.some((call) => call.path === "/v1/model-settings"), false);
+});
+
+test("sidepanel maps extractor empty and auth flags to batch failure categories", async () => {
+  const authHarness = await createSidepanelHarness({
+    extractionResult: {
+      text: "",
+      markdown: "",
+      stats: { authRequired: true, emptyContent: false },
+      quality_flags: { auth_required: true, empty_content: false }
+    }
+  });
+  await assert.rejects(
+    authHarness.context.captureBatchItemWithRetries({
+      id: "auth-item",
+      url: "https://example.com/login",
+      status: "pending"
+    }),
+    (error) => error.errorCategory === "auth_required"
+  );
+  assert.equal(authHarness.fetchCalls.some((call) => call.path === "/v1/captures"), false);
+
+  const emptyHarness = await createSidepanelHarness({
+    extractionResult: {
+      text: "",
+      markdown: "",
+      stats: { emptyContent: true, authRequired: false },
+      quality_flags: { empty_content: true, auth_required: false }
+    }
+  });
+  await assert.rejects(
+    emptyHarness.context.captureBatchItemWithRetries({
+      id: "empty-item",
+      url: "https://example.com/empty",
+      status: "pending"
+    }),
+    (error) => error.errorCategory === "extraction_empty"
+  );
+  assert.equal(emptyHarness.fetchCalls.some((call) => call.path === "/v1/captures"), false);
+});
+
+test("settings panel shows authenticated connection feedback and persists Codex CLI controls", async () => {
+  const html = await projectFile("sidepanel.html");
+  for (const id of ["settingsStatus", "codexCommandInput", "codexTimeoutInput"]) {
+    assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
+  }
+
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/health") {
+        return {
+          ok: true,
+          app: "QC Smart Reader",
+          version: "0.9.0",
+          service_version: "0.9.0",
+          api_version: 1,
+          pairing_required: true,
+          vault_dir: "/tmp/qc-vault"
+        };
+      }
+      if (call.path === "/v1/projects") {
+        return { ok: false, status: 403, error: "invalid pairing token" };
+      }
+      if (call.path === "/v1/model-settings" && call.method === "GET") {
+        return {
+          ok: true,
+          settings: {
+            provider: "codex",
+            base_url: "",
+            model: "",
+            temperature: 0.2,
+            codex_command: "/opt/homebrew/bin/codex exec",
+            codex_timeout_seconds: 420,
+            has_api_key: false
+          }
+        };
+      }
+      if (call.path === "/v1/model-settings" && call.method === "POST") {
+        return {
+          ok: true,
+          settings: {
+            ...call.body,
+            base_url: call.body.base_url,
+            codex_command: call.body.codex_command,
+            codex_timeout_seconds: call.body.codex_timeout_seconds,
+            has_api_key: false
+          }
+        };
+      }
+      return { ok: true };
+    }
+  });
+  harness.storageState.settings = {
+    serviceUrl: "http://127.0.0.1:37621",
+    pairingToken: "bad-token",
+    projectId: "project-1",
+    provider: "codex",
+    codexCommand: "/usr/local/bin/codex exec",
+    codexTimeoutSeconds: 360
+  };
+
+  await harness.context.loadSettings();
+  assert.equal(harness.nodes.get("baseUrlInput").value, "");
+  assert.equal(harness.nodes.get("modelInput").value, "");
+  assert.equal(harness.nodes.get("codexCommandInput").value, "/opt/homebrew/bin/codex exec");
+  assert.equal(harness.nodes.get("codexTimeoutInput").value, 420);
+  assert.equal(harness.nodes.get("baseUrlInput").disabled, true);
+  assert.equal(harness.nodes.get("apiKeyInput").disabled, true);
+  assert.equal(harness.nodes.get("codexCommandInput").disabled, false);
+  assert.equal(harness.nodes.get("codexTimeoutInput").disabled, false);
+
+  harness.nodes.get("codexCommandInput").value = "/custom/codex exec";
+  harness.nodes.get("codexTimeoutInput").value = "600";
+  await harness.context.saveSettings();
+  const saveCall = harness.fetchCalls.find((call) => call.path === "/v1/model-settings" && call.method === "POST");
+  assert.equal(saveCall.body.codex_command, "/custom/codex exec");
+  assert.equal(saveCall.body.codex_timeout_seconds, 600);
+  assert.match(harness.nodes.get("settingsStatus").textContent, /设置已保存/);
+
+  harness.nodes.get("providerSelect").value = "openai";
+  harness.context.syncProviderControls();
+  assert.equal(harness.nodes.get("baseUrlInput").disabled, false);
+  assert.equal(harness.nodes.get("apiKeyInput").disabled, false);
+  assert.equal(harness.nodes.get("codexCommandInput").disabled, true);
+  assert.equal(harness.nodes.get("codexTimeoutInput").disabled, true);
+
+  harness.nodes.get("providerSelect").value = "codex";
+  harness.nodes.get("pairingTokenInput").value = "bad-token";
+  await harness.context.testCompanion();
+  assert.ok(harness.fetchCalls.some((call) => call.path === "/v1/projects"), "authenticated probe was not called");
+  assert.match(harness.nodes.get("settingsStatus").textContent, /invalid pairing token|Pairing Token|配对失败/i);
+  assert.doesNotMatch(harness.nodes.get("settingsStatus").textContent, /本地服务正常/);
+});
+
+test("companion requests enforce bounded operation-aware timeouts", async () => {
+  const harness = await createSidepanelHarness();
+  harness.setState({ settings: { codexTimeoutSeconds: 420 } });
+  assert.equal(harness.context.companionRequestTimeoutMs("/v1/projects", {}), 45000);
+  assert.equal(harness.context.companionRequestTimeoutMs("/v1/pdfs/extract", {}), 240000);
+  assert.equal(harness.context.companionRequestTimeoutMs("/v1/llm/chat", {}), 450000);
+  assert.equal(harness.context.companionRequestTimeoutMs("/v1/projects", { timeoutMs: 1234 }), 1234);
+});
+
+test("privacy consent is explicit, versioned, and required before model calls", async () => {
+  const html = await projectFile("sidepanel.html");
+  assert.match(html, /id="modelDataConsentInput"/);
+  assert.match(html, /我同意把我主动提交的材料发送给所选模型/);
+  assert.match(html, /href="PRIVACY\.md"/);
+
+  const harness = await createSidepanelHarness();
+  harness.storageState.settings = {
+    serviceUrl: "http://127.0.0.1:37621",
+    pairingToken: "pair-token",
+    projectId: "project-1",
+    modelDataConsent: true,
+    modelDataConsentVersion: "obsolete-notice"
+  };
+  await harness.context.loadSettings();
+  assert.equal(harness.nodes.get("modelDataConsentInput").checked, false, "stale consent must not remain active");
+
+  harness.setState({
+    source: {
+      projectId: "project-1",
+      title: "Private source",
+      url: "https://example.com/private",
+      kind: "page",
+      text: "Sensitive source material that must not be sent without affirmative consent."
+    }
+  });
+  await harness.context.askAgents();
+  assert.equal(harness.fetchCalls.some((call) => call.path === "/v1/llm/chat"), false);
+  assert.match(harness.nodes.get("status").textContent, /同意/);
+
+  harness.nodes.get("modelDataConsentInput").checked = true;
+  await harness.context.persistModelDataConsent();
+  assert.equal(harness.storageState.settings.modelDataConsent, true);
+  assert.equal(harness.storageState.settings.modelDataConsentVersion, "2026-08-14-v1");
+  assert.match(harness.storageState.settings.modelDataConsentAt, /^\d{4}-\d{2}-\d{2}T/);
+
+  assert.throws(
+    () => harness.context.assertCompatibleCompanion({ ok: true, app: "QC Smart Reader", api_version: 2 }),
+    /版本不兼容/
+  );
+  assert.throws(
+    () => harness.context.assertCompatibleCompanion({
+      ok: true,
+      app: "QC Smart Reader",
+      api_version: 1,
+      min_extension_version: "0.10.0"
+    }),
+    /扩展版本过旧/
+  );
+  assert.equal(harness.context.compareProductVersions("0.9.0", "0.9"), 0);
+});
+
+test("stale model answers cannot be rebound to another source or deliverable", async () => {
+  const harness = await createSidepanelHarness();
+  const sharedPrefix = "a".repeat(512);
+  const sharedSuffix = "z".repeat(512);
+  const firstText = `${sharedPrefix}middle-one${sharedSuffix}`;
+  const secondText = `${sharedPrefix}middle-two${sharedSuffix}`;
+  assert.equal(firstText.length, secondText.length);
+  const firstFingerprint = harness.run(`sourceFingerprint(${JSON.stringify({
+    projectId: "project-1",
+    title: "Collision check",
+    url: "https://example.com/current",
+    kind: "page",
+    text: firstText
+  })})`);
+  const secondFingerprint = harness.run(`sourceFingerprint(${JSON.stringify({
+    projectId: "project-1",
+    title: "Collision check",
+    url: "https://example.com/current",
+    kind: "page",
+    text: secondText
+  })})`);
+  assert.notEqual(firstFingerprint, secondFingerprint, "equal-length middle changes collided");
+
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-1" },
+    source: {
+      projectId: "project-1",
+      title: "Current source",
+      url: "https://example.com/current",
+      kind: "page",
+      text: "Current source text is long enough to form a valid source-backed deliverable."
+    },
+    lastAnswer: "This answer belongs to a previous source and must never be rebound.",
+    lastAnswerSourceFingerprint: "previous-source-fingerprint"
+  });
+
+  await harness.context.createDeliverableFromCurrentSource();
+
+  assert.equal(harness.fetchCalls.some((call) => call.path === "/v1/deliverables"), false);
+  assert.match(harness.nodes.get("deliverableStatus").textContent, /另一个来源|错绑|阻止/);
+
+  harness.context.markCurrentSourceFingerprint();
+  assert.equal(harness.run("state.lastAnswer"), "");
+  assert.equal(harness.run("state.lastAnswerSourceFingerprint"), "");
+});
+
+test("primary navigation exposes keyboard-accessible tab semantics and live status", async () => {
+  const html = await projectFile("sidepanel.html");
+  assert.match(html, /<nav class="tabs" role="tablist"/);
+  assert.match(html, /id="tab-chat"[^>]*role="tab"[^>]*aria-selected="true"/);
+  assert.match(html, /id="chat"[^>]*role="tabpanel"[^>]*aria-labelledby="tab-chat"/);
+  assert.match(html, /id="status"[^>]*(?:role="status"|aria-live="polite")/);
+});
+
+test("overlapping operations keep controls disabled until the final task releases busy state", async () => {
+  const harness = await createSidepanelHarness();
+  harness.context.setBusy(true);
+  harness.context.setBusy(true);
+  harness.context.setBusy(false);
+  assert.equal(harness.run("state.busy"), true);
+  assert.equal(harness.nodes.get("readPageBtn").disabled, true);
+
+  harness.context.setBusy(false);
+  assert.equal(harness.run("state.busy"), false);
+  assert.equal(harness.nodes.get("readPageBtn").disabled, false);
+});
+
+test("PDF import requests OCR by default and reports applied, unnecessary, and fallback outcomes", async () => {
+  const html = await projectFile("sidepanel.html");
+  assert.match(html, /id="pdfOcrInput"[^>]*type="checkbox"[^>]*checked/);
+  assert.match(html, /id="pdfImportStatus"/);
+
+  const pdfResults = [
+    {
+      source: { id: "source-pdf-ocr", title: "Scanned PDF", text: "OCR text", project_id: "project-1" },
+      pdf: {
+        pages: 3,
+        low_text: false,
+        profile: "pdf-pypdf+macos-vision-ocr",
+        ocr: { attempted: true, applied: true, engine: "tesseract", error: "", pages_replaced: 2 }
+      }
+    },
+    {
+      source: { id: "source-pdf-text", title: "Text PDF", text: "Text layer", project_id: "project-1" },
+      pdf: {
+        pages: 2,
+        low_text: false,
+        ocr: { attempted: false, applied: false, engine: "", error: "" }
+      }
+    },
+    {
+      source: { id: "source-pdf-fallback", title: "Fallback PDF", text: "Partial text", project_id: "project-1" },
+      pdf: {
+        pages: 4,
+        low_text: true,
+        ocr: { attempted: true, applied: false, engine: "tesseract", error: "OCR runtime unavailable" }
+      }
+    },
+    {
+      source: { id: "source-pdf-no-ocr", title: "OCR disabled PDF", text: "Text layer", project_id: "project-1" },
+      pdf: {
+        pages: 1,
+        low_text: false,
+        ocr: { attempted: false, applied: false, engine: "", error: "" }
+      }
+    }
+  ];
+  let pdfResultIndex = 0;
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/pdfs/extract") return { ok: true, ...pdfResults[pdfResultIndex++] };
+      return { ok: true };
+    }
+  });
+  harness.run("loadKnowledgeBase = async () => {};");
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-1" }
+  });
+  harness.context.document.getElementById("pdfInput").value = "/tmp/scanned.pdf";
+  harness.context.document.getElementById("pdfOcrInput").checked = true;
+
+  await harness.context.ingestPdf();
+  const firstPdfCall = harness.fetchCalls.find((call) => call.path === "/v1/pdfs/extract");
+  assert.equal(firstPdfCall.body.ocr, true);
+  assert.equal(firstPdfCall.body.path, "/tmp/scanned.pdf");
+  assert.match(harness.nodes.get("batchStatus").textContent, /OCR 已应用.*tesseract/i);
+  assert.match(harness.nodes.get("pdfImportStatus").textContent, /OCR 已应用.*tesseract/i);
+  const ocrStats = JSON.parse(harness.run("JSON.stringify(state.source.stats)"));
+  assert.equal(ocrStats.profile, "pdf-pypdf+macos-vision-ocr");
+  assert.equal(ocrStats.ocrPagesReplaced, 2);
+
+  await harness.context.ingestPdf();
+  assert.match(harness.nodes.get("batchStatus").textContent, /未需 OCR/i);
+
+  await harness.context.ingestPdf();
+  assert.match(harness.nodes.get("batchStatus").textContent, /OCR 失败.*回退.*OCR runtime unavailable/i);
+  assert.doesNotMatch(harness.nodes.get("batchStatus").textContent, /OCR 已应用/i);
+
+  harness.nodes.get("pdfOcrInput").checked = false;
+  await harness.context.ingestPdf();
+  const pdfCalls = harness.fetchCalls.filter((call) => call.path === "/v1/pdfs/extract");
+  assert.equal(pdfCalls[3].body.ocr, false);
+  assert.match(harness.nodes.get("pdfImportStatus").textContent, /OCR 已关闭/i);
+});
+
+test("YouTube import automatically fetches captions when optional transcript is empty and preserves manual input", async () => {
+  const html = await projectFile("sidepanel.html");
+  assert.match(html, /for="youtubeTranscriptInput"[^>]*>[^<]*可选/i);
+  assert.match(html, /id="youtubeLanguageInput"/);
+  assert.match(html, /id="youtubeImportStatus"/);
+
+  let resolveAutomatic;
+  let youtubeRequestCount = 0;
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path !== "/v1/youtube/transcripts") return { ok: true };
+      youtubeRequestCount += 1;
+      if (youtubeRequestCount === 1) {
+        return new Promise((resolve) => {
+          resolveAutomatic = () => resolve({
+            ok: true,
+            source: {
+              id: "source-youtube-auto",
+              title: "Automatic captions",
+              text: "Automatically fetched captions",
+              project_id: "project-1"
+            },
+            youtube: { segments: 8, caption_source: "automatic", language: "zh-Hans" }
+          });
+        });
+      }
+      return {
+        ok: true,
+        source: {
+          id: "source-youtube-manual",
+          title: "Manual captions",
+          text: "[00:00] pasted transcript",
+          project_id: "project-1"
+        },
+        youtube: { segments: 1, source: "manual", language: "en" }
+      };
+    }
+  });
+  harness.run("refreshKnowledgeWorkspace = async () => {};");
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-1" }
+  });
+  harness.context.document.getElementById("youtubeUrlInput").value = "";
+  harness.context.document.getElementById("youtubeTitleInput").value = "Title without a URL";
+  harness.context.document.getElementById("youtubeTranscriptInput").value = "[00:00] traceability still requires a URL";
+  await harness.context.ingestYoutubeTranscript();
+  assert.equal(youtubeRequestCount, 0, "title-only manual import reached the service");
+  assert.match(harness.nodes.get("youtubeImportStatus").textContent, /有效.*YouTube URL/i);
+
+  harness.nodes.get("youtubeUrlInput").value = "https://example.com/not-youtube";
+  harness.nodes.get("youtubeTranscriptInput").value = "";
+  await harness.context.ingestYoutubeTranscript();
+  assert.equal(youtubeRequestCount, 0, "non-YouTube automatic import reached the service");
+  assert.match(harness.nodes.get("batchStatus").textContent, /有效.*YouTube URL/i);
+
+  harness.nodes.get("youtubeUrlInput").value = "https://www.youtube.com/watch?v=too-short";
+  await harness.context.ingestYoutubeTranscript();
+  assert.equal(youtubeRequestCount, 0, "short invalid video id reached automatic caption retrieval");
+  assert.match(harness.nodes.get("youtubeImportStatus").textContent, /有效.*YouTube URL/i);
+
+  harness.nodes.get("youtubeUrlInput").value = "https://www.youtube.com/watch?v=abc123xyz01";
+  harness.nodes.get("youtubeTitleInput").value = "";
+  harness.nodes.get("youtubeTranscriptInput").value = "";
+  harness.nodes.get("youtubeLanguageInput").value = "zh-Hans,en";
+  harness.context.syncYoutubeImportMode();
+  assert.match(harness.nodes.get("ingestYoutubeBtn").textContent, /automatic/i);
+
+  const automaticImport = harness.context.ingestYoutubeTranscript();
+  await Promise.resolve();
+  assert.match(harness.nodes.get("ingestYoutubeBtn").textContent, /automatic/i);
+  assert.match(harness.nodes.get("batchStatus").textContent, /automatic.*zh-Hans,en/i);
+  assert.match(harness.nodes.get("youtubeImportStatus").textContent, /automatic.*zh-Hans,en/i);
+  resolveAutomatic();
+  await automaticImport;
+
+  const automaticCall = harness.fetchCalls.find((call) => call.path === "/v1/youtube/transcripts");
+  assert.equal(automaticCall.body.transcript, "");
+  assert.equal(automaticCall.body.language, "zh-Hans,en");
+  assert.match(harness.nodes.get("batchStatus").textContent, /automatic.*zh-Hans/i);
+
+  harness.nodes.get("youtubeTranscriptInput").value = "[00:00] pasted transcript";
+  harness.nodes.get("youtubeLanguageInput").value = "en";
+  harness.context.syncYoutubeImportMode();
+  assert.match(harness.nodes.get("ingestYoutubeBtn").textContent, /manual/i);
+  await harness.context.ingestYoutubeTranscript();
+
+  const youtubeCalls = harness.fetchCalls.filter((call) => call.path === "/v1/youtube/transcripts");
+  assert.equal(youtubeCalls[1].body.transcript, "[00:00] pasted transcript");
+  assert.equal(youtubeCalls[1].body.language, "en");
+  assert.match(harness.nodes.get("batchStatus").textContent, /manual.*en/i);
+});
+
+test("batch storage migrates legacy items once and isolates queues and sources by project", async () => {
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures") return { ok: true, source: { id: "unexpected-capture" } };
+      return { ok: true };
+    }
+  });
+  harness.storageState.batchQueue = [{
+    id: "legacy-item",
+    url: "https://example.com/legacy",
+    status: "pending"
+  }];
+  harness.storageState.batchMetrics = { total: 1, concurrency: 2 };
+  harness.storageState.batchConcurrency = 2;
+  harness.setState({ settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-a" } });
+
+  await harness.context.loadBatchQueue();
+  let snapshot = harness.stateSnapshot();
+  assert.equal(snapshot.queue.length, 1);
+  assert.equal(snapshot.queue[0].projectId, "project-a");
+  assert.equal(harness.storageState.batchQueue[0].projectId, "project-a");
+
+  harness.setState({ settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-b" } });
+  await harness.context.loadBatchQueue();
+  snapshot = harness.stateSnapshot();
+  assert.equal(snapshot.queue.length, 0, "project B inherited project A's legacy queue");
+  harness.context.addUrlsToQueue(["https://example.com/project-b"]);
+  await harness.context.saveBatchQueue();
+
+  harness.setState({ settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-a" } });
+  await harness.context.loadBatchQueue();
+  snapshot = harness.stateSnapshot();
+  assert.deepEqual(snapshot.queue.map((item) => item.url), ["https://example.com/legacy"]);
+  assert.ok(harness.storageState.batchQueue.some((item) => item.projectId === "project-b"));
+
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-b" },
+    source: {
+      title: "Project A source",
+      text: "This source belongs only to project A.",
+      url: "https://example.com/project-a-source",
+      kind: "page",
+      projectId: "project-a",
+      sourceId: "source-a"
+    }
+  });
+  await assert.rejects(
+    harness.context.ensureCurrentSourceCaptured(),
+    /project-a|当前项目|属于/i
+  );
+  assert.equal(harness.fetchCalls.filter((call) => call.path === "/v1/captures").length, 0);
+  assert.equal(
+    harness.context.resetCurrentSourceAfterProjectChange("project-a", "project-b"),
+    true
+  );
+  assert.equal(harness.run("state.source === null"), true, "project switch kept the previous source bound");
+
+  const js = await projectFile("sidepanel.js");
+  assert.match(js, /changeProject[\s\S]*resetCurrentSourceAfterProjectChange\(previousProjectId, nextProjectId\)/);
+});
+
+test("sidepanel consumes targeted selection claims live without overwriting an active source", async () => {
+  let queued = [{
+    id: "selection-a",
+    text: "Window A selected text",
+    title: "Window A title",
+    url: "https://example.com/a",
+    tabId: 41,
+    windowId: 7,
+    projectId: "project-a",
+    capturedAt: "2026-01-01T00:00:00.000Z"
+  }];
+  const claimCalls = [];
+  const harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      claimCalls.push(message);
+      if (message.type !== "qc-smart-reader-claim-selection") return undefined;
+      const index = queued.findIndex((item) => !message.selectionId || item.id === message.selectionId);
+      if (index < 0) return { ok: true, selection: null, pendingCount: queued.length };
+      const item = queued[index];
+      if (item.projectId !== message.projectId) {
+        return {
+          ok: true,
+          selection: null,
+          pendingCount: queued.length,
+          reason: "project_mismatch",
+          selectionProjectId: item.projectId
+        };
+      }
+      if (item.windowId !== message.windowId) {
+        return { ok: true, selection: null, pendingCount: queued.length, reason: "target_mismatch" };
+      }
+      queued.splice(index, 1);
+      return { ok: true, selection: item, pendingCount: queued.length };
+    }
+  });
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-a", pairingToken: "pair-token" }
+  });
+
+  assert.equal(await harness.context.hydratePendingSelection(), true);
+  assert.equal(harness.run("state.source.title"), "Window A title");
+  assert.equal(harness.run("state.source.projectId"), "project-a");
+  assert.equal(queued.length, 0);
+  assert.equal(claimCalls[0].tabId, 41);
+  assert.equal(claimCalls[0].windowId, 7);
+
+  queued = [{
+    id: "selection-b",
+    text: "Second selected text",
+    title: "Second title",
+    url: "https://example.com/b",
+    tabId: 41,
+    windowId: 7,
+    projectId: "project-a",
+    capturedAt: "2026-01-01T00:00:01.000Z"
+  }];
+  const callsBeforeNotification = claimCalls.length;
+  harness.context.bindPendingSelectionMessages();
+  assert.equal(harness.runtimeListeners.length, 1);
+  harness.runtimeListeners[0]({
+    type: "qc-smart-reader-selection-queued",
+    selectionId: "selection-b",
+    tabId: 41,
+    windowId: 7
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.run("state.source.title"), "Window A title", "live delivery silently overwrote the active source");
+  assert.equal(queued.length, 1, "an automatically deferred selection was removed from the queue");
+  assert.equal(claimCalls.length, callsBeforeNotification, "automatic delivery claimed before checking the active source");
+  assert.match(harness.nodes.get("status").textContent, /待载入|使用选中文本/);
+
+  assert.equal(await harness.context.hydratePendingSelection(), true, "manual hydration did not consume the next queued selection");
+  assert.equal(harness.run("state.source.title"), "Second title");
+  assert.equal(queued.length, 0);
+
+  harness.setState({ source: null });
+  queued = [{
+    id: "selection-other-window",
+    text: "Other window text",
+    title: "Other window title",
+    url: "https://example.com/other-window",
+    tabId: 202,
+    windowId: 22,
+    projectId: "project-a",
+    capturedAt: "2026-01-01T00:00:02.000Z"
+  }];
+  const claimsBeforeOtherWindow = claimCalls.length;
+  harness.runtimeListeners[0]({
+    type: "qc-smart-reader-selection-queued",
+    selectionId: "selection-other-window",
+    tabId: 202,
+    windowId: 22
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.run("state.source === null"), true, "a selection for another window was rendered");
+  assert.equal(queued.length, 1, "a selection for another window was consumed");
+  assert.equal(claimCalls.length, claimsBeforeOtherWindow, "another window's selection reached the claim endpoint");
+
+  queued = [{
+    id: "selection-live",
+    text: "Live selected text",
+    title: "Live title",
+    url: "https://example.com/live",
+    tabId: 41,
+    windowId: 7,
+    projectId: "project-a",
+    capturedAt: "2026-01-01T00:00:03.000Z"
+  }];
+  harness.runtimeListeners[0]({
+    type: "qc-smart-reader-selection-queued",
+    selectionId: "selection-live",
+    tabId: 41,
+    windowId: 7
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.run("state.source.title"), "Live title", "same-window live selection was not rendered");
+  assert.equal(harness.run("state.source.projectId"), "project-a");
+  assert.equal(queued.length, 0, "same-window live selection was not atomically removed");
+});
+
+test("sidepanel surfaces queue overflow instead of pretending the newest selection was loaded", async () => {
+  const harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      if (message.type !== "qc-smart-reader-claim-selection") return undefined;
+      return { ok: true, selection: null, pendingCount: 20, reason: "queue_full" };
+    }
+  });
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-a", pairingToken: "pair-token" },
+    source: null
+  });
+
+  assert.equal(await harness.context.hydratePendingSelection({ noticeId: "notice-1" }), false);
+  assert.match(harness.nodes.get("status").textContent, /已达上限.*20|20.*未入队|没有覆盖/);
+  assert.equal(harness.run("state.source === null"), true);
+});
+
+test("fallback knowledge base migrates legacy notes and isolates save, load, export, and clear by project", async () => {
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/notes" || call.path === "/v1/export" || call.path === "/v1/captures") {
+        return { ok: false, status: 503, error: "companion unavailable" };
+      }
+      return { ok: true };
+    }
+  });
+  harness.storageState.knowledgeBase = [
+    { id: "legacy", title: "Legacy note", answer: "legacy secret" },
+    { id: "note-a", projectId: "project-a", title: "Project A note", answer: "A secret" },
+    { id: "note-b", project_id: "project-b", title: "Project B note", answer: "B visible" }
+  ];
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-b" }
+  });
+
+  await harness.context.loadKnowledgeBase();
+  const rendered = harness.nodes.get("kbList").children.map((node) => node.innerHTML).join("\n");
+  assert.match(rendered, /Project B note/);
+  assert.doesNotMatch(rendered, /Project A note|Legacy note/);
+  assert.equal(
+    harness.storageState.knowledgeBase.find((note) => note.id === "legacy").projectId,
+    "default",
+    "legacy fallback notes must migrate deterministically to the original default project"
+  );
+  assert.equal(harness.storageState.knowledgeBase.find((note) => note.id === "note-b").projectId, "project-b");
+
+  harness.run(`
+    globalThis.__fallbackDownload = null;
+    downloadTextFile = async (content, filename, mime) => {
+      globalThis.__fallbackDownload = { content, filename, mime };
+    };
+  `);
+  await harness.context.exportKnowledgeBase("json");
+  const exported = JSON.parse(harness.run("globalThis.__fallbackDownload.content"));
+  assert.deepEqual(exported.map((note) => note.id), ["note-b"]);
+
+  await harness.context.clearKnowledgeBase();
+  assert.deepEqual(
+    harness.storageState.knowledgeBase.map((note) => note.id).sort(),
+    ["legacy", "note-a"],
+    "clearing project B removed fallback notes belonging to another project"
+  );
+
+  harness.setState({
+    source: {
+      title: "Project B source",
+      text: "Offline source text",
+      url: "https://example.com/project-b",
+      kind: "page",
+      projectId: "project-b"
+    },
+    lastAnswer: "Offline answer"
+  });
+  harness.context.document.getElementById("questionInput").value = "Offline question";
+  harness.run("state.lastAnswerSourceFingerprint = sourceFingerprint(state.source)");
+  await harness.context.saveCurrentNote();
+  const saved = harness.storageState.knowledgeBase.find((note) => note.title === "Project B source");
+  assert.equal(saved.projectId, "project-b");
+});
+
+test("offline notes reject 4xx fallback, remain visible with Vault notes, and sync idempotently after ACK", async () => {
+  const html = await projectFile("sidepanel.html");
+  for (const id of ["pendingNotesStatus", "syncPendingNotesBtn"]) {
+    assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
+  }
+
+  let mode = "auth";
+  let notePosts = 0;
+  const vaultNotes = [{
+    id: "vault-note",
+    project_id: "project-b",
+    title: "Vault note",
+    answer: "Already durable",
+    tags: []
+  }];
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures") {
+        if (mode === "auth") return { ok: false, status: 401, error: "invalid pairing token" };
+        if (mode === "offline") return { ok: false, status: 503, error: "companion unavailable" };
+        return { ok: true, source: { id: "source-synced", project_id: "project-b" } };
+      }
+      if (call.path === "/v1/notes" && call.method === "GET") {
+        return { ok: true, notes: vaultNotes };
+      }
+      if (call.path === "/v1/notes" && call.method === "POST") {
+        notePosts += 1;
+        const created = {
+          id: "vault-from-pending",
+          project_id: call.body.project_id,
+          source_id: call.body.source_id,
+          title: call.body.title,
+          answer: call.body.answer,
+          tags: call.body.tags
+        };
+        vaultNotes.unshift(created);
+        return { ok: false, status: 503, error: "response lost after commit" };
+      }
+      return { ok: true };
+    }
+  });
+  assert.equal(harness.run(`(() => { const error = new Error("HTTP 409"); error.status = 409; return isOfflineFallbackError(error); })()`), false);
+  assert.equal(harness.run(`(() => { const error = new Error("版本不兼容"); error.status = 503; return isOfflineFallbackError(error); })()`), false);
+  assert.equal(harness.run(`(() => { const error = new Error("service unavailable"); error.status = 503; return isOfflineFallbackError(error); })()`), true);
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-b", pairingToken: "pair-token" },
+    source: {
+      title: "Auth rejected source",
+      text: "This note must not silently fall back when authentication is invalid.",
+      url: "https://example.com/auth",
+      kind: "page",
+      projectId: "project-b"
+    },
+    lastAnswer: "Auth answer"
+  });
+  harness.nodes.get("questionInput") ?? harness.context.document.getElementById("questionInput");
+  harness.nodes.get("questionInput").value = "Auth question";
+  harness.run("state.lastAnswerSourceFingerprint = sourceFingerprint(state.source)");
+
+  await harness.context.saveCurrentNote();
+
+  assert.equal((harness.storageState.knowledgeBase || []).length, 0, "401 created an offline fallback note");
+  assert.match(harness.nodes.get("status").textContent, /保存失败.*未.*待同步/);
+
+  mode = "offline";
+  harness.setState({
+    source: {
+      title: "Offline source",
+      text: "This note is durable in Chrome until the companion service acknowledges it.",
+      url: "https://example.com/offline",
+      kind: "page",
+      projectId: "project-b"
+    },
+    lastAnswer: "Offline answer"
+  });
+  harness.nodes.get("questionInput").value = "Offline question";
+  harness.run("state.lastAnswerSourceFingerprint = sourceFingerprint(state.source)");
+  await harness.context.saveCurrentNote();
+
+  const pending = harness.storageState.knowledgeBase.find((note) => note.title === "Offline source");
+  assert.equal(pending.projectId, "project-b");
+  assert.equal(pending.pendingSync, true);
+  harness.storageState.knowledgeBase.push({
+    id: "other-project-pending",
+    projectId: "project-a",
+    title: "Other project pending",
+    answer: "Must remain isolated",
+    pendingSync: true
+  });
+
+  mode = "recovered";
+  await harness.context.loadKnowledgeBase();
+  const rendered = harness.nodes.get("kbList").children.map((node) => node.innerHTML).join("\n");
+  assert.match(rendered, /Vault note/);
+  assert.match(rendered, /Offline source/);
+  assert.doesNotMatch(rendered, /Other project pending/);
+  assert.match(harness.nodes.get("pendingNotesStatus").textContent, /待同步 1 条/);
+  assert.equal(harness.nodes.get("syncPendingNotesBtn").disabled, false);
+
+  await harness.context.syncPendingNotes();
+  assert.equal(notePosts, 1);
+  assert.ok(harness.storageState.knowledgeBase.some((note) => note.id === pending.id), "pending cleared without ACK");
+
+  await harness.context.syncPendingNotes();
+  assert.equal(notePosts, 1, "ambiguous retry posted a duplicate note instead of recognizing its sync tag");
+  assert.ok(!harness.storageState.knowledgeBase.some((note) => note.id === pending.id));
+  assert.ok(harness.storageState.knowledgeBase.some((note) => note.id === "other-project-pending"));
+  assert.match(harness.nodes.get("pendingNotesStatus").textContent, /待同步 0 条/);
+});
+
+test("restore selects only the current project's service-owned batch", async () => {
+  const jobs = [
+    {
+      id: "job-a",
+      type: "read",
+      status: "accepted",
+      input: { project_id: "project-a" }
+    },
+    {
+      id: "job-b",
+      type: "read",
+      status: "accepted",
+      input: { project_id: "project-b" }
+    }
+  ];
+  const details = Object.fromEntries(jobs.map((summary) => [summary.id, {
+    ...summary,
+    items: [{
+      id: `item-${summary.id}`,
+      url: `https://example.com/${summary.id}`,
+      status: "pending",
+      input: { project_id: summary.input.project_id }
+    }]
+  }]));
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/jobs") return { ok: true, jobs };
+      const jobId = call.path.split("/")[3];
+      if (call.path.endsWith("/recover")) return { ok: true, job: details[jobId] };
+      if (details[jobId]) return { ok: true, job: details[jobId] };
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-b" },
+    batchQueue: []
+  });
+
+  await harness.context.restoreBatchFromCompanion();
+
+  const snapshot = harness.stateSnapshot();
+  assert.deepEqual(snapshot.queue.map((item) => item.url), ["https://example.com/job-b"]);
+  assert.ok(snapshot.queue.every((item) => item.projectId === "project-b"));
+  assert.ok(!harness.fetchCalls.some((call) => call.path.startsWith("/v1/jobs/job-a")));
+});
+
 test("sidepanel renders batch progress, ETA, and item timing metadata", async () => {
   const js = await projectFile("sidepanel.js");
   const css = await projectFile("sidepanel.css");
 
   assert.match(js, /batchMetrics: \{/);
-  assert.match(js, /chrome\.storage\.local\.get\(\["batchQueue", "batchMetrics", "batchConcurrency"\]\)/);
+  assert.match(js, /chrome\.storage\.local\.get\(\[[\s\S]*"batchQueue"[\s\S]*"batchMetricsByProject"[\s\S]*"batchConcurrencyByProject"[\s\S]*\]\)/);
   assert.match(js, /batchConcurrency: state\.batchConcurrency/);
   for (const fn of [
     "normalizeBatchMetrics",
@@ -332,7 +1358,7 @@ test("sidepanel review queue filters statuses so historical reviewed sources can
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" }
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" }
   });
 
   await harness.context.loadReviewQueue();
@@ -468,7 +1494,7 @@ test("sidepanel claim evidence workbench renders context and submits review acti
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" }
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" }
   });
   harness.nodes.get("claimReviewStatusFilter") ?? harness.context.document.getElementById("claimReviewStatusFilter");
   harness.nodes.get("claimReviewQuoteFilter") ?? harness.context.document.getElementById("claimReviewQuoteFilter");
@@ -580,7 +1606,7 @@ test("sidepanel keeps source status mutation successful when post-write refresh 
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     source: {
       sourceId: "source-1",
       sourceStatus: "new",
@@ -680,7 +1706,7 @@ test("sidepanel loads source diff and keeps reextract mutation successful when r
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     currentSourceDetailId: "source-1",
     currentSourceDetail: { id: "source-1", title: "Source 1", text: "Source text", chunks: [] },
     source: {
@@ -703,7 +1729,7 @@ test("sidepanel loads source diff and keeps reextract mutation successful when r
 
   const reextractCall = harness.fetchCalls.find((call) => call.path === "/v1/sources/source-1/reextract");
   assert.ok(reextractCall, "source reextract mutation was not called");
-  assert.equal(reextractCall.body.mode, "auto");
+  assert.equal(reextractCall.body.mode, "mock");
   assert.equal(reextractCall.body.project_id, "project-1");
   assert.ok(harness.fetchCalls.some((call) => call.path === "/v1/knowledge/records"), "post-reextract knowledge refresh was not attempted");
   assert.ok(harness.fetchCalls.some((call) => call.path === "/v1/sources/source-1"), "source detail refresh was not attempted");
@@ -742,7 +1768,7 @@ test("sidepanel keeps extraction mutation successful when post-write refresh fai
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     source: {
       sourceId: "source-1",
       title: "Current Source",
@@ -785,7 +1811,7 @@ test("sidepanel recaptures current source when title url or text no longer match
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     source: {
       sourceId: "source-old",
       title: "Old Source",
@@ -876,7 +1902,7 @@ test("sidepanel executes service-owned batch claim, heartbeat, and success flow 
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     batchQueue: [{
       id: "queue-1",
       url: "https://example.com/a",
@@ -913,7 +1939,7 @@ test("sidepanel executes service-owned batch claim, heartbeat, and success flow 
 
   for (const call of calls.filter((item) => item.path.includes("/v1/jobs/") && item.body)) {
     if (call.path.endsWith("/claim-next") || call.path.endsWith("/heartbeat") || call.path.endsWith("/status")) {
-      assert.equal(call.body.executor_id, "extension-uuid-1");
+      assert.equal(call.body.executor_id, "extension-uuid-1-worker-1");
     }
   }
 
@@ -996,7 +2022,7 @@ test("sidepanel records and enqueues batch pagination checkpoints in a VM smoke"
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     batchQueue: [{
       id: "queue-1",
       url: "https://example.com/a",
@@ -1056,6 +2082,7 @@ test("sidepanel restores a 100 URL service job after extension restart and resum
     id: "job-restart",
     type: "read",
     status: "running",
+    input: { project_id: "project-1" },
     items: Array.from({ length: 100 }, (_, index) => {
       const status = index < 30 ? "success" : index < 35 ? "running" : "pending";
       return {
@@ -1085,7 +2112,7 @@ test("sidepanel restores a 100 URL service job after extension restart and resum
   const harness = await createSidepanelHarness({
     fetchHandler: async (call) => {
       if (call.path === "/v1/jobs" && call.method === "GET") {
-        return { ok: true, jobs: [{ id: job.id, type: "read", status: job.status }] };
+        return { ok: true, jobs: [{ id: job.id, type: "read", status: job.status, input: job.input }] };
       }
       if (call.path === `/v1/jobs/${job.id}` && call.method === "GET") {
         return { ok: true, job };
@@ -1154,7 +2181,7 @@ test("sidepanel restores a 100 URL service job after extension restart and resum
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     batchQueue: []
   });
 
@@ -1182,7 +2209,7 @@ test("sidepanel executes pause and cancel job actions in a VM smoke", async () =
     fetchHandler: async () => ({ ok: true })
   });
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     batchRunning: true,
     batchQueue: [{
       id: "queue-1",
@@ -1238,10 +2265,12 @@ test("sidepanel executes pause and cancel job actions in a VM smoke", async () =
 });
 
 test("sidepanel honors batch concurrency limit in the service-owned VM smoke", async () => {
-  let claimCount = 0;
   let captureCount = 0;
   let activeCaptures = 0;
   let maxActiveCaptures = 0;
+  const claimAssignments = [];
+  const heartbeatOwners = [];
+  const statusOwners = [];
   const job = {
     id: "job-concurrent",
     type: "read",
@@ -1265,16 +2294,21 @@ test("sidepanel honors batch concurrency limit in the service-owned VM smoke", a
         return { ok: true, job };
       }
       if (call.path.endsWith("/claim-next")) {
-        const item = job.items[claimCount] || null;
-        claimCount += 1;
+        const owner = call.body.executor_id;
+        let item = job.items.find((candidate) => candidate.status === "running" && candidate.lease_owner === owner) || null;
+        if (!item) item = job.items.find((candidate) => candidate.status === "pending") || null;
         if (item) {
           item.status = "running";
+          item.lease_owner = owner;
+          claimAssignments.push({ itemId: item.id, owner });
           return { ok: true, job, item };
         }
         return { ok: true, job, item: null, reason: "drained" };
       }
       if (call.path.endsWith("/heartbeat")) {
-        return { ok: true, job, item: job.items.find((item) => call.path.includes(item.id)) || job.items[0] };
+        const item = job.items.find((candidate) => call.path.includes(candidate.id)) || job.items[0];
+        heartbeatOwners.push({ itemId: item.id, owner: call.body.executor_id, leaseOwner: item.lease_owner });
+        return { ok: true, job, item };
       }
       if (call.path === "/v1/captures") {
         activeCaptures += 1;
@@ -1287,6 +2321,7 @@ test("sidepanel honors batch concurrency limit in the service-owned VM smoke", a
       if (call.path.endsWith("/status")) {
         const item = job.items.find((candidate) => call.path.includes(candidate.id));
         if (item) {
+          statusOwners.push({ itemId: item.id, owner: call.body.executor_id, leaseOwner: item.lease_owner });
           item.status = call.body.status;
           item.source_id = call.body.source_id || "";
           item.result = call.body.result || {};
@@ -1298,7 +2333,7 @@ test("sidepanel honors batch concurrency limit in the service-owned VM smoke", a
   });
 
   harness.setState({
-    settings: { serviceUrl: "http://service.local", projectId: "project-1", pairingToken: "pair-token" },
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-1", pairingToken: "pair-token" },
     batchConcurrency: 2,
     batchQueue: ["a", "b"].map((suffix) => ({
       id: `queue-${suffix}`,
@@ -1328,4 +2363,10 @@ test("sidepanel honors batch concurrency limit in the service-owned VM smoke", a
   assert.equal(maxActiveCaptures, 2);
   assert.equal(snapshot.queue.filter((item) => item.status === "success").length, 2);
   assert.equal(harness.fetchCalls.filter((call) => call.path === "/v1/captures").length, 2);
+  const firstOwnerByItem = new Map(claimAssignments.map((entry) => [entry.itemId, entry.owner]));
+  assert.equal(new Set(firstOwnerByItem.values()).size, 2, "concurrent workers reused one executor id");
+  assert.equal(firstOwnerByItem.size, 2, "one service item was claimed by multiple workers");
+  assert.ok(heartbeatOwners.length >= 2);
+  assert.ok(heartbeatOwners.every((entry) => entry.owner === firstOwnerByItem.get(entry.itemId)));
+  assert.ok(statusOwners.every((entry) => entry.owner === firstOwnerByItem.get(entry.itemId)));
 });

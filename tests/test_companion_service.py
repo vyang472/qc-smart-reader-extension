@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import io
 import json
+import os
 import sqlite3
+import stat
+import sys
 import tempfile
 import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -138,8 +145,19 @@ class CompanionServiceCase(unittest.TestCase):
 
     def test_pairing_token_required_and_cors_allowlist(self) -> None:
         health = self.request("/health", token=False)
+        self.assertEqual(health["version"], "0.9.0")
+        self.assertEqual(health["service_version"], "0.9.0")
+        self.assertEqual(health["api_version"], 1)
+        self.assertEqual(health["schema_version"], 1)
+        self.assertEqual(health["min_extension_version"], "0.9.0")
         self.assertTrue(health["pairing_required"])
         self.assertTrue(Path(health["pairing_token_path"]).exists())
+        self.assertEqual(self.db_rows("PRAGMA user_version")[0][0], 1)
+        self.assertEqual(
+            list((self.data_dir / "state").glob("*.pre-schema-v*.bak")),
+            [],
+            "a fresh database must not create a migration backup",
+        )
 
         with self.assertRaisesRegex(AssertionError, "HTTP 401"):
             self.request("/v1/projects", token=False)
@@ -159,6 +177,8 @@ class CompanionServiceCase(unittest.TestCase):
             self.assertEqual(response.status, 204)
             self.assertEqual(response.headers.get("access-control-allow-origin"), "chrome-extension://abcdefghijklmnop")
             self.assertIn("x-qc-pairing-token", response.headers.get("access-control-allow-headers", ""))
+            self.assertEqual(response.headers.get("cache-control"), "no-store")
+            self.assertEqual(response.headers.get("x-content-type-options"), "nosniff")
 
         denied = urllib.request.Request(
             self.base_url + "/v1/projects",
@@ -172,6 +192,199 @@ class CompanionServiceCase(unittest.TestCase):
             urllib.request.urlopen(denied, timeout=30)
         self.assertEqual(ctx.exception.code, 403)
         ctx.exception.close()
+
+    def test_sensitive_state_repairs_permissions_and_refuses_symlink_or_corrupt_credentials(self) -> None:
+        state_dir = self.data_dir / "state"
+        database_path = state_dir / "qc_smart_reader.sqlite3"
+        token_path = state_dir / "pairing_token.txt"
+        self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(database_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(token_path.stat().st_mode), 0o600)
+
+        model_path = state_dir / "model_settings.json"
+        self.store.write_model_settings(self.store.default_model_settings())
+        self.assertEqual(stat.S_IMODE(model_path.stat().st_mode), 0o600)
+        model_path.chmod(0o644)
+        self.store.read_model_settings(include_secret=True)
+        self.assertEqual(stat.S_IMODE(model_path.stat().st_mode), 0o600)
+
+        model_path.write_text("{broken", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "corrupted"):
+            self.store.read_model_settings()
+
+        model_path.unlink()
+        outside = self.data_dir.parent / "outside-model-settings.json"
+        outside.write_text("{}", encoding="utf-8")
+        model_path.symlink_to(outside)
+        with self.assertRaisesRegex(RuntimeError, "non-symlink"):
+            self.store.read_model_settings()
+
+        token_path.unlink()
+        token_path.symlink_to(outside)
+        with self.assertRaisesRegex(RuntimeError, "non-symlink"):
+            self.store.pairing_token()
+
+    def test_cli_refuses_network_bind_without_explicit_opt_in(self) -> None:
+        with mock.patch.object(server.sys, "argv", ["server.py", "--host", "0.0.0.0"]):
+            with self.assertRaises(SystemExit) as context:
+                server.parse_args()
+        self.assertEqual(context.exception.code, 2)
+
+        with mock.patch.object(
+            server.sys,
+            "argv",
+            ["server.py", "--host", "0.0.0.0", "--allow-non-loopback"],
+        ):
+            args = server.parse_args()
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertTrue(args.allow_non_loopback)
+
+    def test_request_json_reader_rejects_invalid_lengths_and_encoding(self) -> None:
+        handler = object.__new__(server.RequestHandler)
+        handler.headers = {"content-length": "-1"}
+        handler.rfile = io.BytesIO(b"{}")
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            handler.read_json_body()
+
+        handler.headers = {"content-length": "not-a-number"}
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            handler.read_json_body()
+
+        handler.headers = {"content-length": "1"}
+        handler.rfile = io.BytesIO(b"\xff")
+        with self.assertRaisesRegex(ValueError, "invalid JSON"):
+            handler.read_json_body()
+
+        handler.headers = {"content-length": "2"}
+        handler.rfile = io.BytesIO(b"[]")
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            handler.read_json_body()
+
+        handler.command = "GET"
+        handler.path = "/v1/search?query=private%20research"
+        handler.client_address = ("127.0.0.1", 12345)
+        with mock.patch("builtins.print") as print_mock:
+            handler.log_message('"%s" %s %s', "GET /v1/search?query=private%20research HTTP/1.1", "200", "-")
+        rendered = str(print_mock.call_args.args[0])
+        self.assertIn("GET /v1/search 200", rendered)
+        self.assertNotIn("private", rendered)
+
+    def test_legacy_database_upgrade_is_backed_up_once_and_preserves_data(self) -> None:
+        legacy_dir = self.data_dir / "schema-version-upgrade-store"
+        state_dir = legacy_dir / "state"
+        state_dir.mkdir(parents=True)
+        legacy_db_path = state_dir / "qc_smart_reader.sqlite3"
+        db = sqlite3.connect(legacy_db_path)
+        try:
+            db.executescript(
+                """
+                PRAGMA user_version=0;
+                CREATE TABLE legacy_records (
+                  id TEXT PRIMARY KEY,
+                  payload TEXT NOT NULL
+                );
+                INSERT INTO legacy_records(id, payload)
+                VALUES ('legacy-row', '必须原样保留');
+                """
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        upgraded = server.Store(legacy_dir)
+        backup_path = upgraded.schema_backup_path(server.SCHEMA_VERSION)
+        self.assertTrue(backup_path.is_file())
+        self.assertEqual(backup_path.stat().st_uid, os.getuid())
+        self.assertEqual(backup_path.stat().st_mode & 0o777, 0o600)
+
+        db = sqlite3.connect(legacy_db_path)
+        try:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(
+                db.execute(
+                    "SELECT payload FROM legacy_records WHERE id = 'legacy-row'"
+                ).fetchone()[0],
+                "必须原样保留",
+            )
+            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        finally:
+            db.close()
+
+        backup_db = sqlite3.connect(backup_path)
+        try:
+            self.assertEqual(backup_db.execute("PRAGMA user_version").fetchone()[0], 0)
+            self.assertEqual(
+                backup_db.execute(
+                    "SELECT payload FROM legacy_records WHERE id = 'legacy-row'"
+                ).fetchone()[0],
+                "必须原样保留",
+            )
+            self.assertEqual(backup_db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        finally:
+            backup_db.close()
+
+        first_backup_identity = (
+            backup_path.stat().st_dev,
+            backup_path.stat().st_ino,
+            backup_path.stat().st_mtime_ns,
+        )
+        server.Store(legacy_dir)
+        self.assertEqual(
+            [path.resolve() for path in state_dir.glob("*.pre-schema-v*.bak")],
+            [backup_path.resolve()],
+        )
+        self.assertEqual(
+            (
+                backup_path.stat().st_dev,
+                backup_path.stat().st_ino,
+                backup_path.stat().st_mtime_ns,
+            ),
+            first_backup_identity,
+            "reopening the upgraded database must not replace its versioned backup",
+        )
+
+    def test_failed_legacy_upgrade_keeps_verified_restore_backup(self) -> None:
+        legacy_dir = self.data_dir / "failed-schema-upgrade-store"
+        state_dir = legacy_dir / "state"
+        state_dir.mkdir(parents=True)
+        legacy_db_path = state_dir / "qc_smart_reader.sqlite3"
+        db = sqlite3.connect(legacy_db_path)
+        try:
+            db.executescript(
+                """
+                PRAGMA user_version=0;
+                CREATE TABLE legacy_records (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                INSERT INTO legacy_records VALUES ('keep-me', 'original');
+                """
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        backup_path = legacy_db_path.with_name(
+            f"{legacy_db_path.name}.pre-schema-v{server.SCHEMA_VERSION}.bak"
+        )
+        with mock.patch.object(
+            server.Store,
+            "create_schema",
+            side_effect=sqlite3.OperationalError("forced migration failure"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"verified pre-upgrade backup remains.*restore.*forced migration failure",
+            ):
+                server.Store(legacy_dir)
+
+        self.assertTrue(backup_path.is_file())
+        backup_db = sqlite3.connect(backup_path)
+        try:
+            self.assertEqual(backup_db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(
+                backup_db.execute("SELECT payload FROM legacy_records WHERE id = 'keep-me'").fetchone()[0],
+                "original",
+            )
+        finally:
+            backup_db.close()
 
     def test_model_settings_store_key_server_side_and_proxy_chat(self) -> None:
         captured: dict = {}
@@ -241,6 +454,61 @@ class CompanionServiceCase(unittest.TestCase):
             model_httpd.shutdown()
             model_httpd.server_close()
             model_thread.join(timeout=5)
+
+    def test_model_transport_refuses_redirects_and_insecure_remote_endpoints(self) -> None:
+        target_requests: list[dict] = []
+
+        class TargetHandler(server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                target_requests.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _fmt: str, *_args: object) -> None:
+                return None
+
+        target_httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_port = target_httpd.server_address[1]
+        target_thread = threading.Thread(target=target_httpd.serve_forever, daemon=True)
+        target_thread.start()
+
+        class RedirectHandler(server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.send_response(307)
+                self.send_header("location", f"http://127.0.0.1:{target_port}/steal")
+                self.end_headers()
+
+            def log_message(self, _fmt: str, *_args: object) -> None:
+                return None
+
+        redirect_httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_port = redirect_httpd.server_address[1]
+        redirect_thread = threading.Thread(target=redirect_httpd.serve_forever, daemon=True)
+        redirect_thread.start()
+        try:
+            with self.assertRaisesRegex(ValueError, "redirects are refused"):
+                self.store.post_model_json(
+                    f"http://127.0.0.1:{redirect_port}/v1/chat/completions",
+                    {"model": "fixture"},
+                    {"authorization": "Bearer must-not-cross", "content-type": "application/json"},
+                )
+            self.assertEqual(target_requests, [], "model credentials reached a redirect destination")
+        finally:
+            redirect_httpd.shutdown()
+            redirect_httpd.server_close()
+            redirect_thread.join(timeout=5)
+            target_httpd.shutdown()
+            target_httpd.server_close()
+            target_thread.join(timeout=5)
+
+        with self.assertRaisesRegex(ValueError, "must use HTTPS"):
+            self.store.join_model_url("http://api.example.com/v1", "chat/completions")
+        with self.assertRaisesRegex(ValueError, "credentials"):
+            self.store.join_model_url("https://user:secret@api.example.com/v1", "chat/completions")
+        self.assertEqual(
+            self.store.join_model_url("http://localhost:11434/v1", "chat/completions"),
+            "http://localhost:11434/v1/chat/completions",
+        )
 
     def test_capture_writes_vault_chunks_and_search(self) -> None:
         text = "\n\n".join(
@@ -377,6 +645,45 @@ class CompanionServiceCase(unittest.TestCase):
         markdown_export = self.request("/v1/export?format=markdown")
         self.assertIn("## Source Attachments", markdown_export["content"])
         self.assertIn("upper-shadow.zip", markdown_export["content"])
+
+    def test_capture_returns_success_with_warning_when_post_commit_index_rebuild_fails(self) -> None:
+        payload = {
+            "source": {
+                "kind": "page",
+                "url": "https://example.com/post-commit-warning",
+                "title": "Post-commit warning fixture",
+            },
+            "content": {
+                "markdown": (
+                    "A complete source capture that must remain committed even when the "
+                    "rebuildable Vault index cannot be refreshed."
+                )
+            },
+        }
+        with mock.patch.object(
+            self.store,
+            "rebuild_index",
+            side_effect=OSError("simulated index write failure"),
+        ):
+            result = self.store.capture(payload)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["duplicate"])
+        self.assertEqual(
+            [warning["code"] for warning in result["warnings"]],
+            ["capture_index_rebuild_failed"],
+        )
+        self.assertFalse(result["warnings"][0]["retry_capture"])
+        self.assertIn("Capture committed", result["warnings"][0]["message"])
+        source_rows = self.db_rows("SELECT * FROM sources WHERE id = ?", (result["source"]["id"],))
+        document_rows = self.db_rows(
+            "SELECT * FROM documents WHERE source_id = ?",
+            (result["source"]["id"],),
+        )
+        self.assertEqual(len(source_rows), 1)
+        self.assertEqual(len(document_rows), 1)
+        self.assertTrue(Path(result["source"]["raw_path"]).is_file())
+        self.assertTrue(Path(result["source"]["markdown_path"]).is_file())
 
     def test_canonical_urls_dedupe_jobs_capture_plans_and_record_source_aliases(self) -> None:
         tracked_url = "https://www.Example.com:443/thread/1?utm_source=news&b=2&a=1#section"
@@ -745,6 +1052,429 @@ class CompanionServiceCase(unittest.TestCase):
             )
         )
 
+    def test_cross_project_mutations_are_rejected_and_doctor_reports_legacy_links(self) -> None:
+        other_project = self.request(
+            "/v1/projects",
+            {"name": "Cross-project boundary"},
+            method="POST",
+        )["project"]
+        default_text = "Default-project evidence must never be linked into another project. " * 12
+        other_text = "The isolated project owns a separate source and evidence namespace. " * 12
+        default_capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/project-boundary-default",
+                    "title": "Default boundary source",
+                },
+                "content": {"text": default_text, "markdown": default_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        other_capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": other_project["id"],
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/project-boundary-other",
+                    "title": "Other boundary source",
+                },
+                "content": {"text": other_text, "markdown": other_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        default_source_id = default_capture["source"]["id"]
+        default_chunk_id = default_capture["chunks"][0]["id"]
+        other_source_id = other_capture["source"]["id"]
+
+        default_knowledge = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": default_source_id,
+                "claims": [
+                    {
+                        "id": "default-boundary-claim",
+                        "text": "Default-project evidence must never be linked into another project.",
+                        "evidence": [
+                            {
+                                "source_id": default_source_id,
+                                "chunk_id": default_chunk_id,
+                                "quote": "Default-project evidence must never be linked into another project.",
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        default_claim_id = default_knowledge["claims"][0]["id"]
+
+        for path, payload in (
+            (
+                "/v1/notes",
+                {
+                    "project_id": other_project["id"],
+                    "source_id": default_source_id,
+                    "title": "Blocked cross-project note",
+                },
+            ),
+            (
+                "/v1/deliverables",
+                {
+                    "project_id": other_project["id"],
+                    "source_ids": [default_source_id],
+                    "kind": "report",
+                    "title": "Blocked cross-project deliverable",
+                },
+            ),
+            (
+                "/v1/knowledge/records",
+                {
+                    "project_id": other_project["id"],
+                    "source_id": default_source_id,
+                    "claims": [{"text": "This write must be rejected."}],
+                },
+            ),
+            (
+                "/v1/knowledge/records",
+                {
+                    "project_id": other_project["id"],
+                    "source_id": other_source_id,
+                    "claims": [
+                        {
+                            "text": "Cross-project citation must be rejected.",
+                            "evidence": [
+                                {
+                                    "source_id": default_source_id,
+                                    "chunk_id": default_chunk_id,
+                                    "quote": "Default-project evidence must never be linked into another project.",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ),
+            (
+                "/v1/knowledge/records",
+                {
+                    "project_id": other_project["id"],
+                    "source_id": other_source_id,
+                    "assumptions": [
+                        {"text": "Cross-project claim reference", "claim_id": default_claim_id}
+                    ],
+                },
+            ),
+        ):
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"(?s)HTTP 400:.*does not belong to project_id",
+            ):
+                self.request(path, payload, method="POST")
+
+        legacy_note_id = "note_legacy_cross_project"
+        legacy_note_path = self.data_dir / "vault" / "wiki" / "analyses" / f"{legacy_note_id}.md"
+        legacy_note_path.write_text(
+            f"---\nid: {legacy_note_id}\nproject_id: {other_project['id']}\n---\n\n# Legacy\n",
+            encoding="utf-8",
+        )
+        with self.store.connect() as db:
+            db.execute(
+                """
+                INSERT INTO notes(
+                  id, project_id, source_id, title, summary, tags_json, question,
+                  answer, excerpt, markdown_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, '', '[]', '', '', '', ?, ?, ?)
+                """,
+                (
+                    legacy_note_id,
+                    other_project["id"],
+                    default_source_id,
+                    "Legacy cross-project note",
+                    str(legacy_note_path),
+                    "2026-08-14T00:00:00+00:00",
+                    "2026-08-14T00:00:00+00:00",
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO assumptions(
+                  id, project_id, source_id, claim_id, text, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending_validation', ?, ?)
+                """,
+                (
+                    "asm_legacy_cross_project",
+                    other_project["id"],
+                    other_source_id,
+                    default_claim_id,
+                    "Legacy cross-project claim reference",
+                    "2026-08-14T00:00:00+00:00",
+                    "2026-08-14T00:00:00+00:00",
+                ),
+            )
+            db.commit()
+
+        doctor = self.request("/v1/vault/doctor?project_id=all")["doctor"]
+        self.assertFalse(doctor["ok"])
+        cross_project_issue = next(
+            issue
+            for issue in doctor["issues"]
+            if issue["code"] == "cross_project_reference"
+            and issue["table"] == "notes"
+            and issue["record_id"] == legacy_note_id
+            and issue["field"] == "source_id"
+        )
+        self.assertIn(default_source_id, cross_project_issue["message"])
+        self.assertIn(other_project["id"], cross_project_issue["message"])
+        self.assertTrue(
+            any(
+                issue["code"] == "cross_project_reference"
+                and issue["table"] == "assumptions"
+                and issue["record_id"] == "asm_legacy_cross_project"
+                and issue["field"] == "claim_id"
+                for issue in doctor["issues"]
+            )
+        )
+        scoped_doctor = self.request(
+            f"/v1/vault/doctor?project_id={other_project['id']}"
+        )["doctor"]
+        self.assertTrue(
+            any(
+                issue["code"] == "cross_project_reference"
+                and issue["record_id"] == legacy_note_id
+                for issue in scoped_doctor["issues"]
+            )
+        )
+        self.assertFalse(
+            any(
+                issue["code"] == "missing_reference"
+                and issue["record_id"] == legacy_note_id
+                and issue["field"] == "source_id"
+                for issue in scoped_doctor["issues"]
+            )
+        )
+
+    def test_youtube_auto_transcript_prefers_manual_json3_and_parses_segments(self) -> None:
+        video_id = "abc123xyz01"
+        manual_track = "https://subs.example/manual.json3"
+        automatic_track = "https://subs.example/automatic.json3"
+        metadata = {
+            "id": video_id,
+            "title": "Automatic Transcript Fixture",
+            "channel": "Fixture Channel",
+            "upload_date": "20260801",
+            "duration": 12.5,
+            "subtitles": {
+                "zh-Hans": [
+                    {"ext": "vtt", "url": "https://subs.example/manual.vtt"},
+                    {"ext": "json3", "url": manual_track},
+                ]
+            },
+            "automatic_captions": {
+                "zh-Hans": [{"ext": "json3", "url": automatic_track}]
+            },
+        }
+        subtitle = {
+            "events": [
+                {
+                    "tStartMs": 0,
+                    "dDurationMs": 1000,
+                    "segs": [{"utf8": "你好"}, {"utf8": " 世界"}],
+                },
+                {
+                    "tStartMs": 1000,
+                    "dDurationMs": 1000,
+                    "segs": [{"utf8": "你好 世界"}],
+                },
+                {
+                    "tStartMs": 2000,
+                    "dDurationMs": 1500,
+                    "segs": [{"utf8": "第二句字幕"}],
+                },
+            ]
+        }
+
+        run_result = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(metadata),
+            stderr="",
+        )
+        with mock.patch.object(server.shutil, "which", return_value="/opt/homebrew/bin/yt-dlp"), mock.patch.object(
+            server.subprocess,
+            "run",
+            return_value=run_result,
+        ) as run_mock, mock.patch.object(
+            self.store,
+            "download_public_resource",
+            return_value=json.dumps(subtitle, ensure_ascii=False).encode("utf-8"),
+        ) as download_mock:
+            result = self.store.ingest_youtube_transcript(
+                {
+                    "url": f"https://youtu.be/{video_id}?si=tracking",
+                    "language": "zh-Hans",
+                }
+            )
+
+        canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+        run_mock.assert_called_once_with(
+            [
+                "/opt/homebrew/bin/yt-dlp",
+                "--dump-single-json",
+                "--skip-download",
+                "--no-playlist",
+                "--no-warnings",
+                "--ignore-config",
+                "--no-cookies",
+                "--no-cookies-from-browser",
+                canonical_url,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=server.YOUTUBE_METADATA_TIMEOUT_SECONDS,
+        )
+        download_mock.assert_called_once_with(
+            manual_track,
+            max_bytes=server.MAX_YOUTUBE_SUBTITLE_BYTES,
+            timeout_seconds=server.YOUTUBE_SUBTITLE_TIMEOUT_SECONDS,
+            accept="application/json,text/json;q=0.9,*/*;q=0.1",
+            label="subtitle track",
+        )
+        self.assertEqual(result["youtube"]["source"], "manual")
+        self.assertEqual(result["youtube"]["caption_source"], "manual")
+        self.assertEqual(result["youtube"]["language"], "zh-Hans")
+        self.assertEqual(result["youtube"]["url"], canonical_url)
+        self.assertEqual(result["youtube"]["segments"], 2)
+        self.assertEqual(result["source"]["title"], "Automatic Transcript Fixture")
+        self.assertEqual(result["source"]["author"], "Fixture Channel")
+        self.assertEqual(result["source"]["published_at"], "2026-08-01")
+
+    def test_youtube_auto_transcript_uses_language_fallback_and_metadata(self) -> None:
+        video_id = "ZYX987abc12"
+        chosen_track = "https://subs.example/zh-hant.json3"
+        metadata = {
+            "title": "Fallback Fixture",
+            "uploader": "Fallback Uploader",
+            "duration": 7,
+            "subtitles": {},
+            "automatic_captions": {
+                "en": [{"ext": "json3", "url": "https://subs.example/en.json3"}],
+                "zh-Hant": [{"ext": "json3", "url": chosen_track}],
+            },
+        }
+        subtitle = {
+            "events": [
+                {"tStartMs": 250, "dDurationMs": 750, "segs": [{"utf8": "自動字幕"}]}
+            ]
+        }
+
+        with mock.patch.object(server.shutil, "which", return_value="/usr/local/bin/yt-dlp"), mock.patch.object(
+            server.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=0, stdout=json.dumps(metadata), stderr=""),
+        ), mock.patch.object(
+            self.store,
+            "download_public_resource",
+            return_value=json.dumps(subtitle, ensure_ascii=False).encode("utf-8"),
+        ) as download_mock:
+            result = self.store.ingest_youtube_transcript(
+                {
+                    "url": f"https://www.youtube.com/shorts/{video_id}",
+                    "language": "fr",
+                }
+            )
+
+        self.assertEqual(download_mock.call_args.args[0], chosen_track)
+        self.assertEqual(result["youtube"]["source"], "automatic")
+        self.assertEqual(result["youtube"]["caption_source"], "automatic")
+        self.assertEqual(result["youtube"]["language"], "zh-Hant")
+        self.assertEqual(result["youtube"]["duration"], 7)
+        self.assertEqual(result["source"]["author"], "Fallback Uploader")
+
+    def test_youtube_language_preference_accepts_comma_separated_values(self) -> None:
+        self.assertEqual(
+            self.store.youtube_language_order("zh-Hans,en,zh-Hans"),
+            ["zh-Hans", "en", "zh-Hant", "zh"],
+        )
+
+    def test_youtube_auto_transcript_reports_actionable_failures(self) -> None:
+        video_id = "abc123xyz01"
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        with mock.patch.object(server.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(ValueError, "yt-dlp.*paste.*transcript"):
+                self.store.ingest_youtube_transcript({"url": url})
+
+        no_subtitles = mock.Mock(
+            returncode=0,
+            stdout=json.dumps({"subtitles": {}, "automatic_captions": {}}),
+            stderr="",
+        )
+        with mock.patch.object(server.shutil, "which", return_value="/usr/bin/yt-dlp"), mock.patch.object(
+            server.subprocess,
+            "run",
+            return_value=no_subtitles,
+        ), mock.patch.object(self.store, "download_public_resource") as download_mock:
+            with self.assertRaisesRegex(ValueError, "No public subtitles.*paste.*transcript"):
+                self.store.ingest_youtube_transcript({"url": url})
+            download_mock.assert_not_called()
+
+        available = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "subtitles": {"en": [{"ext": "json3", "url": "https://subs.example/en.json3"}]},
+                    "automatic_captions": {},
+                }
+            ),
+            stderr="",
+        )
+        with mock.patch.object(server.shutil, "which", return_value="/usr/bin/yt-dlp"), mock.patch.object(
+            server.subprocess,
+            "run",
+            return_value=available,
+        ), mock.patch.object(
+            self.store,
+            "download_public_resource",
+            side_effect=ValueError("subtitle track network request failed"),
+        ):
+            with self.assertRaisesRegex(ValueError, "download.*subtitle.*paste.*transcript"):
+                self.store.ingest_youtube_transcript({"url": url})
+
+    def test_youtube_auto_transcript_rejects_noncanonical_video_urls(self) -> None:
+        video_id = "abc123xyz01"
+        with mock.patch.object(server.shutil, "which") as which_mock:
+            with self.assertRaisesRegex(ValueError, "valid YouTube URL"):
+                self.store.ingest_youtube_transcript(
+                    {"url": f"https://notyoutube.com/watch?v={video_id}"}
+                )
+            with self.assertRaisesRegex(ValueError, "valid YouTube URL"):
+                self.store.ingest_youtube_transcript(
+                    {"url": "https://www.youtube.com/watch?v=too-short"}
+                )
+            which_mock.assert_not_called()
+
+    def test_youtube_subtitle_download_rejects_private_metadata_target(self) -> None:
+        video_id = "abc123xyz01"
+        metadata = {
+            "subtitles": {
+                "en": [{"ext": "json3", "url": "http://127.0.0.1/private-captions"}]
+            },
+            "automatic_captions": {},
+        }
+        with mock.patch.object(server.shutil, "which", return_value="/usr/bin/yt-dlp"), mock.patch.object(
+            server.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=0, stdout=json.dumps(metadata), stderr=""),
+        ), mock.patch.object(server.socket, "create_connection") as connect_mock:
+            with self.assertRaisesRegex(ValueError, "non-public network address"):
+                self.store.ingest_youtube_transcript(
+                    {"url": f"https://www.youtube.com/watch?v={video_id}"}
+                )
+        connect_mock.assert_not_called()
+
     def test_capture_quality_flags_youtube_learning_and_claim_review(self) -> None:
         youtube = self.request(
             "/v1/youtube/transcripts",
@@ -765,6 +1495,8 @@ class CompanionServiceCase(unittest.TestCase):
         self.assertEqual(source["kind"], "video")
         self.assertEqual(source["site"], "youtube")
         self.assertEqual(youtube["youtube"]["video_id"], "abc123xyz")
+        self.assertEqual(youtube["youtube"]["caption_source"], "manual")
+        self.assertEqual(youtube["youtube"]["language"], "zh-CN")
         self.assertGreaterEqual(source["extraction_quality"], 70)
         self.assertTrue(source["quality_flags"]["timestamped"])
 
@@ -909,6 +1641,214 @@ class CompanionServiceCase(unittest.TestCase):
         self.assertEqual(batch["success_count"], 1)
         self.assertEqual(batch["error_count"], 1)
         self.assertEqual(batch["claims"][0]["rejection_reason"], "evidence rejected")
+
+    def test_legacy_index_columns_migrate_before_indexes_are_created(self) -> None:
+        legacy_dir = self.data_dir / "legacy-index-columns-store"
+        state_dir = legacy_dir / "state"
+        state_dir.mkdir(parents=True)
+        legacy_db_path = state_dir / "qc_smart_reader.sqlite3"
+        db = sqlite3.connect(legacy_db_path)
+        try:
+            db.executescript(
+                """
+                CREATE TABLE jobs (
+                  id TEXT PRIMARY KEY,
+                  type TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  progress REAL NOT NULL DEFAULT 0,
+                  input_json TEXT NOT NULL,
+                  error TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE job_items (
+                  id TEXT PRIMARY KEY,
+                  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                  item_index INTEGER NOT NULL,
+                  kind TEXT NOT NULL DEFAULT 'url',
+                  url TEXT,
+                  title TEXT,
+                  status TEXT NOT NULL,
+                  error TEXT,
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  source_id TEXT,
+                  input_json TEXT NOT NULL DEFAULT '{}',
+                  result_json TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  started_at TEXT,
+                  completed_at TEXT
+                );
+
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  vault_path TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE capture_plans (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  url TEXT NOT NULL,
+                  title TEXT,
+                  source_type TEXT NOT NULL DEFAULT 'url',
+                  reason TEXT NOT NULL DEFAULT '',
+                  priority INTEGER NOT NULL DEFAULT 3,
+                  status TEXT NOT NULL DEFAULT 'candidate',
+                  screen_reason TEXT,
+                  reviewer TEXT,
+                  job_id TEXT,
+                  source_id TEXT,
+                  metadata_json TEXT NOT NULL DEFAULT '{}',
+                  markdown_path TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  approved_at TEXT,
+                  queued_at TEXT,
+                  captured_at TEXT
+                );
+
+                CREATE TABLE sources (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  kind TEXT NOT NULL,
+                  site TEXT NOT NULL,
+                  url TEXT,
+                  title TEXT NOT NULL,
+                  author TEXT,
+                  published_at TEXT,
+                  captured_at TEXT NOT NULL,
+                  content_hash TEXT NOT NULL,
+                  raw_path TEXT NOT NULL,
+                  markdown_path TEXT NOT NULL,
+                  text_length INTEGER NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE notes (
+                  id TEXT PRIMARY KEY,
+                  source_id TEXT,
+                  title TEXT NOT NULL,
+                  summary TEXT,
+                  tags_json TEXT NOT NULL DEFAULT '[]',
+                  question TEXT,
+                  answer TEXT,
+                  excerpt TEXT,
+                  markdown_path TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                INSERT INTO projects(id, name, vault_path, created_at, updated_at)
+                VALUES ('default', 'Legacy Inbox', '/tmp/legacy-vault',
+                        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO capture_plans(
+                  id, project_id, url, title, source_type, status, metadata_json,
+                  markdown_path, created_at, updated_at
+                ) VALUES (
+                  'plan_legacy', 'default', 'https://example.com/plan#fragment', 'Legacy plan',
+                  'url', 'approved', '{}', 'legacy-plan.md',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                );
+                INSERT INTO sources(
+                  id, project_id, kind, site, url, title, captured_at, content_hash,
+                  raw_path, markdown_path, text_length, created_at, updated_at
+                ) VALUES (
+                  'src_legacy', 'default', 'article', 'example',
+                  'https://example.com/source#fragment', 'Legacy source',
+                  '2026-01-01T00:00:00Z', 'legacy-hash', 'raw.txt', 'source.md', 42,
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                );
+                INSERT INTO notes(
+                  id, source_id, title, summary, tags_json, markdown_path, created_at, updated_at
+                ) VALUES (
+                  'note_legacy', 'src_legacy', 'Legacy note', 'Preserve me', '[]',
+                  'note.md', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                );
+
+                INSERT INTO jobs(id, type, status, progress, input_json, error, created_at, updated_at)
+                VALUES ('job_legacy', 'read', 'failed', 0.5, '{}', 'legacy failure',
+                        '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z');
+                INSERT INTO job_items(
+                  id, job_id, item_index, kind, url, title, status, error, attempts,
+                  source_id, input_json, result_json, created_at, updated_at, started_at, completed_at
+                ) VALUES (
+                  'item_legacy', 'job_legacy', 0, 'url', 'https://example.com/legacy',
+                  'Legacy item', 'failed', 'legacy item failure', 2, NULL, '{}', '{}',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z',
+                  '2026-01-01T00:00:10Z', '2026-01-01T00:01:00Z'
+                );
+                """
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        server.Store(legacy_dir)
+        server.Store(legacy_dir)
+
+        db = sqlite3.connect(legacy_db_path)
+        db.row_factory = sqlite3.Row
+        try:
+            columns = {
+                table: {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                for table in ("job_items", "sources", "capture_plans", "notes")
+            }
+            legacy_item = db.execute(
+                "SELECT * FROM job_items WHERE id = 'item_legacy'"
+            ).fetchone()
+            legacy_source = db.execute(
+                "SELECT * FROM sources WHERE id = 'src_legacy'"
+            ).fetchone()
+            legacy_plan = db.execute(
+                "SELECT * FROM capture_plans WHERE id = 'plan_legacy'"
+            ).fetchone()
+            legacy_note = db.execute(
+                "SELECT * FROM notes WHERE id = 'note_legacy'"
+            ).fetchone()
+            indexes = {
+                table: {row["name"] for row in db.execute(f"PRAGMA index_list({table})")}
+                for table in ("job_items", "sources", "capture_plans", "notes")
+            }
+            foreign_key_errors = db.execute("PRAGMA foreign_key_check").fetchall()
+        finally:
+            db.close()
+
+        self.assertTrue(
+            {
+                "hidden",
+                "cleared_at",
+                "lease_owner",
+                "lease_expires_at",
+                "heartbeat_at",
+                "error_category",
+            }.issubset(columns["job_items"])
+        )
+        self.assertIn("canonical_url", columns["sources"])
+        self.assertIn("canonical_url", columns["capture_plans"])
+        self.assertIn("project_id", columns["notes"])
+        self.assertEqual(legacy_item["job_id"], "job_legacy")
+        self.assertEqual(legacy_item["status"], "failed")
+        self.assertEqual(legacy_item["error"], "legacy item failure")
+        self.assertEqual(legacy_item["attempts"], 2)
+        self.assertEqual(legacy_item["hidden"], 0)
+        self.assertEqual(legacy_item["error_category"], "")
+        self.assertEqual(legacy_source["title"], "Legacy source")
+        self.assertEqual(legacy_source["canonical_url"], "https://example.com/source")
+        self.assertEqual(legacy_plan["status"], "approved")
+        self.assertEqual(legacy_plan["canonical_url"], "https://example.com/plan")
+        self.assertEqual(legacy_note["summary"], "Preserve me")
+        self.assertEqual(legacy_note["project_id"], "default")
+        self.assertIn("idx_job_items_lease", indexes["job_items"])
+        self.assertIn("idx_job_items_error_category", indexes["job_items"])
+        self.assertIn("idx_sources_project_canonical", indexes["sources"])
+        self.assertIn("idx_capture_plans_project_canonical", indexes["capture_plans"])
+        self.assertIn("idx_notes_project_created", indexes["notes"])
+        self.assertEqual(foreign_key_errors, [])
 
     def test_job_lifecycle_recovery_retry_pause_cancel_and_clear(self) -> None:
         columns = {row["name"] for row in self.db_rows("PRAGMA table_info(job_items)")}
@@ -1528,9 +2468,237 @@ class CompanionServiceCase(unittest.TestCase):
         self.assertIn("item_heartbeat", event_types)
         self.assertIn("item_status_ignored", event_types)
 
+    def test_three_concurrent_workers_claim_distinct_job_items(self) -> None:
+        job = self.request(
+            "/v1/jobs/read",
+            {
+                "items": [
+                    {"id": f"concurrent-claim-{index}", "url": f"https://example.com/concurrent-claim-{index}"}
+                    for index in range(3)
+                ],
+                "source": "concurrent-claim-test",
+            },
+            method="POST",
+        )["job"]
+        job_id = job["id"]
+        select_barrier = threading.Barrier(3)
+        selected_threads: set[int] = set()
+        selected_threads_lock = threading.Lock()
+        real_connect = sqlite3.connect
+
+        class PrefetchedCursor:
+            def __init__(self, row: sqlite3.Row):
+                self.row = row
+
+            def fetchone(self) -> sqlite3.Row:
+                return self.row
+
+        class ClaimBarrierConnection(sqlite3.Connection):
+            def execute(self, sql: str, parameters=()):
+                cursor = super().execute(sql, parameters)
+                normalized_sql = " ".join(sql.split())
+                if (
+                    "FROM job_items" in normalized_sql
+                    and "status = 'pending'" in normalized_sql
+                    and "ORDER BY CASE WHEN status = 'pending'" in normalized_sql
+                ):
+                    row = cursor.fetchone()
+                    if row is not None:
+                        thread_id = threading.get_ident()
+                        with selected_threads_lock:
+                            should_wait = thread_id not in selected_threads
+                            selected_threads.add(thread_id)
+                        if should_wait:
+                            select_barrier.wait(timeout=10)
+                    return PrefetchedCursor(row)
+                return cursor
+
+        def barrier_connect(*args, **kwargs):
+            return real_connect(*args, **kwargs, factory=ClaimBarrierConnection)
+
+        def claim(worker_index: int) -> dict:
+            return self.request(
+                f"/v1/jobs/{job_id}/claim-next",
+                {"executor_id": f"concurrent-worker-{worker_index}", "lease_seconds": 60},
+                method="POST",
+            )["item"]
+
+        with mock.patch.object(server.sqlite3, "connect", side_effect=barrier_connect):
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                claimed = list(executor.map(claim, range(3)))
+
+        self.assertEqual(len({item["id"] for item in claimed}), 3)
+        self.assertEqual(
+            {item["lease_owner"] for item in claimed},
+            {f"concurrent-worker-{index}" for index in range(3)},
+        )
+        rows = self.db_rows(
+            "SELECT id, status, attempts, lease_owner FROM job_items WHERE job_id = ? ORDER BY item_index",
+            (job_id,),
+        )
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row["status"] == "running" for row in rows))
+        self.assertTrue(all(row["attempts"] == 1 for row in rows))
+        self.assertEqual(len({row["lease_owner"] for row in rows}), 3)
+        events = self.request(f"/v1/jobs/{job_id}/events")["events"]
+        self.assertEqual(sum(event["event_type"] == "item_claimed" for event in events), 3)
+
+    def test_cancel_wins_when_late_success_read_precedes_cancel_commit(self) -> None:
+        job = self.request(
+            "/v1/jobs/read",
+            {
+                "items": [{"id": "cancel-race", "url": "https://example.com/cancel-race"}],
+                "source": "cancel-race-test",
+            },
+            method="POST",
+        )["job"]
+        job_id = job["id"]
+        claimed = self.request(
+            f"/v1/jobs/{job_id}/claim-next",
+            {"executor_id": "late-worker", "lease_seconds": 60},
+            method="POST",
+        )["item"]
+        read_barrier = threading.Barrier(2)
+        resume_barrier = threading.Barrier(2)
+        block_lock = threading.Lock()
+        blocked = False
+        real_connect = sqlite3.connect
+
+        class PrefetchedCursor:
+            def __init__(self, row: sqlite3.Row):
+                self.row = row
+
+            def fetchone(self) -> sqlite3.Row:
+                return self.row
+
+        class StatusBarrierConnection(sqlite3.Connection):
+            def execute(self, sql: str, parameters=()):
+                nonlocal blocked
+                cursor = super().execute(sql, parameters)
+                normalized_sql = " ".join(sql.split())
+                if normalized_sql == "SELECT * FROM job_items WHERE job_id = ? AND id = ?":
+                    row = cursor.fetchone()
+                    with block_lock:
+                        should_wait = not blocked
+                        blocked = True
+                    if should_wait:
+                        read_barrier.wait(timeout=10)
+                        resume_barrier.wait(timeout=10)
+                    return PrefetchedCursor(row)
+                return cursor
+
+        def barrier_connect(*args, **kwargs):
+            return real_connect(*args, **kwargs, factory=StatusBarrierConnection)
+
+        def report_late_success() -> dict:
+            return self.request(
+                f"/v1/jobs/{job_id}/items/{claimed['id']}/status",
+                {
+                    "status": "success",
+                    "executor_id": "late-worker",
+                    "source_id": "source-after-concurrent-cancel",
+                },
+                method="POST",
+            )["job"]
+
+        with mock.patch.object(server.sqlite3, "connect", side_effect=barrier_connect):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                late_success = executor.submit(report_late_success)
+                read_barrier.wait(timeout=10)
+                canceled = self.request(f"/v1/jobs/{job_id}/cancel", {}, method="POST")["job"]
+                resume_barrier.wait(timeout=10)
+                late_result = late_success.result(timeout=10)
+
+        canceled_item = next(item for item in canceled["items"] if item["id"] == claimed["id"])
+        late_item = next(item for item in late_result["items"] if item["id"] == claimed["id"])
+        persisted_item = self.request(f"/v1/jobs/{job_id}")["job"]["items"][0]
+        for item in (canceled_item, late_item, persisted_item):
+            self.assertEqual(item["status"], "canceled")
+            self.assertEqual(item["source_id"], "")
+            self.assertEqual(item["lease_owner"], "")
+        self.assertEqual(late_result["status"], "canceled")
+        events = self.request(f"/v1/jobs/{job_id}/events")["events"]
+        ignored = [event for event in events if event["event_type"] == "item_status_ignored"]
+        self.assertEqual(len(ignored), 1)
+        self.assertEqual(ignored[0]["data"]["attempted_status"], "success")
+        self.assertEqual(ignored[0]["data"]["reason"], "item already canceled")
+
+    def test_pdf_worker_uses_only_the_companion_interpreter(self) -> None:
+        self.assertFalse(hasattr(server, "BUNDLED_PYTHON"))
+        self.assertFalse(hasattr(server, "BUNDLED_SITE_PACKAGES"))
+        pdf_path = self.data_dir / "runtime-fixture.pdf"
+        make_text_pdf(pdf_path, ["Locked runtime fixture"])
+        fake_home = self.data_dir / "fake-home"
+        fake_python = (
+            fake_home
+            / ".cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
+        )
+        marker = self.data_dir / "ambient-runtime-was-called"
+        fake_python.parent.mkdir(parents=True)
+        fake_python.write_text(
+            f"#!/bin/sh\ntouch {marker!s}\nexit 99\n",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+
+        def controlled_run(argv, **kwargs):
+            self.assertEqual(argv[0], sys.executable)
+            self.assertEqual(Path(argv[1]), server.PDF_WORKER)
+            self.assertEqual(Path(argv[2]), pdf_path)
+            self.assertIn("--max-page-text-bytes", argv)
+            self.assertIn("--max-total-text-bytes", argv)
+            self.assertIn("--max-output-bytes", argv)
+            kwargs["stdout"].write(
+                json.dumps(
+                    {
+                        "title": "Locked runtime fixture",
+                        "metadata": {},
+                        "pages": [{"page": 1, "text": "Locked runtime fixture"}],
+                    }
+                ).encode("utf-8")
+            )
+            kwargs["stdout"].flush()
+            return server.subprocess.CompletedProcess(
+                argv,
+                0,
+            )
+
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}), mock.patch.object(
+            server.subprocess,
+            "run",
+            side_effect=controlled_run,
+        ):
+            extracted = self.store.extract_pdf(pdf_path)
+        self.assertEqual(extracted["pages"][0]["text"], "Locked runtime fixture")
+        self.assertFalse(marker.exists())
+
+    def test_pdf_worker_rejects_text_expansion_and_parent_bounds_output(self) -> None:
+        expanded_pdf = self.data_dir / "expanded.pdf"
+        make_text_pdf(expanded_pdf, ["A" * 4096])
+        with mock.patch.object(server, "MAX_PDF_PAGE_TEXT_BYTES", 512), mock.patch.object(
+            server,
+            "MAX_PDF_TOTAL_TEXT_BYTES",
+            1024,
+        ):
+            with self.assertRaisesRegex(ValueError, "per-page text safety limit"):
+                self.store.extract_pdf(expanded_pdf)
+
+        noisy_worker = self.data_dir / "noisy_pdf_worker.py"
+        noisy_worker.write_text(
+            "import sys\nsys.stdout.buffer.write(b\"x\" * 2048)\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(server, "PDF_WORKER", noisy_worker), mock.patch.object(
+            server,
+            "MAX_PDF_WORKER_OUTPUT_BYTES",
+            1024,
+        ):
+            with self.assertRaisesRegex(ValueError, "worker output exceeded"):
+                self.store.extract_pdf(expanded_pdf)
+
     def test_pdf_ingest_preserves_page_chunks_and_original_pdf(self) -> None:
-        if not server.BUNDLED_PYTHON.exists() and not server.PDF_WORKER.exists():
-            self.skipTest("PDF worker runtime is unavailable")
+        if importlib.util.find_spec("pypdf") is None:
+            self.skipTest("locked pypdf is not installed in the current test interpreter")
 
         pdf_path = self.data_dir / "fixture.pdf"
         make_text_pdf(
@@ -1567,6 +2735,542 @@ class CompanionServiceCase(unittest.TestCase):
 
         papers = list((self.data_dir / "vault" / "原始资料" / "papers").glob("*.pdf"))
         self.assertEqual(len(papers), 1)
+
+    def test_remote_pdf_copy_failure_does_not_commit_source_or_delete_only_copy(self) -> None:
+        downloaded = self.data_dir / "downloaded-once.pdf"
+        downloaded.write_bytes(b"%PDF-1.4\nremote fixture")
+        extracted = {
+            "title": "One-shot remote PDF",
+            "metadata": {"author": "", "created": ""},
+            "pages": [{"page": 1, "text": "recoverable extracted text " * 20}],
+        }
+        with mock.patch.object(
+            self.store,
+            "resolve_pdf_input",
+            return_value=(downloaded, "https://example.invalid/one-shot.pdf", downloaded),
+        ), mock.patch.object(self.store, "extract_pdf", return_value=extracted), mock.patch.object(
+            self.store,
+            "copy_pdf_to_vault",
+            side_effect=OSError("simulated artifact write failure"),
+        ):
+            with self.assertRaisesRegex(ValueError, "retained"):
+                self.store.ingest_pdf({"url": "https://example.invalid/one-shot.pdf", "ocr": False})
+
+        self.assertTrue(downloaded.exists())
+        self.assertEqual(self.db_rows("SELECT * FROM sources"), [])
+        self.assertEqual(self.db_rows("SELECT * FROM documents"), [])
+
+    def test_binary_distinct_pdfs_with_same_text_keep_distinct_mapped_artifacts(self) -> None:
+        first_pdf = self.data_dir / "same-text-a.pdf"
+        second_pdf = self.data_dir / "same-text-b.pdf"
+        make_text_pdf(first_pdf, ["Same visible source evidence text."])
+        second_pdf.write_bytes(first_pdf.read_bytes() + b"\n%different immutable binary\n")
+        first_hash = hashlib.sha256(first_pdf.read_bytes()).hexdigest()
+        second_hash = hashlib.sha256(second_pdf.read_bytes()).hexdigest()
+        self.assertNotEqual(first_hash, second_hash)
+
+        first = self.store.ingest_pdf(
+            {"path": str(first_pdf), "title": "First PDF", "ocr": False}
+        )
+        second = self.store.ingest_pdf(
+            {"path": str(second_pdf), "title": "Second PDF", "ocr": False}
+        )
+
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(first["source"]["id"], second["source"]["id"])
+        self.assertTrue(first["pdf"]["artifact_id"])
+        self.assertTrue(second["pdf"]["artifact_id"])
+        self.assertNotEqual(first["pdf"]["artifact_id"], second["pdf"]["artifact_id"])
+        self.assertEqual(first["pdf"]["raw_sha256"], first_hash)
+        self.assertEqual(second["pdf"]["raw_sha256"], second_hash)
+        artifacts = self.db_rows(
+            "SELECT * FROM source_attachments WHERE source_id = ? ORDER BY created_at, id",
+            (first["source"]["id"],),
+        )
+        self.assertEqual(len(artifacts), 2)
+        metadata = [json.loads(row["metadata_json"]) for row in artifacts]
+        self.assertEqual({item["raw_sha256"] for item in metadata}, {first_hash, second_hash})
+        saved_paths = [Path(row["downloaded_path"]) for row in artifacts]
+        paths_by_hash = {
+            hashlib.sha256(path.read_bytes()).hexdigest(): path
+            for path in saved_paths
+        }
+        self.assertEqual(set(paths_by_hash), {first_hash, second_hash})
+        self.assertEqual(Path(first["pdf"]["path"]), paths_by_hash[first_hash])
+        self.assertEqual(Path(second["pdf"]["path"]), paths_by_hash[second_hash])
+
+    def test_concurrent_first_pdf_ingest_serializes_and_preserves_first_source_files(self) -> None:
+        first_pdf = self.data_dir / "concurrent-a.pdf"
+        second_pdf = self.data_dir / "concurrent-b.pdf"
+        first_pdf.write_bytes(b"%PDF-1.4\n% concurrent binary a\n")
+        second_pdf.write_bytes(b"%PDF-1.4\n% concurrent binary b\n")
+        first_hash = hashlib.sha256(first_pdf.read_bytes()).hexdigest()
+        second_hash = hashlib.sha256(second_pdf.read_bytes()).hexdigest()
+        extracted = {
+            "title": "Concurrent shared title",
+            "metadata": {"author": "", "created": ""},
+            "pages": [
+                {
+                    "page": 1,
+                    "text": "Concurrent identical extracted PDF evidence text " * 12,
+                }
+            ],
+        }
+        transaction_barrier = threading.Barrier(2)
+        real_connect = sqlite3.connect
+
+        class PrefetchedCursor:
+            def __init__(self, row: sqlite3.Row | None):
+                self.row = row
+
+            def fetchone(self) -> sqlite3.Row | None:
+                return self.row
+
+        class CaptureBarrierConnection(sqlite3.Connection):
+            capture_transaction_started = False
+
+            def execute(self, sql: str, parameters=()):
+                normalized_sql = " ".join(sql.split())
+                if normalized_sql == "BEGIN IMMEDIATE":
+                    transaction_barrier.wait(timeout=10)
+                    self.capture_transaction_started = True
+                    return super().execute(sql, parameters)
+                cursor = super().execute(sql, parameters)
+                if (
+                    normalized_sql
+                    == "SELECT * FROM sources WHERE project_id = ? AND content_hash = ?"
+                    and not self.capture_transaction_started
+                ):
+                    row = cursor.fetchone()
+                    transaction_barrier.wait(timeout=10)
+                    return PrefetchedCursor(row)
+                return cursor
+
+        def barrier_connect(*args, **kwargs):
+            return real_connect(*args, **kwargs, factory=CaptureBarrierConnection)
+
+        def ingest(path: Path) -> dict:
+            return self.store.ingest_pdf(
+                {
+                    "path": str(path),
+                    "title": "Concurrent shared title",
+                    "ocr": False,
+                }
+            )
+
+        with mock.patch.object(self.store, "extract_pdf", return_value=extracted), mock.patch.object(
+            server.sqlite3,
+            "connect",
+            side_effect=barrier_connect,
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(ingest, (first_pdf, second_pdf)))
+
+        self.assertEqual(sorted(result["duplicate"] for result in results), [False, True])
+        self.assertEqual({result["source"]["id"] for result in results}, {results[0]["source"]["id"]})
+        winner_index = next(index for index, result in enumerate(results) if not result["duplicate"])
+        winner_url = (first_pdf, second_pdf)[winner_index].resolve().as_uri()
+        loser_url = (first_pdf, second_pdf)[1 - winner_index].resolve().as_uri()
+        source = results[winner_index]["source"]
+        self.assertEqual(source["url"], winner_url)
+        source_files = [Path(source["raw_path"]), Path(source["markdown_path"])]
+        for source_file in source_files:
+            persisted = source_file.read_text(encoding="utf-8")
+            self.assertIn(winner_url, persisted)
+            self.assertNotIn(loser_url, persisted)
+
+        attachments = self.db_rows(
+            "SELECT metadata_json, downloaded_path FROM source_attachments WHERE source_id = ?",
+            (source["id"],),
+        )
+        self.assertEqual(len(attachments), 2)
+        self.assertEqual(
+            {json.loads(row["metadata_json"])["raw_sha256"] for row in attachments},
+            {first_hash, second_hash},
+        )
+        self.assertTrue(all(Path(row["downloaded_path"]).is_file() for row in attachments))
+
+    def test_pdf_low_text_uses_ocr_and_only_replaces_more_complete_pages(self) -> None:
+        pdf_path = self.data_dir / "scanned-fixture.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% scanned fixture")
+        extracted = {
+            "title": "Scanned Fixture",
+            "metadata": {"author": "", "created": ""},
+            "pages": [
+                {"page": 1, "text": ""},
+                {"page": 2, "text": "Existing page text is more complete."},
+            ],
+        }
+        recognized = "OCR recovered searchable text from the scanned first page. " * 8
+        ocr_result = {
+            "engine": "macos-pdfkit-vision",
+            "pages": [
+                {"page": 1, "text": recognized},
+                {"page": 2, "text": "short"},
+            ],
+        }
+        copied_path = self.data_dir / "copied.pdf"
+        with mock.patch.object(self.store, "extract_pdf", return_value=extracted), mock.patch.object(
+            self.store,
+            "run_pdf_ocr",
+            return_value=ocr_result,
+        ) as ocr_mock, mock.patch.object(
+            self.store,
+            "capture",
+            return_value={"source": {"id": "source-pdf-ocr"}},
+        ) as capture_mock, mock.patch.object(
+            self.store,
+            "copy_pdf_to_vault",
+            return_value=copied_path,
+        ):
+            result = self.store.ingest_pdf({"path": str(pdf_path)})
+
+        ocr_mock.assert_called_once_with(pdf_path.resolve())
+        stats = capture_mock.call_args.args[0]["content"]["stats"]
+        pages = capture_mock.call_args.args[0]["content"]["pages"]
+        self.assertEqual(pages[0]["text"], recognized.strip())
+        self.assertEqual(pages[1]["text"], "Existing page text is more complete.")
+        self.assertEqual(stats["profile"], "pdf-pypdf+macos-vision-ocr")
+        self.assertFalse(stats["lowText"])
+        self.assertEqual(stats["ocr"]["pages_replaced"], 1)
+        self.assertTrue(result["pdf"]["ocr"]["attempted"])
+        self.assertTrue(result["pdf"]["ocr"]["applied"])
+        self.assertEqual(result["pdf"]["ocr"]["reason"], "applied")
+        self.assertEqual(result["pdf"]["ocr"]["engine"], "macos-pdfkit-vision")
+        self.assertEqual(result["pdf"]["profile"], stats["profile"])
+
+    def test_pdf_ocr_failure_falls_back_without_failing_import(self) -> None:
+        pdf_path = self.data_dir / "ocr-failure.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% scanned fixture")
+        extracted = {
+            "title": "OCR Failure Fixture",
+            "metadata": {"author": "", "created": ""},
+            "pages": [{"page": 1, "text": ""}],
+        }
+        with mock.patch.object(self.store, "extract_pdf", return_value=extracted), mock.patch.object(
+            self.store,
+            "run_pdf_ocr",
+            side_effect=ValueError("Vision worker timed out after 180 seconds"),
+        ), mock.patch.object(
+            self.store,
+            "capture",
+            return_value={"source": {"id": "source-pdf-ocr-failure"}},
+        ) as capture_mock, mock.patch.object(
+            self.store,
+            "copy_pdf_to_vault",
+            return_value=self.data_dir / "copied-failure.pdf",
+        ):
+            result = self.store.ingest_pdf({"path": str(pdf_path)})
+
+        stats = capture_mock.call_args.args[0]["content"]["stats"]
+        self.assertEqual(stats["profile"], "pdf-pypdf")
+        self.assertTrue(stats["lowText"])
+        self.assertTrue(stats["ocr"]["attempted"])
+        self.assertFalse(stats["ocr"]["applied"])
+        self.assertEqual(stats["ocr"]["reason"], "failed")
+        self.assertIn("timed out", stats["ocr"]["error"])
+        self.assertEqual(result["pdf"]["ocr"], stats["ocr"])
+
+    def test_pdf_ocr_can_be_disabled_and_skips_text_pdfs(self) -> None:
+        pdf_path = self.data_dir / "ocr-skip.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% fixture")
+        low_text = {
+            "title": "Disabled OCR",
+            "metadata": {"author": "", "created": ""},
+            "pages": [{"page": 1, "text": ""}],
+        }
+        enough_text = {
+            "title": "Text PDF",
+            "metadata": {"author": "", "created": ""},
+            "pages": [{"page": 1, "text": "normal text layer " * 30}],
+        }
+        with mock.patch.object(self.store, "run_pdf_ocr") as ocr_mock, mock.patch.object(
+            self.store,
+            "capture",
+            side_effect=[
+                {"source": {"id": "source-disabled"}},
+                {"source": {"id": "source-text"}},
+            ],
+        ) as capture_mock, mock.patch.object(
+            self.store,
+            "copy_pdf_to_vault",
+            side_effect=[self.data_dir / "disabled.pdf", self.data_dir / "text.pdf"],
+        ), mock.patch.object(
+            self.store,
+            "extract_pdf",
+            side_effect=[low_text, enough_text],
+        ):
+            disabled = self.store.ingest_pdf({"path": str(pdf_path), "ocr": False})
+            text_result = self.store.ingest_pdf({"path": str(pdf_path)})
+
+        ocr_mock.assert_not_called()
+        disabled_stats = capture_mock.call_args_list[0].args[0]["content"]["stats"]
+        text_stats = capture_mock.call_args_list[1].args[0]["content"]["stats"]
+        self.assertFalse(disabled["pdf"]["ocr"]["attempted"])
+        self.assertEqual(disabled["pdf"]["ocr"]["reason"], "disabled")
+        self.assertEqual(disabled["pdf"]["ocr"]["error"], "")
+        self.assertFalse(text_result["pdf"]["ocr"]["attempted"])
+        self.assertEqual(text_result["pdf"]["ocr"]["reason"], "not_needed")
+        self.assertEqual(text_result["pdf"]["ocr"]["error"], "")
+        self.assertEqual(disabled_stats["profile"], "pdf-pypdf")
+        self.assertEqual(text_stats["profile"], "pdf-pypdf")
+
+    def test_pdf_ocr_runner_uses_safe_argv_and_reports_stderr(self) -> None:
+        pdf_path = self.data_dir / "unsafe name; still argv.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% fixture")
+        success = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "engine": "macos-pdfkit-vision",
+                    "pages": [{"page": 1, "text": "recognized"}],
+                }
+            ),
+            stderr="diagnostic",
+        )
+        with mock.patch.object(server.shutil, "which", return_value="/usr/bin/swift"), mock.patch.object(
+            server.subprocess,
+            "run",
+            return_value=success,
+        ) as run_mock:
+            result = self.store.run_pdf_ocr(pdf_path)
+
+        self.assertEqual(result["pages"][0]["text"], "recognized")
+        run_mock.assert_called_once_with(
+            ["/usr/bin/swift", str(server.PDF_OCR_WORKER), str(pdf_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=server.PDF_OCR_TIMEOUT_SECONDS,
+        )
+
+        failure = mock.Mock(returncode=2, stdout="", stderr="Vision framework failed")
+        with mock.patch.object(server.shutil, "which", return_value="/usr/bin/swift"), mock.patch.object(
+            server.subprocess,
+            "run",
+            return_value=failure,
+        ):
+            with self.assertRaisesRegex(ValueError, "Vision framework failed"):
+                self.store.run_pdf_ocr(pdf_path)
+
+    def test_local_pdf_import_enforces_canonical_allowed_roots_and_pdf_content(self) -> None:
+        allowed_pdf = self.data_dir / "allowed.pdf"
+        make_text_pdf(allowed_pdf, ["Allowed local PDF"])
+        resolved, source_url, cleanup = self.store.resolve_pdf_input({"path": str(allowed_pdf)})
+        self.assertEqual(resolved, allowed_pdf.resolve())
+        self.assertEqual(source_url, allowed_pdf.resolve().as_uri())
+        self.assertIsNone(cleanup)
+
+        not_pdf = self.data_dir / "not-really.pdf"
+        not_pdf.write_text("plain text", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "valid PDF"):
+            self.store.resolve_pdf_input({"path": str(not_pdf)})
+
+        with tempfile.TemporaryDirectory(prefix="qc-pdf-outside-") as outside_name:
+            outside_dir = Path(outside_name)
+            outside_pdf = outside_dir / "outside.pdf"
+            make_text_pdf(outside_pdf, ["Outside default roots"])
+
+            with self.assertRaisesRegex(ValueError, "allowed import folder"):
+                self.store.resolve_pdf_input({"path": str(outside_pdf)})
+
+            symlink_path = self.data_dir / "symlink-escape.pdf"
+            symlink_path.symlink_to(outside_pdf)
+            with self.assertRaisesRegex(ValueError, "allowed import folder"):
+                self.store.resolve_pdf_input({"path": str(symlink_path)})
+
+            custom_store = server.Store(
+                self.data_dir / "custom-store",
+                allowed_pdf_dirs=[outside_dir],
+            )
+            custom_resolved, _, _ = custom_store.resolve_pdf_input({"path": str(outside_pdf)})
+            self.assertEqual(custom_resolved, outside_pdf.resolve())
+
+        with self.assertRaisesRegex(ValueError, "either path or url"):
+            self.store.resolve_pdf_input(
+                {"path": str(allowed_pdf), "url": "https://example.com/also.pdf"}
+            )
+
+    def test_remote_pdf_rejects_non_public_dns_answers(self) -> None:
+        blocked_addresses = {
+            "loopback": "127.0.0.1",
+            "private": "10.20.30.40",
+            "link_local": "169.254.10.20",
+            "multicast": "224.0.0.1",
+            "reserved": "240.0.0.1",
+            "unspecified": "0.0.0.0",
+            "ipv6_loopback": "::1",
+            "ipv6_private": "fd00::1",
+            "ipv6_link_local": "fe80::1",
+        }
+        for label, address in blocked_addresses.items():
+            family = server.socket.AF_INET6 if ":" in address else server.socket.AF_INET
+            sockaddr = (address, 443, 0, 0) if family == server.socket.AF_INET6 else (address, 443)
+            answer = [(family, server.socket.SOCK_STREAM, 6, "", sockaddr)]
+            with self.subTest(label=label), mock.patch.object(
+                server.socket,
+                "getaddrinfo",
+                return_value=answer,
+            ):
+                with self.assertRaisesRegex(ValueError, "non-public network address"):
+                    server.resolve_public_resource_endpoints("blocked.example", 443)
+
+    def test_remote_pdf_pins_validated_address_against_dns_rebinding(self) -> None:
+        public_answer = [
+            (
+                server.socket.AF_INET,
+                server.socket.SOCK_STREAM,
+                6,
+                "",
+                ("8.8.8.8", 80),
+            )
+        ]
+        private_answer = [
+            (
+                server.socket.AF_INET,
+                server.socket.SOCK_STREAM,
+                6,
+                "",
+                ("127.0.0.1", 80),
+            )
+        ]
+        response = mock.Mock(
+            status=200,
+            headers={"content-type": "application/pdf"},
+        )
+        response.read.return_value = b"%PDF-1.7\nfixture"
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with mock.patch.object(
+            server.socket,
+            "getaddrinfo",
+            side_effect=[public_answer, private_answer],
+        ) as resolve_mock, mock.patch.object(
+            server,
+            "_PinnedHTTPConnection",
+            return_value=connection,
+        ) as connection_type:
+            data = self.store.download_remote_pdf(
+                "http://public.example/report.pdf?download=1"
+            )
+
+        self.assertEqual(data, b"%PDF-1.7\nfixture")
+        self.assertEqual(resolve_mock.call_count, 1, "the transport must not resolve the hostname again")
+        connection_type.assert_called_once_with(
+            "public.example",
+            80,
+            "8.8.8.8",
+            timeout=server.PDF_DOWNLOAD_TIMEOUT_SECONDS,
+        )
+        request_args = connection.request.call_args
+        self.assertEqual(request_args.args[:2], ("GET", "/report.pdf?download=1"))
+        self.assertEqual(request_args.kwargs["headers"]["host"], "public.example")
+        connection.close.assert_called_once_with()
+
+    def test_remote_pdf_redirect_is_revalidated_before_following(self) -> None:
+        public_answer = [
+            (
+                server.socket.AF_INET,
+                server.socket.SOCK_STREAM,
+                6,
+                "",
+                ("8.8.8.8", 80),
+            )
+        ]
+        private_answer = [
+            (
+                server.socket.AF_INET,
+                server.socket.SOCK_STREAM,
+                6,
+                "",
+                ("127.0.0.1", 80),
+            )
+        ]
+        redirect = mock.Mock(
+            status=302,
+            headers={"location": "http://private.example/internal.pdf"},
+        )
+        connection = mock.Mock()
+        connection.getresponse.return_value = redirect
+
+        with mock.patch.object(
+            server.socket,
+            "getaddrinfo",
+            side_effect=[public_answer, private_answer],
+        ) as resolve_mock, mock.patch.object(
+            server,
+            "_PinnedHTTPConnection",
+            return_value=connection,
+        ) as connection_type:
+            with self.assertRaisesRegex(ValueError, "non-public network address"):
+                self.store.download_remote_pdf("http://public.example/start.pdf")
+
+        self.assertEqual(resolve_mock.call_count, 2)
+        self.assertEqual(connection_type.call_count, 1, "a blocked redirect target must never be contacted")
+        connection.close.assert_called_once_with()
+
+    def test_remote_pdf_rejects_unsafe_url_forms_and_non_pdf_response(self) -> None:
+        for url in (
+            "file:///etc/passwd",
+            "ftp://example.com/report.pdf",
+            "https://user:secret@example.com/report.pdf",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                self.store.resolve_pdf_input({"url": url})
+
+        public_answer = [
+            (
+                server.socket.AF_INET,
+                server.socket.SOCK_STREAM,
+                6,
+                "",
+                ("8.8.8.8", 443),
+            )
+        ]
+        response = mock.Mock(
+            status=200,
+            headers={"content-type": "application/pdf"},
+        )
+        response.read.return_value = b"<html>not a PDF</html>"
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        with mock.patch.object(
+            server.socket,
+            "getaddrinfo",
+            return_value=public_answer,
+        ), mock.patch.object(
+            server,
+            "_PinnedHTTPSConnection",
+            return_value=connection,
+        ):
+            with self.assertRaisesRegex(ValueError, "valid PDF"):
+                self.store.download_remote_pdf("https://public.example/not-pdf")
+
+    def test_remote_pdf_download_failure_closes_fd_and_removes_temp_file(self) -> None:
+        real_mkstemp = tempfile.mkstemp
+        created: dict[str, object] = {}
+
+        def tracked_mkstemp(*args, **kwargs):
+            kwargs["dir"] = self.data_dir
+            fd, path = real_mkstemp(*args, **kwargs)
+            created.update({"fd": fd, "path": path})
+            return fd, path
+
+        with mock.patch.object(server.tempfile, "mkstemp", side_effect=tracked_mkstemp), mock.patch.object(
+            self.store,
+            "download_remote_pdf",
+            side_effect=ValueError("remote PDF network request failed; check the URL and connection"),
+        ):
+            with self.assertRaisesRegex(ValueError, "check the URL"):
+                self.store.resolve_pdf_input({"url": "https://example.com/unavailable.pdf"})
+
+        fd = int(created["fd"])
+        temp_path = Path(str(created["path"]))
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        self.assertFalse(temp_path.exists())
 
     def test_deliverables_write_templates_and_mark_uncited_claims(self) -> None:
         text = "\n\n".join(
@@ -1890,9 +3594,15 @@ class CompanionServiceCase(unittest.TestCase):
         self.assertEqual(len(response["evidence"]), 1)
         self.assertEqual(response["evidence"][0]["chunk_id"], chunk_id)
         self.assertEqual(len(response["relations"]), 1)
+        self.assertFalse(response["relations"][0]["reused"])
+        self.assertEqual(response["assumptions"][0]["source_id"], source_id)
+        self.assertFalse(response["assumptions"][0]["reused"])
         self.assertEqual(len(response["risks"]), 1)
+        self.assertFalse(response["risks"][0]["reused"])
         self.assertEqual(len(response["strategy_ideas"]), 1)
+        self.assertFalse(response["strategy_ideas"][0]["reused"])
         self.assertEqual(len(response["tasks"]), 1)
+        self.assertFalse(response["tasks"][0]["reused"])
 
         self.assertEqual(len(self.db_rows("SELECT * FROM entities")), 2)
         self.assertEqual(len(self.db_rows("SELECT * FROM claims")), 3)
@@ -1906,6 +3616,7 @@ class CompanionServiceCase(unittest.TestCase):
         listing = self.request("/v1/knowledge/records?limit=10")
         self.assertEqual(len(listing["claims"]), 3)
         self.assertEqual(len(listing["entities"]), 2)
+        self.assertEqual(listing["assumptions"][0]["source_id"], source_id)
         claims_by_text = {claim["text"]: claim for claim in listing["claims"]}
         self.assertEqual(
             claims_by_text["Evidence-bound claims should cite source chunks before becoming durable conclusions."]["evidence_count"],
@@ -1933,6 +3644,9 @@ class CompanionServiceCase(unittest.TestCase):
         analysis_files = list((self.data_dir / "vault" / "wiki" / "analyses").glob("*structured-knowledge*.md"))
         self.assertTrue(analysis_files)
         self.assertIn("pending_validation", analysis_files[0].read_text(encoding="utf-8"))
+        self.assertIn(f"source_id: {source_id}", analysis_files[0].read_text(encoding="utf-8"))
+        exported = json.loads(self.request("/v1/export?format=json")["content"])
+        self.assertEqual(exported["knowledge"]["assumptions"][0]["source_id"], source_id)
         index_text = (self.data_dir / "vault" / "index.md").read_text(encoding="utf-8")
         self.assertIn("## Entities", index_text)
         self.assertIn("## Claims", index_text)
@@ -2094,7 +3808,13 @@ class CompanionServiceCase(unittest.TestCase):
             method="POST",
         )
         claim_id = records["claims"][0]["id"]
+        evidence_id = records["evidence"][0]["id"]
         self.request(f"/v1/sources/{source_id}/status", {"status": "reviewed"}, method="POST")
+        self.request(
+            f"/v1/evidence/{evidence_id}/review",
+            {"status": "reviewed", "reviewer": "unit-test"},
+            method="POST",
+        )
         self.request(f"/v1/claims/{claim_id}/review", {"status": "reviewed", "reviewer": "unit-test"}, method="POST")
         topic = self.request(
             "/v1/topic-packages",
@@ -2124,6 +3844,18 @@ class CompanionServiceCase(unittest.TestCase):
         )
         replacement_source_id = replacement_capture["source"]["id"]
         self.assertNotEqual(replacement_source_id, source_id)
+        superseded_evidence = self.request(f"/v1/evidence/{evidence_id}")["evidence"]
+        self.assertTrue(superseded_evidence["citation_valid"])
+        self.assertEqual(superseded_evidence["status"], "pending_validation")
+        self.assertIn(source_id, superseded_evidence["review_note"])
+        self.assertIn(replacement_source_id, superseded_evidence["review_note"])
+        superseded_claim = self.request(f"/v1/claims/{claim_id}")["claim"]
+        self.assertEqual(superseded_claim["status"], "pending_validation")
+        self.assertFalse(superseded_claim["reviewed_at"])
+        self.assertIn(
+            "claim_revalidation_required",
+            [event["event_type"] for event in superseded_claim["events"]],
+        )
         stale_topic = self.request(f"/v1/topic-packages/{topic['id']}")["topic_package"]
         self.assertTrue(stale_topic["stale"])
         self.assertIn(source_id, stale_topic["stale_reason"])
@@ -2155,6 +3887,482 @@ class CompanionServiceCase(unittest.TestCase):
         self.assertGreaterEqual(item_result["record_counts"]["claims"], 1)
         events = self.request(f"/v1/jobs/{reextract['job']['id']}/events")["events"]
         self.assertIn("item_reextract_completed", [item["event_type"] for item in events])
+
+    def test_canonical_replacement_keeps_claim_reviewed_with_other_current_reviewed_evidence(self) -> None:
+        old_text = "The versioned source supports a shared reviewed conclusion with exact evidence. " * 10
+        old_capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/multi-source-versioned",
+                    "title": "Versioned support",
+                    "site": "example",
+                },
+                "content": {"text": old_text, "markdown": old_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        other_text = "An independent source also supports the shared reviewed conclusion with exact evidence. " * 10
+        other_capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.net/independent-support",
+                    "title": "Independent support",
+                    "site": "example",
+                },
+                "content": {"text": other_text, "markdown": other_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        old_source_id = old_capture["source"]["id"]
+        other_source_id = other_capture["source"]["id"]
+        old_records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": old_source_id,
+                "claims": [
+                    {
+                        "text": "The shared conclusion has two independent supports.",
+                        "evidence": [
+                            {
+                                "source_id": old_source_id,
+                                "chunk_id": old_capture["chunks"][0]["id"],
+                                "quote": "versioned source supports a shared reviewed conclusion",
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        other_records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": other_source_id,
+                "claims": [
+                    {
+                        "text": "Independent support for the shared conclusion.",
+                        "evidence": [
+                            {
+                                "source_id": other_source_id,
+                                "chunk_id": other_capture["chunks"][0]["id"],
+                                "quote": "independent source also supports the shared reviewed conclusion",
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        target_claim_id = old_records["claims"][0]["id"]
+        old_evidence_id = old_records["evidence"][0]["id"]
+        other_claim_id = other_records["claims"][0]["id"]
+        other_evidence_id = other_records["evidence"][0]["id"]
+        for evidence_id in (old_evidence_id, other_evidence_id):
+            self.request(f"/v1/evidence/{evidence_id}/review", {"status": "reviewed"}, method="POST")
+        self.request(
+            "/v1/claims/merge",
+            {"target_claim_id": target_claim_id, "claim_ids": [target_claim_id, other_claim_id]},
+            method="POST",
+        )
+        self.request(f"/v1/claims/{target_claim_id}/review", {"status": "reviewed"}, method="POST")
+        self.request(f"/v1/sources/{old_source_id}/status", {"status": "reviewed"}, method="POST")
+
+        replacement_text = "The newer canonical version changes its conclusion and requires a fresh review. " * 10
+        self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/multi-source-versioned",
+                    "title": "Versioned support updated",
+                    "site": "example",
+                },
+                "content": {"text": replacement_text, "markdown": replacement_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+
+        self.assertEqual(self.request(f"/v1/evidence/{old_evidence_id}")["evidence"]["status"], "pending_validation")
+        self.assertEqual(self.request(f"/v1/evidence/{other_evidence_id}")["evidence"]["status"], "reviewed")
+        self.assertEqual(self.request(f"/v1/claims/{target_claim_id}")["claim"]["status"], "reviewed")
+
+    def test_same_source_reextract_reuses_claims_and_evidence_without_losing_review(self) -> None:
+        text = (
+            "Factor rotation needs exact evidence before a reviewed conclusion is durable. "
+            "Risk controls require drawdown checks and out-of-sample validation before live use. "
+        ) * 12
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/idempotent-reextract",
+                    "title": "Idempotent re-extraction",
+                    "site": "example",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        initial = self.request(
+            f"/v1/sources/{source_id}/extract-knowledge",
+            {"mode": "mock", "max_claims": 2},
+            method="POST",
+        )
+        initial_records = initial["records"]
+        structured_keys = ("relations", "assumptions", "risks", "strategy_ideas", "tasks")
+        for key in structured_keys:
+            self.assertTrue(initial_records[key], f"mock fixture should produce {key}")
+            self.assertTrue(any(record["reused"] is False for record in initial_records[key]))
+            self.assertTrue(all(isinstance(record["reused"], bool) for record in initial_records[key]))
+        initial_ids = {
+            key: {record["id"] for record in initial_records[key]}
+            for key in ("entities", "claims", "evidence", *structured_keys)
+        }
+        claim_id = initial_records["claims"][0]["id"]
+        evidence_id = initial_records["evidence"][0]["id"]
+        self.request(
+            f"/v1/evidence/{evidence_id}/review",
+            {"status": "reviewed", "reviewer": "unit-test", "review_note": "verified once"},
+            method="POST",
+        )
+        reviewed_claim = self.request(
+            f"/v1/claims/{claim_id}/review",
+            {"status": "reviewed", "reviewer": "unit-test", "review_note": "keep this review"},
+            method="POST",
+        )["claim"]
+        preserved_statuses = {
+            "relations": "reviewed",
+            "assumptions": "rejected",
+            "risks": "mitigated",
+            "strategy_ideas": "reviewed",
+            "tasks": "done",
+        }
+        db = sqlite3.connect(self.data_dir / "state" / "qc_smart_reader.sqlite3")
+        try:
+            db.execute("UPDATE entities SET status = 'reviewed'")
+            for table, status in preserved_statuses.items():
+                db.execute(f"UPDATE {table} SET status = ? WHERE source_id = ?", (status, source_id))
+            db.commit()
+        finally:
+            db.close()
+        counted_tables = ("claims", "evidence", *structured_keys)
+        before_counts = {
+            table: self.db_rows(
+                f"SELECT COUNT(*) AS count FROM {table} WHERE source_id = ?",
+                (source_id,),
+            )[0]["count"]
+            for table in counted_tables
+        }
+        analyses_dir = self.data_dir / "vault" / "wiki" / "analyses"
+        analysis_files_before = sorted(analyses_dir.glob("*structured-knowledge*.md"))
+        self.assertEqual(len(analysis_files_before), 1)
+
+        reextract = self.request(
+            f"/v1/sources/{source_id}/reextract",
+            {"mode": "mock", "max_claims": 2, "reason": "idempotency check"},
+            method="POST",
+        )
+
+        after_counts = {
+            table: self.db_rows(
+                f"SELECT COUNT(*) AS count FROM {table} WHERE source_id = ?",
+                (source_id,),
+            )[0]["count"]
+            for table in counted_tables
+        }
+        self.assertEqual(after_counts, before_counts)
+        reextracted_records = reextract["result"]["records"]
+        self.assertEqual(reextracted_records["claims"][0]["id"], claim_id)
+        self.assertEqual(reextracted_records["evidence"][0]["id"], evidence_id)
+        for key in ("claims", "evidence", *structured_keys):
+            self.assertEqual({record["id"] for record in reextracted_records[key]}, initial_ids[key])
+            self.assertTrue(all(record["reused"] is True for record in reextracted_records[key]))
+        self.assertEqual({record["id"] for record in reextracted_records["entities"]}, initial_ids["entities"])
+        self.assertTrue(all(record["reused"] is True for record in reextracted_records["entities"]))
+        self.assertEqual({record["status"] for record in reextracted_records["entities"]}, {"reviewed"})
+        for table, status in preserved_statuses.items():
+            rows = self.db_rows(f"SELECT id, status FROM {table} WHERE source_id = ?", (source_id,))
+            self.assertEqual({row["status"] for row in rows}, {status})
+            self.assertEqual({record["status"] for record in reextracted_records[table]}, {status})
+        analysis_files_after = sorted(analyses_dir.glob("*structured-knowledge*.md"))
+        self.assertEqual(analysis_files_after, analysis_files_before)
+        preserved = self.request(f"/v1/claims/{claim_id}")["claim"]
+        self.assertEqual(preserved["status"], "reviewed")
+        self.assertEqual(preserved["reviewer"], "unit-test")
+        self.assertEqual(preserved["review_note"], "keep this review")
+        self.assertEqual(preserved["reviewed_at"], reviewed_claim["reviewed_at"])
+
+        other_capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/idempotent-reextract-other",
+                    "title": "Other structured source",
+                    "site": "example",
+                },
+                "content": {
+                    "text": "A different immutable source needs its own stable structured analysis page. " * 8,
+                    "markdown": "A different immutable source needs its own stable structured analysis page. " * 8,
+                },
+                "browser": {},
+            },
+            method="POST",
+        )
+        other_source_id = other_capture["source"]["id"]
+        self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": other_source_id,
+                "tasks": [{"title": "Review the other immutable source"}],
+            },
+            method="POST",
+        )
+        source_scoped_analyses = sorted(analyses_dir.glob("*structured-knowledge*.md"))
+        self.assertEqual(len(source_scoped_analyses), 2)
+        self.assertIn(analysis_files_before[0], source_scoped_analyses)
+        combined_analyses = "\n".join(path.read_text(encoding="utf-8") for path in source_scoped_analyses)
+        self.assertIn(f"source_id: {source_id}", combined_analyses)
+        self.assertIn(f"source_id: {other_source_id}", combined_analyses)
+
+    def test_concurrent_same_source_knowledge_writes_reuse_all_structured_records(self) -> None:
+        text = "Concurrent extraction must keep one durable claim and one exact evidence quote. " * 12
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/concurrent-extraction",
+                    "title": "Concurrent extraction",
+                    "site": "example",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        payload = {
+            "source_id": source_id,
+            "entities": [
+                {"name": "Concurrent source", "kind": "source"},
+                {"name": "Durable record", "kind": "concept"},
+            ],
+            "claims": [
+                {
+                    "id": "concurrent-claim",
+                    "text": "Concurrent extraction must keep one durable claim.",
+                    "evidence": [
+                        {
+                            "source_id": source_id,
+                            "chunk_id": capture["chunks"][0]["id"],
+                            "quote": "Concurrent extraction must keep one durable claim",
+                        }
+                    ],
+                }
+            ],
+            "relations": [
+                {
+                    "subject": "Concurrent source",
+                    "predicate": "  SUPPORTS  ",
+                    "object": "Durable record",
+                    "claim_id": "concurrent-claim",
+                }
+            ],
+            "assumptions": [
+                {"text": " Concurrent inputs remain immutable. ", "claim_id": "concurrent-claim"}
+            ],
+            "risks": [
+                {"text": " Duplicate writes hide review state. ", "severity": "HIGH", "claim_id": "concurrent-claim"}
+            ],
+            "strategy_ideas": [
+                {
+                    "title": " Serialized source upsert ",
+                    "thesis": "Reuse equivalent source records.",
+                    "claim_id": "concurrent-claim",
+                }
+            ],
+            "tasks": [
+                {
+                    "title": " Verify record counts ",
+                    "acceptance": "Every structured table contains one source row.",
+                    "claim_id": "concurrent-claim",
+                }
+            ],
+        }
+
+        def write_variant(index: int) -> dict:
+            variant = json.loads(json.dumps(payload))
+            if index % 2:
+                variant["relations"][0]["predicate"] = "supports"
+                variant["assumptions"][0]["text"] = "concurrent   inputs remain immutable."
+                variant["risks"][0]["text"] = "duplicate writes hide review state."
+                variant["risks"][0]["severity"] = "high"
+                variant["strategy_ideas"][0]["title"] = "serialized source upsert"
+                variant["strategy_ideas"][0]["thesis"] = "reuse  equivalent source records."
+                variant["tasks"][0]["title"] = "verify record counts"
+                variant["tasks"][0]["acceptance"] = "every structured table contains one source row."
+            return self.store.create_knowledge_records(variant)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(write_variant, range(4)))
+
+        for key in ("claims", "evidence", "relations", "assumptions", "risks", "strategy_ideas", "tasks"):
+            self.assertEqual(len({result[key][0]["id"] for result in results}), 1)
+            self.assertEqual(sum(1 for result in results if result[key][0]["reused"] is False), 1)
+            self.assertEqual(
+                self.db_rows(
+                    f"SELECT COUNT(*) AS count FROM {key} WHERE source_id = ?",
+                    (source_id,),
+                )[0]["count"],
+                1,
+            )
+        analysis_files = list(
+            (self.data_dir / "vault" / "wiki" / "analyses").glob("*structured-knowledge*.md")
+        )
+        self.assertEqual(len(analysis_files), 1)
+
+    def test_assumptions_source_id_migration_is_repeat_safe(self) -> None:
+        legacy_dir = self.data_dir / "legacy-assumptions-store"
+        legacy_store = server.Store(legacy_dir)
+        capture = legacy_store.capture(
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/legacy-assumption",
+                    "title": "Legacy assumption source",
+                    "site": "example",
+                },
+                "content": {
+                    "text": "A legacy source-linked assumption should be backfilled through its claim. " * 8,
+                    "markdown": "A legacy source-linked assumption should be backfilled through its claim. " * 8,
+                },
+                "browser": {},
+            }
+        )
+        source_id = capture["source"]["id"]
+        claim_id = legacy_store.create_knowledge_records(
+            {
+                "source_id": source_id,
+                "claims": [{"text": "The legacy assumption has a source-linked claim."}],
+            }
+        )["claims"][0]["id"]
+        legacy_db_path = legacy_store.db_path
+        db = sqlite3.connect(legacy_db_path)
+        try:
+            db.execute("DROP TABLE assumptions")
+            db.execute(
+                """
+                CREATE TABLE assumptions (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  claim_id TEXT,
+                  text TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )
+                """
+            )
+            db.execute(
+                """
+                INSERT INTO assumptions(id, project_id, claim_id, text, status, created_at, updated_at)
+                VALUES ('asm_legacy', 'default', ?, 'Legacy assumption', 'reviewed', '2026-01-01', '2026-01-01')
+                """,
+                (claim_id,),
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        server.Store(legacy_dir)
+        reopened = server.Store(legacy_dir)
+        reused = reopened.create_knowledge_records(
+            {
+                "source_id": source_id,
+                "assumptions": [
+                    {
+                        "text": " legacy   assumption ",
+                        "claim_id": claim_id,
+                        "status": "pending_validation",
+                    }
+                ],
+            }
+        )["assumptions"][0]
+
+        db = sqlite3.connect(legacy_db_path)
+        db.row_factory = sqlite3.Row
+        try:
+            columns = [row["name"] for row in db.execute("PRAGMA table_info(assumptions)").fetchall()]
+            foreign_keys = db.execute("PRAGMA foreign_key_list(assumptions)").fetchall()
+            legacy = db.execute("SELECT * FROM assumptions WHERE id = 'asm_legacy'").fetchone()
+        finally:
+            db.close()
+        self.assertEqual(columns.count("source_id"), 1)
+        self.assertTrue(
+            any(row["from"] == "source_id" and row["table"] == "sources" for row in foreign_keys)
+        )
+        self.assertEqual(legacy["source_id"], source_id)
+        self.assertEqual(legacy["status"], "reviewed")
+        self.assertEqual(reused["id"], "asm_legacy")
+        self.assertTrue(reused["reused"])
+        self.assertEqual(reused["status"], "reviewed")
+
+    def test_reextract_audits_invalid_reviewed_evidence_before_reusing_claim(self) -> None:
+        text = (
+            "A source claim needs a current exact quote before it can remain reviewed. "
+            "The audit must demote stale evidence and require claim revalidation. "
+        ) * 12
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/reextract-audit",
+                    "title": "Re-extraction audit",
+                    "site": "example",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        initial = self.request(
+            f"/v1/sources/{source_id}/extract-knowledge",
+            {"mode": "mock", "max_claims": 1},
+            method="POST",
+        )
+        claim_id = initial["records"]["claims"][0]["id"]
+        evidence_id = initial["records"]["evidence"][0]["id"]
+        self.request(f"/v1/evidence/{evidence_id}/review", {"status": "reviewed"}, method="POST")
+        self.request(f"/v1/claims/{claim_id}/review", {"status": "reviewed"}, method="POST")
+        with self.store.connect() as db:
+            db.execute("UPDATE evidence SET quote = ? WHERE id = ?", ("quote that is no longer in the chunk", evidence_id))
+            db.commit()
+
+        reextract = self.request(
+            f"/v1/sources/{source_id}/reextract",
+            {"mode": "mock", "max_claims": 1, "reason": "audit invalid quote"},
+            method="POST",
+        )
+
+        stale_evidence = self.request(f"/v1/evidence/{evidence_id}")["evidence"]
+        stale_claim = self.request(f"/v1/claims/{claim_id}")["claim"]
+        self.assertEqual(stale_evidence["status"], "pending_validation")
+        self.assertEqual(stale_claim["status"], "pending_validation")
+        self.assertIn("claim_revalidation_required", [event["event_type"] for event in stale_claim["events"]])
+        self.assertEqual(reextract["evidence_audit"]["invalid_reviewed_evidence_count"], 1)
 
     def test_merge_claims_archives_duplicates_and_moves_evidence_and_links(self) -> None:
         text = (

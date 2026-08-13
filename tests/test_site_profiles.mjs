@@ -123,6 +123,84 @@ test("Generic fixture falls back to readability-style article extraction", async
   assert.equal(result.attachments[0].href, "https://research.example/assets/fallback.pdf");
 });
 
+test("generic profile scopes metadata and content to the article", () => {
+  const result = parseSiteProfileHtml(`
+    <!doctype html><title>Research Page</title>
+    <body>
+      <aside><p class="author">PRIVATE-SIDEBAR-TOKEN</p></aside>
+      <article>
+        <h1>Scoped Research</h1>
+        <p class="author">Article Author</p>
+        <p>First evidence paragraph.</p>
+        <p>Second evidence paragraph.</p>
+      </article>
+    </body>
+  `, { url: "https://research.example/scoped" });
+
+  assert.equal(result.title, "Scoped Research");
+  assert.equal(result.author, "Article Author");
+  assert.match(result.text, /First evidence paragraph\.\n\nSecond evidence paragraph\./);
+  assert.doesNotMatch(result.text, /PRIVATE-SIDEBAR-TOKEN/);
+});
+
+test("site profile code extraction preserves indentation exactly", () => {
+  const code = "def evaluate(value):\n\tif value:\n        return value\n\treturn 0";
+  const result = parseSiteProfileHtml(`
+    <!doctype html><title>Code fidelity</title>
+    <article><h1>Code fidelity</h1><p>Runnable example.</p><pre><code>${code}</code></pre></article>
+  `, { url: "https://research.example/code-fidelity" });
+
+  assert.equal(result.codeBlocks[0].code, code);
+});
+
+test("site profiles distinguish empty and restricted shells from short real content", () => {
+  const empty = parseSiteProfileHtml("<!doctype html><title>Empty article</title><body></body>", {
+    url: "https://research.example/empty"
+  });
+  assert.equal(empty.text, "");
+  assert.equal(empty.stats.textChars, 0);
+  assert.equal(empty.stats.emptyContent, true);
+  assert.equal(empty.quality_flags.empty_content, true);
+
+  const login = parseSiteProfileHtml(`
+    <!doctype html><title>Sign in</title>
+    <main><h1>Sign in to continue</h1><button>Sign in</button></main>
+  `, { url: "https://research.example/login" });
+  assert.equal(login.text, "");
+  assert.equal(login.stats.authRequired, true);
+  assert.equal(login.quality_flags.auth_required, true);
+
+  const shortReal = parseSiteProfileHtml(`
+    <!doctype html><title>Brief note</title>
+    <article><h1>Brief note</h1><p>One concise but genuine observation.</p></article>
+  `, { url: "https://research.example/brief" });
+  assert.match(shortReal.text, /One concise but genuine observation\./);
+  assert.equal(shortReal.stats.emptyContent, false);
+  assert.equal(shortReal.stats.authRequired, false);
+});
+
+test("site profiles enforce UTF-8 byte budgets for hostile oversized pages", () => {
+  const hugeBody = "研究证据。".repeat(240_000);
+  const hugeCode = `def oversized():\n${"    return evidence\n".repeat(120_000)}`;
+  const result = parseSiteProfileHtml(`
+    <!doctype html><title>Oversized page</title>
+    <article><h1>Oversized page</h1><p>${hugeBody}</p><pre><code>${hugeCode}</code></pre></article>
+  `, { url: "https://research.example/oversized" });
+  const bytes = (value) => new TextEncoder().encode(value).length;
+
+  assert.ok(bytes(result.text) <= 768 * 1024);
+  assert.ok(bytes(result.markdown) <= 768 * 1024);
+  assert.ok(bytes(result.codeBlocks[0].code) <= 64 * 1024);
+  assert.equal(result.stats.truncated, true);
+  assert.equal(result.quality_flags.truncated, true);
+  for (const key of ["bodyTextBytes", "codeBlockBytes", "codeBytes", "textBytes", "markdownBytes"]) {
+    const record = result.stats.truncation[key];
+    assert.ok(record, `missing ${key}`);
+    assert.ok(record.originalBytes >= record.outputBytes, key);
+    assert.ok(record.outputBytes <= record.limitBytes, key);
+  }
+});
+
 test("Hacker News fixture extracts comments and next-page links", async () => {
   const result = parseSiteProfileHtml(await fixture("hacker_news_thread.html"), {
     url: "https://news.ycombinator.com/item?id=401"

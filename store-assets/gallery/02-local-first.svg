@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1270" height="760" viewBox="0 0 1270 760" role="img" aria-labelledby="title desc">
+  <title id="title">QC Smart Reader local-first architecture diagram</title>
+  <desc id="desc">An architecture diagram showing Chrome connected only to a localhost companion service and a local Markdown plus SQLite vault, with model providers optional and consent gated.</desc>
+  <defs>
+    <linearGradient id="background" x1="28" y1="26" x2="1242" y2="734" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#071426"/>
+      <stop offset="1" stop-color="#0B3336"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="58" y1="40" x2="120" y2="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2D84F7"/>
+      <stop offset="1" stop-color="#0BB07B"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#000" flood-opacity=".25"/>
+    </filter>
+  </defs>
+  <rect width="1270" height="760" rx="28" fill="url(#background)"/>
+  <circle cx="1150" cy="75" r="240" fill="#1267E3" opacity=".12"/>
+  <circle cx="1115" cy="720" r="290" fill="#0BB07B" opacity=".1"/>
+  <g>
+    <rect x="54" y="42" width="70" height="70" rx="17" fill="url(#brand)"/>
+    <circle cx="87" cy="75" r="19" fill="none" stroke="#fff" stroke-width="9"/>
+    <path d="m99 87 12 12" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+    <text x="145" y="71" fill="#EAF3FF" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="20" font-weight="750" letter-spacing="2">QC SMART READER</text>
+    <text x="145" y="99" fill="#8FA7BE" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16">Architecture diagram · not a UI screenshot</text>
+  </g>
+  <text x="54" y="189" fill="#FFFFFF" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="48" font-weight="780" letter-spacing="-1.3">Your research stays on your machine.</text>
+  <text x="56" y="230" fill="#AFC2D5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="21">No hosted QC backend. No developer analytics. Model calls are optional and consent-gated.</text>
+
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" filter="url(#shadow)">
+    <g transform="translate(66 330)">
+      <rect width="268" height="230" rx="24" fill="#F9FBFD"/>
+      <rect x="28" y="27" width="212" height="38" rx="10" fill="#E8F1FF"/>
+      <circle cx="49" cy="46" r="8" fill="#1267E3"/>
+      <rect x="65" y="39" width="114" height="7" rx="3.5" fill="#5880AC"/>
+      <rect x="65" y="51" width="74" height="6" rx="3" fill="#9FB2C5"/>
+      <text x="28" y="110" fill="#172738" font-size="27" font-weight="780">Chrome</text>
+      <text x="28" y="141" fill="#607489" font-size="15">Extension side panel</text>
+      <text x="28" y="169" fill="#607489" font-size="15">Uses your signed-in tabs</text>
+      <rect x="28" y="188" width="140" height="25" rx="12.5" fill="#E8F1FF"/>
+      <text x="44" y="206" fill="#1267E3" font-size="12" font-weight="800">USER-INITIATED</text>
+    </g>
+
+    <g transform="translate(500 306)">
+      <rect width="270" height="278" rx="24" fill="#F9FBFD" stroke="#77C4A8" stroke-width="2"/>
+      <circle cx="135" cy="64" r="34" fill="#DFF5EC"/>
+      <path d="M119 63h32M119 75h24M125 51h20" stroke="#087A58" stroke-width="6" stroke-linecap="round"/>
+      <text x="35" y="130" fill="#172738" font-size="27" font-weight="780">Local companion</text>
+      <text x="35" y="162" fill="#607489" font-size="15">127.0.0.1 only</text>
+      <text x="35" y="190" fill="#607489" font-size="15">Capture · jobs · extraction</text>
+      <rect x="35" y="216" width="200" height="31" rx="15.5" fill="#DFF5EC"/>
+      <circle cx="54" cy="232" r="5" fill="#087A58"/>
+      <text x="68" y="237" fill="#087A58" font-size="13" font-weight="800">PAIRING TOKEN</text>
+    </g>
+
+    <g transform="translate(936 330)">
+      <rect width="268" height="230" rx="24" fill="#F9FBFD"/>
+      <ellipse cx="65" cy="50" rx="35" ry="14" fill="#DFF5EC" stroke="#76BCA3" stroke-width="3"/>
+      <path d="M30 50v46c0 8 16 14 35 14s35-6 35-14V50" fill="#E9F7F1" stroke="#76BCA3" stroke-width="3"/>
+      <path d="M30 73c0 8 16 14 35 14s35-6 35-14" fill="none" stroke="#76BCA3" stroke-width="3"/>
+      <text x="122" y="56" fill="#172738" font-size="25" font-weight="780">Local Vault</text>
+      <text x="28" y="141" fill="#607489" font-size="15">Markdown + SQLite</text>
+      <text x="28" y="169" fill="#607489" font-size="15">Raw sources + lineage</text>
+      <rect x="28" y="188" width="155" height="25" rx="12.5" fill="#DFF5EC"/>
+      <text x="45" y="206" fill="#087A58" font-size="12" font-weight="800">USER-CONTROLLED</text>
+    </g>
+  </g>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M350 440h132m-13-13 13 13-13 13" stroke="#6FA6D8" stroke-width="4"/>
+    <path d="M788 440h130m-13-13 13 13-13 13" stroke="#68B79E" stroke-width="4"/>
+  </g>
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" font-weight="750">
+    <rect x="370" y="398" width="91" height="26" rx="13" fill="#173D61"/>
+    <text x="389" y="416" fill="#AFCFF0">localhost</text>
+    <rect x="808" y="398" width="91" height="26" rx="13" fill="#164C43"/>
+    <text x="827" y="416" fill="#B9E3D5">filesystem</text>
+  </g>
+
+  <g transform="translate(388 633)" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+    <rect width="495" height="72" rx="18" fill="#FFFFFF" opacity=".07" stroke="#7190A8"/>
+    <text x="24" y="31" fill="#DCEAF7" font-size="15" font-weight="800">OPTIONAL MODEL CALL</text>
+    <text x="24" y="55" fill="#9FB5C8" font-size="14">Codex CLI or your API endpoint · only after explicit consent</text>
+  </g>
+  <path d="M635 607v26" stroke="#90A9BC" stroke-width="3" stroke-dasharray="6 7"/>
+</svg>

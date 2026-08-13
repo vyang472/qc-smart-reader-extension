@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import threading
 import unittest
@@ -70,7 +71,66 @@ if output_path:
         handle.write(answer)
 else:
     sys.stdout.write(answer)
+
+if mode == "fail_with_output":
+    sys.stderr.write("fake codex: failed after writing a partial answer\\n")
+    raise SystemExit(4)
 '''
+
+
+class CodexResponsesContractStub(server.BaseHTTPRequestHandler):
+    """Minimal local Responses API stub for inspecting a real Codex request."""
+
+    requests: list[dict] = []
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return None
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
+        try:
+            length = int(self.headers.get("content-length") or "0")
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            self.send_error(400, "invalid JSON")
+            return
+        type(self).requests.append({"path": self.path, "payload": payload})
+
+        response_id = "resp_qc_contract"
+        message = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_qc_contract",
+                "content": [{"type": "output_text", "text": "contract ok"}],
+            },
+        }
+        events = [
+            {"type": "response.created", "response": {"id": response_id}},
+            message,
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "usage": {
+                        "input_tokens": 0,
+                        "input_tokens_details": None,
+                        "output_tokens": 0,
+                        "output_tokens_details": None,
+                        "total_tokens": 0,
+                    },
+                },
+            },
+        ]
+        body = "".join(
+            f"event: {event['type']}\ndata: {json.dumps(event, separators=(',', ':'))}\n\n"
+            for event in events
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def structured_answer(source_id: str, chunk_id: str) -> str:
@@ -187,9 +247,13 @@ class CodexProviderCase(unittest.TestCase):
             method="POST",
         )["settings"]
         self.assertEqual(settings["provider"], "codex")
+        self.assertEqual(settings["model"], "")
+        self.assertEqual(settings["base_url"], "")
         self.assertFalse(settings["has_api_key"])
 
         stored = self.store.read_model_settings(include_secret=True)
+        self.assertEqual(stored["model"], "")
+        self.assertEqual(stored["base_url"], "")
         self.assertTrue(
             self.store.model_settings_ready(stored),
             "codex provider should be considered ready without an API key",
@@ -216,8 +280,115 @@ class CodexProviderCase(unittest.TestCase):
         runs = self.logged_runs()
         self.assertEqual(len(runs), 1)
         self.assertIn("--output-last-message", runs[0]["argv"])
+        self.assertIn("--ephemeral", runs[0]["argv"])
+        self.assertNotIn("--sandbox", runs[0]["argv"])
+        self.assertIn("--strict-config", runs[0]["argv"])
+        self.assertIn("--ignore-user-config", runs[0]["argv"])
+        self.assertIn("--ignore-rules", runs[0]["argv"])
+        disabled_features = [
+            runs[0]["argv"][index + 1]
+            for index, item in enumerate(runs[0]["argv"][:-1])
+            if item == "--disable"
+        ]
+        self.assertIn("shell_tool", disabled_features)
+        self.assertIn("multi_agent", disabled_features)
+        self.assertNotIn("web_search", disabled_features)
+        config_values = [
+            runs[0]["argv"][index + 1]
+            for index, item in enumerate(runs[0]["argv"][:-1])
+            if item in {"-c", "--config"}
+        ]
+        self.assertIn('shell_environment_policy.inherit="none"', config_values)
+        self.assertIn('web_search="disabled"', config_values)
+        self.assertIn("agents.enabled=false", config_values)
+        self.assertIn('default_permissions="qc_document"', config_values)
+        self.assertIn(
+            'permissions.qc_document.filesystem={":minimal"="read",":workspace_roots"={"."="read"}}',
+            config_values,
+        )
+        self.assertNotIn("--model", runs[0]["argv"])
         self.assertEqual(runs[0]["argv"][-1], "-")
         self.assertGreater(runs[0]["prompt_chars"], 0)
+
+    def test_codex_custom_security_options_are_not_duplicated(self) -> None:
+        source_id, chunk_id = self.capture_source("https://example.com/codex-custom-security")
+        fake = self.write_fake_codex(structured_answer(source_id, chunk_id))
+        custom_command = [
+            str(fake),
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--disable",
+            "shell_tool",
+            "--disable",
+            "multi_agent",
+            "--config",
+            'shell_environment_policy.inherit="none"',
+            "--config",
+            'web_search="disabled"',
+            "--config",
+            "agents.enabled=false",
+        ]
+        self.request(
+            "/v1/model-settings",
+            {"provider": "codex", "codex_command": custom_command, "model": ""},
+            method="POST",
+        )
+        self.request(f"/v1/sources/{source_id}/extract-knowledge", {"mode": "provider"}, method="POST")
+
+        argv = self.logged_runs()[0]["argv"]
+        self.assertEqual(argv.count("--ignore-user-config"), 1)
+        self.assertEqual(argv.count("--ignore-rules"), 1)
+        self.assertEqual(argv.count("shell_tool"), 1)
+        self.assertEqual(argv.count("multi_agent"), 1)
+        self.assertEqual(argv.count('web_search="disabled"'), 1)
+        self.assertEqual(argv.count('shell_environment_policy.inherit="none"'), 1)
+        self.assertEqual(argv.count("agents.enabled=false"), 1)
+
+    def test_codex_rejects_or_overrides_unsafe_custom_tool_options(self) -> None:
+        source_id, chunk_id = self.capture_source("https://example.com/codex-unsafe-options")
+        fake = self.write_fake_codex(structured_answer(source_id, chunk_id))
+
+        for unsafe_option, expected in (
+            (["--sandbox", "danger-full-access"], "cannot override the isolated document permission profile"),
+            (["--search"], "safe document analysis"),
+            (["--enable", "shell_tool"], "cannot enable shell_tool"),
+            (["--enable=multi_agent"], "safe document analysis"),
+            (["--cd", str(self.data_dir)], "safe document analysis"),
+            (["--config", "tools.view_image=true"], "cannot override the isolated document permission profile"),
+            (["--config=default_permissions=untrusted"], "cannot override the isolated document permission profile"),
+        ):
+            with self.subTest(option=unsafe_option):
+                self.request(
+                    "/v1/model-settings",
+                    {"provider": "codex", "codex_command": [str(fake), *unsafe_option], "model": ""},
+                    method="POST",
+                )
+                with self.assertRaisesRegex(AssertionError, "HTTP 400"):
+                    self.request(
+                        f"/v1/sources/{source_id}/extract-knowledge",
+                        {"mode": "provider"},
+                        method="POST",
+                    )
+
+        self.request(
+            "/v1/model-settings",
+            {
+                "provider": "codex",
+                "codex_command": [
+                    str(fake),
+                    "--config",
+                    "agents.enabled=true",
+                    "--config",
+                    'web_search="live"',
+                ],
+                "model": "",
+            },
+            method="POST",
+        )
+        self.request(f"/v1/sources/{source_id}/extract-knowledge", {"mode": "provider"}, method="POST")
+        argv = self.logged_runs()[-1]["argv"]
+        self.assertGreater(argv.index("agents.enabled=false"), argv.index("agents.enabled=true"))
+        self.assertGreater(argv.index('web_search="disabled"'), argv.index('web_search="live"'))
 
     def test_codex_passes_model_flag_only_when_a_model_is_configured(self) -> None:
         source_id, chunk_id = self.capture_source()
@@ -265,6 +436,21 @@ class CodexProviderCase(unittest.TestCase):
         self.assertIn("codex CLI exited with code 3", message)
         self.assertIn("something went wrong", message)
 
+    def test_codex_nonzero_exit_is_failure_even_if_a_partial_output_was_written(self) -> None:
+        source_id, chunk_id = self.capture_source()
+        fake = self.write_fake_codex(structured_answer(source_id, chunk_id), mode="fail_with_output")
+        self.request(
+            "/v1/model-settings",
+            {"provider": "codex", "codex_command": [str(fake)], "model": "", "base_url": ""},
+            method="POST",
+        )
+
+        with self.assertRaises(AssertionError) as caught:
+            self.request(f"/v1/sources/{source_id}/extract-knowledge", {"mode": "provider"}, method="POST")
+        message = str(caught.exception)
+        self.assertIn("codex CLI exited with code 4", message)
+        self.assertIn("failed after writing a partial answer", message)
+
     def test_missing_codex_binary_is_reported_and_auto_mode_falls_back_to_mock(self) -> None:
         source_id, _ = self.capture_source()
         missing = self.data_dir / "no-such-codex"
@@ -291,6 +477,124 @@ class CodexProviderCase(unittest.TestCase):
         with self.assertRaises(AssertionError) as timeout:
             self.request("/v1/model-settings", {"provider": "codex", "codex_timeout_seconds": 5}, method="POST")
         self.assertIn("codex_timeout_seconds must be between 10 and 3600", str(timeout.exception))
+
+
+class RealCodexContractCase(unittest.TestCase):
+    def test_real_codex_cli_uses_restricted_filesystem_and_no_shell_or_delegation_tools(self) -> None:
+        codex = shutil.which("codex")
+        if not codex:
+            self.skipTest("codex CLI is not installed")
+        completed = server.subprocess.run(
+            [codex, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        match = server.re.search(r"codex-cli\s+(\d+)\.(\d+)\.(\d+)", completed.stdout)
+        if not match:
+            self.skipTest("codex CLI version could not be determined")
+
+        CodexResponsesContractStub.requests = []
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), CodexResponsesContractStub)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = httpd.server_address[1]
+            settings = {
+                "provider": "codex",
+                "codex_command": [
+                    codex,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--disable",
+                    "enable_request_compression",
+                    "-c",
+                    "model_provider=qc_contract",
+                    "-c",
+                    (
+                        "model_providers.qc_contract="
+                        f"{{name='QC contract stub',base_url='http://127.0.0.1:{port}/v1',"
+                        "wire_api='responses'}"
+                    ),
+                ],
+                "model": "gpt-5-codex",
+                "codex_timeout_seconds": 30,
+            }
+            with tempfile.TemporaryDirectory(prefix="qc-real-codex-contract-") as temp_dir:
+                store = server.Store(Path(temp_dir))
+                answer, _raw = store.call_codex_cli(settings, "Return the fixed stub response.", None)
+
+            self.assertEqual(answer, "contract ok")
+            self.assertEqual(len(CodexResponsesContractStub.requests), 1)
+            request = CodexResponsesContractStub.requests[0]
+            self.assertEqual(request["path"], "/v1/responses")
+
+            tools = request["payload"].get("tools") or []
+            names: set[str] = set()
+
+            def collect_names(items: list) -> None:
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or "").strip().lower()
+                    if name:
+                        names.add(name)
+                    children = item.get("tools")
+                    if isinstance(children, list):
+                        collect_names(children)
+
+            collect_names(tools)
+            for item in request["payload"].get("input") or []:
+                if not isinstance(item, dict) or item.get("type") != "additional_tools":
+                    continue
+                names.update(str(name).strip().lower() for name in item.get("tool_names") or [])
+            forbidden_exact = {
+                "exec",
+                "exec_command",
+                "unified_exec",
+                "write_stdin",
+                "shell",
+                "shell_command",
+                "spawn_agent",
+                "multi_agent",
+                "multi_agent_v1",
+                "multi_agent_v2",
+            }
+            self.assertTrue(
+                forbidden_exact.isdisjoint(names),
+                f"unsafe tools advertised by real Codex CLI: {sorted(forbidden_exact & names)}",
+            )
+            self.assertFalse(
+                any("multi_agent" in name or name.startswith("spawn_agent") for name in names),
+                f"delegation tools advertised by real Codex CLI: {sorted(names)}",
+            )
+
+            request_text: list[str] = []
+
+            def collect_text(value: object) -> None:
+                if isinstance(value, str):
+                    request_text.append(value)
+                elif isinstance(value, dict):
+                    for child in value.values():
+                        collect_text(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        collect_text(child)
+
+            collect_text(request["payload"])
+            combined_text = "\n".join(request_text)
+            self.assertIn('<permission_profile type="managed">', combined_text)
+            self.assertIn('<file_system type="restricted">', combined_text)
+            self.assertNotIn(
+                str(Path.home()),
+                combined_text,
+                "real Codex request exposed the caller home outside the isolated scratch profile",
+            )
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

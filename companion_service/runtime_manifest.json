@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "canonical_line": "path\\0size\\0sha256\\n",
+  "distributions": {
+    "pypdf": {
+      "version": "6.16.0",
+      "import_name": "pypdf",
+      "import_path": "pypdf/__init__.py",
+      "runtime_roots": [
+        {
+          "path": "pypdf",
+          "kind": "directory"
+        }
+      ],
+      "file_count": 57,
+      "aggregate_sha256": "c494c03423bc7b166096e2f4a84ce66d3da5491330111fd63be8a82a2a52e19f"
+    },
+    "typing-extensions": {
+      "version": "4.15.0",
+      "import_name": "typing_extensions",
+      "import_path": "typing_extensions.py",
+      "runtime_roots": [
+        {
+          "path": "typing_extensions.py",
+          "kind": "file"
+        }
+      ],
+      "file_count": 1,
+      "aggregate_sha256": "282f9e65668b28b7b3511e22556ef0a5815847042db7c6d96f8b31f4915cd98d"
+    }
+  }
+}

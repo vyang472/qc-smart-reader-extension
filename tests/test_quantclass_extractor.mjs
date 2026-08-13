@@ -171,3 +171,43 @@ test("QuantClass/BBS multi-page fixtures preserve relative links and continuatio
   assert.equal(page2.images[0].src, "https://bbs.quantclass.cn/uploads/multipage-page2.png");
   assert.equal(page2.attachments[0].href, "https://bbs.quantclass.cn/files/multipage-page2.xlsx");
 });
+
+test("QuantClass/BBS code extraction preserves indentation exactly", () => {
+  const code = "def signal(frame):\n\tif frame.empty:\n        return None\n\treturn frame.iloc[-1]";
+  const result = parseQuantclassBbsHtml(`
+    <!doctype html><title>Code fidelity</title>
+    <main class="thread">
+      <article class="post" data-floor="1">
+        <p>Code fidelity post with enough text for structured extraction.</p>
+        <pre><code class="language-python">${code}</code></pre>
+      </article>
+    </main>
+  `, { url: "https://bbs.quantclass.cn/thread/code-fidelity" });
+
+  assert.equal(result.blocks[0].codeBlocks[0], code);
+  assert.equal(result.blocks[0].codeBlockDetails[0].code, code);
+});
+
+test("QuantClass/BBS extraction enforces UTF-8 byte budgets", () => {
+  const hugeBody = "论坛证据。".repeat(240_000);
+  const hugeCode = `def oversized():\n${"    return evidence\n".repeat(120_000)}`;
+  const result = parseQuantclassBbsHtml(`
+    <!doctype html><title>Oversized thread</title>
+    <main class="thread">
+      <article class="post" data-floor="1"><p>${hugeBody}</p><pre><code>${hugeCode}</code></pre></article>
+    </main>
+  `, { url: "https://bbs.quantclass.cn/thread/oversized" });
+  const bytes = (value) => new TextEncoder().encode(value).length;
+
+  assert.ok(bytes(result.text) <= 768 * 1024);
+  assert.ok(bytes(result.markdown) <= 768 * 1024);
+  assert.ok(bytes(result.blocks[0].text) <= 64 * 1024);
+  assert.ok(bytes(result.blocks[0].codeBlocks[0]) <= 64 * 1024);
+  assert.equal(result.stats.truncated, true);
+  for (const key of ["bodyTextBytes", "blockTextBytes", "codeBlockBytes", "codeBytes", "textBytes", "markdownBytes"]) {
+    const record = result.stats.truncation[key];
+    assert.ok(record, `missing ${key}`);
+    assert.ok(record.originalBytes >= record.outputBytes, key);
+    assert.ok(record.outputBytes <= record.limitBytes, key);
+  }
+});

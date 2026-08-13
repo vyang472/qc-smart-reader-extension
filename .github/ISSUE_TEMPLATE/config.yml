@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup and workflow questions
+    url: https://github.com/vyang472/qc-smart-reader-extension/discussions
+    about: Ask for help or discuss an idea before filing an actionable issue.
+  - name: Private security report
+    url: https://github.com/vyang472/qc-smart-reader-extension/security/advisories/new
+    about: Report vulnerabilities and suspected private-data exposure confidentially.

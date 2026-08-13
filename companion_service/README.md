@@ -15,6 +15,10 @@ Default URL:
 http://127.0.0.1:37621
 ```
 
+The CLI refuses a non-loopback `--host` unless `--allow-non-loopback` is also
+provided. The supported extension workflow stays on loopback; network exposure
+is an explicit operator-only mode and still requires the pairing token.
+
 Default data location:
 
 ```text
@@ -27,16 +31,25 @@ Override the data directory:
 python3 companion_service/server.py --data-dir "/path/to/my-vault-data"
 ```
 
+Local PDF imports are allowed from Desktop, Documents, Downloads, and the
+configured data directory. Add another trusted folder explicitly when needed:
+
+```bash
+python3 companion_service/server.py --allow-pdf-dir "/Volumes/Research/Papers"
+```
+
+`--allow-pdf-dir` may be repeated.
+
 ## Test
 
-Run the offline integration tests from the extension root:
+Run the full validation suite from the extension root:
 
 ```bash
 cd qc-smart-reader-extension
-python3 -m unittest discover -s tests -v
+bash scripts/test_all.sh
 ```
 
-The tests start a temporary local service and cover source capture/Vault writes/search, job lifecycle controls, and basic text-layer PDF ingest.
+The suite checks Python, JavaScript, and shell syntax; runs the Python and Node test suites; loads the real extension in Chromium; exercises launcher failure/reuse cases; and finishes with a temporary-Vault evidence-chain smoke test.
 
 ## Endpoints
 
@@ -175,7 +188,7 @@ Current task-runner scope:
 - Item attempts, status, source id, errors, started time, and completed time are persisted.
 - Recovering stale `running` items and retrying failed items are supported.
 - Pause, resume, cancel, and clear completed are supported.
-- Service-owned `claim-next`, lease heartbeat, richer failure categories including pagination and missing attachments, extension-side ETA/last-heartbeat progress, configurable 1-3 extension concurrency, multi-page pagination checkpoints in job item `result_json` plus `item_checkpoint` events, `quality_gate_counts` for success-but-needs-review captures, and service-restart recovery fixtures for 100 URL jobs are supported; browser-level smoke recovery fixtures remain future work.
+- Service-owned `claim-next`, lease heartbeat, richer failure categories including pagination and missing attachments, extension-side ETA/last-heartbeat progress, configurable 1-3 extension concurrency, multi-page pagination checkpoints in job item `result_json` plus `item_checkpoint` events, `quality_gate_counts` for success-but-needs-review captures, and service-restart recovery for 100 URL jobs are covered by unit and real-extension Chromium tests.
 
 ## PDF Ingest
 
@@ -197,13 +210,13 @@ Remote PDF URL:
 }
 ```
 
-The service extracts text with the bundled Python worker when available, stores the source in SQLite, writes Markdown into the Vault, creates page-scoped chunks with `page_start` and `page_end`, and copies the original PDF to `vault/原始资料/papers/`.
+The service extracts text in a bounded subprocess using its own hash-verified companion virtualenv, stores the source in SQLite, writes Markdown into the Vault, creates page-scoped chunks with `page_start` and `page_end`, and preserves the immutable original PDF under `vault/原始资料/papers/`. It never borrows Python packages from Codex or another ambient runtime. Local files must resolve inside an allowed import folder (including after following symbolic links) and pass PDF extension/content checks. Remote imports accept only public `http`/`https` targets, re-check every redirect, reject non-public network addresses, and cap downloads at 25 MiB. On macOS, low-text/image-only files automatically fall back to the system Swift + PDFKit/Vision OCR worker unless the request includes `"ocr": false`. OCR only replaces a page when it recovers more text, and failures fall back to the existing text layer without aborting the import.
 
 Current parser scope:
 
-- Text-layer PDFs are supported.
-- Low-text PDFs are marked with `pdf.low_text: true`.
-- Scanned PDFs, two-column cleanup, table/figure extraction, formula extraction, and OCR are future work.
+- Text-layer PDFs and macOS Vision OCR for scanned/low-text PDFs are supported.
+- The response reports `pdf.low_text`, `pdf.profile`, and `pdf.ocr` status metadata.
+- Two-column cleanup, table/figure extraction, and formula extraction remain out of scope.
 
 ## YouTube Transcript Ingest
 
@@ -220,7 +233,16 @@ Manual transcript text or timestamped segments can be ingested without audio tra
 }
 ```
 
-The service stores the transcript as a `video/youtube` source, chunks by timestamp, and preserves timestamp metadata for citations. Audio transcription is intentionally out of scope for this version.
+When `segments` and transcript text are both omitted, an 11-character public YouTube URL triggers automatic subtitle discovery through an existing `yt-dlp` on `PATH`. The selected subtitle URL is downloaded through the same public-network-only, redirect-checked transport used for remote PDFs:
+
+```json
+{
+  "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+  "language": "zh-Hans,en"
+}
+```
+
+Manual subtitle tracks are preferred over automatic captions, then the requested language order falls back through Chinese and English. The command ignores user `yt-dlp` configuration and explicitly disables cookie/browser-cookie loading. The service stores the transcript as a `video/youtube` source, chunks by timestamp, and preserves timestamp metadata for citations. Private/login-only captions and audio transcription remain out of scope.
 
 ## Deliverables
 
@@ -293,7 +315,7 @@ Write reviewed or model-extracted records:
 }
 ```
 
-The service validates source/chunk/quote citations. Claims with valid evidence are stored as `extracted`; claims without valid evidence are stored as `pending_validation`. Entity pages are written under `wiki/entities/`, and structured import summaries are written under `wiki/analyses/`.
+The service validates source/chunk/quote citations. Claims with valid evidence are stored as `extracted`; claims without valid evidence are stored as `pending_validation`. Repeating extraction for the same immutable source reuses equivalent claims, evidence, relations, assumptions, risks, strategy ideas, and tasks while preserving manual statuses. Entity pages are written under `wiki/entities/`, and each source has one stable, atomically replaced structured summary under `wiki/analyses/`.
 
 Review a claim after checking evidence:
 

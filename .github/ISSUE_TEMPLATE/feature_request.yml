@@ -1,0 +1,67 @@
+name: Feature request
+description: Propose a concrete research workflow improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Strong proposals start with the user's workflow and the evidence or trust problem—not only a UI or technology choice. Discuss large schema, provider, platform, or dependency changes in GitHub Discussions first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Who is blocked, what are they trying to verify, and what happens today?
+      placeholder: When I review..., I cannot..., which means...
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Example workflow
+      description: Walk through one realistic input and desired outcome. Use public or synthetic material only.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed outcome
+      description: Describe observable behavior and acceptance criteria. An implementation idea is optional.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: How do you handle this today, and why is that insufficient?
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Trust or privacy impact
+      options:
+        - None expected
+        - Changes local data or schema
+        - Sends data to a model or external service
+        - Adds browser or filesystem access
+        - Changes installation or update behavior
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: How could this be verified?
+      description: Suggest a public fixture, test, or measurable acceptance check.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Scope check
+      options:
+        - label: I searched the roadmap, issues, and Discussions for this request.
+          required: true
+        - label: This request does not rely on bypassing authentication, paywalls, private-caption controls, or provider terms.
+          required: true
+        - label: I have not included credentials or private research content.
+          required: true

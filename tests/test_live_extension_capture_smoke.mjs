@@ -1,40 +1,25 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readdirSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { extensionServiceWorker, launchPersistentChromium } from "./browser_runtime.mjs";
 
-const require = createRequire(import.meta.url);
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
-function loadPlaywright() {
-  try {
-    return require("playwright");
-  } catch {
-    // Continue to the bundled Codex runtime path used in this desktop environment.
-  }
-  const pnpmRoot = join(
-    homedir(),
-    ".cache",
-    "codex-runtimes",
-    "codex-primary-runtime",
-    "dependencies",
-    "node",
-    "node_modules",
-    ".pnpm"
-  );
-  try {
-    const entry = readdirSync(pnpmRoot).find((name) => name.startsWith("playwright@"));
-    if (!entry) return null;
-    return require(join(pnpmRoot, entry, "node_modules", "playwright"));
-  } catch {
-    return null;
-  }
+function extensionLaunchOptions(hostResolverRule) {
+  return {
+    headless: true,
+    channel: "chromium",
+    args: [
+      `--host-resolver-rules=${hostResolverRule}`,
+      `--disable-extensions-except=${ROOT}`,
+      `--load-extension=${ROOT}`
+    ]
+  };
 }
 
 function freePort() {
@@ -284,13 +269,118 @@ function terminate(child) {
   });
 }
 
-test("live extension batch capture smoke saves a QuantClass fixture through companion service", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
+test("live extension routes queued selections to the matching open side-panel window", async (t) => {
+  const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-selection-chrome-"));
+  let browserContext;
+  try {
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP selection-fixture.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
+    const extensionId = new URL(worker.url()).host;
+    assert.ok(extensionId, "extension id was not available");
+    const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
+
+    await worker.evaluate(async () => {
+      await chrome.storage.local.set({
+        settings: {
+          serviceUrl: "http://127.0.0.1:9",
+          pairingToken: "",
+          projectId: "default",
+          provider: "openai",
+          baseUrl: "",
+          model: ""
+        }
+      });
+      await chrome.storage.session.remove(["pendingSelection", "pendingSelections"]);
+    });
+
+    const sidepanelA = await browserContext.newPage();
+    await sidepanelA.goto(sidepanelUrl);
+    const sidepanelBPromise = browserContext.waitForEvent("page");
+    await sidepanelA.evaluate((url) => chrome.windows.create({ url, type: "normal" }), sidepanelUrl);
+    const sidepanelB = await sidepanelBPromise;
+    await sidepanelB.waitForLoadState("domcontentloaded");
+
+    const panelA = await sidepanelA.evaluate(async () => {
+      const tab = await chrome.tabs.getCurrent();
+      const window = await chrome.windows.getCurrent();
+      return { tabId: tab?.id, windowId: window?.id };
+    });
+    const panelB = await sidepanelB.evaluate(async () => {
+      const tab = await chrome.tabs.getCurrent();
+      const window = await chrome.windows.getCurrent();
+      return { tabId: tab?.id, windowId: window?.id };
+    });
+    assert.notEqual(panelA.windowId, panelB.windowId, "fixture did not create two browser windows");
+
+    const selections = [
+      {
+        id: "live-selection-a",
+        text: "Selected only for window A",
+        title: "Selection A",
+        url: "https://selection-fixture.localhost/a",
+        tabId: panelA.tabId,
+        windowId: panelA.windowId,
+        projectId: "default",
+        capturedAt: "2026-01-01T00:00:00.000Z"
+      },
+      {
+        id: "live-selection-b",
+        text: "Selected only for window B",
+        title: "Selection B",
+        url: "https://selection-fixture.localhost/b",
+        tabId: panelB.tabId,
+        windowId: panelB.windowId,
+        projectId: "default",
+        capturedAt: "2026-01-01T00:00:01.000Z"
+      }
+    ];
+    await worker.evaluate(async (items) => {
+      await chrome.storage.session.set({ pendingSelections: items });
+    }, selections);
+
+    for (const selection of selections) {
+      await worker.evaluate(async (item) => {
+        try {
+          await chrome.runtime.sendMessage({
+            type: "qc-smart-reader-selection-queued",
+            selectionId: item.id,
+            tabId: item.tabId,
+            windowId: item.windowId
+          });
+        } catch (_error) {
+          // Delivery is asserted in the side-panel DOM below.
+        }
+      }, selection);
+    }
+
+    // First-run onboarding may intentionally keep the capture panel hidden until
+    // the local service is paired. Selection routing must still hydrate the
+    // project-bound source without forcing users away from onboarding.
+    await sidepanelA.waitForFunction(() => document.querySelector("#sourceTitle")?.textContent === "Selection A");
+    await sidepanelB.waitForFunction(() => document.querySelector("#sourceTitle")?.textContent === "Selection B");
+    assert.equal(await sidepanelA.locator("#sourceUrl").textContent(), "https://selection-fixture.localhost/a");
+    assert.equal(await sidepanelB.locator("#sourceUrl").textContent(), "https://selection-fixture.localhost/b");
+    assert.notEqual(await sidepanelA.locator("#sourceTitle").textContent(), "Selection B");
+    assert.notEqual(await sidepanelB.locator("#sourceTitle").textContent(), "Selection A");
+    const remaining = await worker.evaluate(async () => {
+      const { pendingSelections = [] } = await chrome.storage.session.get("pendingSelections");
+      return pendingSelections;
+    });
+    assert.deepEqual(remaining, [], "live side panels did not atomically consume both selections");
+  } finally {
+    if (browserContext) await browserContext.close();
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test("live extension batch capture smoke saves a QuantClass fixture through companion service", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
@@ -322,30 +412,15 @@ test("live extension batch capture smoke saves a QuantClass fixture through comp
     const fixturePort = fixture.port;
     const fixtureUrl = `http://bbs.quantclass.localhost:${fixturePort}/thread/87030`;
 
-    try {
-      browserContext = await playwright.chromium.launchPersistentContext(userDataDir, {
-        headless: true,
-        channel: "chromium",
-        args: [
-          "--host-resolver-rules=MAP bbs.quantclass.localhost 127.0.0.1",
-          `--disable-extensions-except=${ROOT}`,
-          `--load-extension=${ROOT}`
-        ]
-      });
-    } catch (error) {
-      t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-      return;
-    }
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
-    let worker = browserContext.serviceWorkers()[0];
-    try {
-      if (!worker) {
-        worker = await browserContext.waitForEvent("serviceworker", { timeout: 10000 });
-      }
-    } catch (error) {
-      t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-      return;
-    }
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
 
@@ -449,12 +524,6 @@ test("live extension batch capture smoke saves a QuantClass fixture through comp
 });
 
 test("live extension reads current page and renders structured knowledge records", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
@@ -490,30 +559,15 @@ test("live extension reads current page and renders structured knowledge records
     fixtureServer = fixture.server;
     const fixtureUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/knowledge-ui`;
 
-    try {
-      browserContext = await playwright.chromium.launchPersistentContext(userDataDir, {
-        headless: true,
-        channel: "chromium",
-        args: [
-          "--host-resolver-rules=MAP bbs.quantclass.localhost 127.0.0.1",
-          `--disable-extensions-except=${ROOT}`,
-          `--load-extension=${ROOT}`
-        ]
-      });
-    } catch (error) {
-      t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-      return;
-    }
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
-    let worker = browserContext.serviceWorkers()[0];
-    try {
-      if (!worker) {
-        worker = await browserContext.waitForEvent("serviceworker", { timeout: 10000 });
-      }
-    } catch (error) {
-      t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-      return;
-    }
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
 
@@ -586,12 +640,6 @@ test("live extension reads current page and renders structured knowledge records
 });
 
 test("live extension current page uses browser site profile bundle for GitHub issue threads", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
@@ -622,30 +670,15 @@ test("live extension current page uses browser site profile bundle for GitHub is
     fixtureServer = fixture.server;
     const fixtureUrl = `http://github.com.localhost:${fixture.port}/org/repo/issues/34`;
 
-    try {
-      browserContext = await playwright.chromium.launchPersistentContext(userDataDir, {
-        headless: true,
-        channel: "chromium",
-        args: [
-          "--host-resolver-rules=MAP github.com.localhost 127.0.0.1",
-          `--disable-extensions-except=${ROOT}`,
-          `--load-extension=${ROOT}`
-        ]
-      });
-    } catch (error) {
-      t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-      return;
-    }
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP github.com.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
-    let worker = browserContext.serviceWorkers()[0];
-    try {
-      if (!worker) {
-        worker = await browserContext.waitForEvent("serviceworker", { timeout: 10000 });
-      }
-    } catch (error) {
-      t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-      return;
-    }
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
 
@@ -713,12 +746,6 @@ test("live extension current page uses browser site profile bundle for GitHub is
 });
 
 test("live extension service-owned batch emits heartbeat while a background tab is slow", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
@@ -752,30 +779,15 @@ test("live extension service-owned batch emits heartbeat while a background tab 
     fixtureServer = fixture.server;
     const fixtureUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/heartbeat`;
 
-    try {
-      browserContext = await playwright.chromium.launchPersistentContext(userDataDir, {
-        headless: true,
-        channel: "chromium",
-        args: [
-          "--host-resolver-rules=MAP bbs.quantclass.localhost 127.0.0.1",
-          `--disable-extensions-except=${ROOT}`,
-          `--load-extension=${ROOT}`
-        ]
-      });
-    } catch (error) {
-      t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-      return;
-    }
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
-    let worker = browserContext.serviceWorkers()[0];
-    try {
-      if (!worker) {
-        worker = await browserContext.waitForEvent("serviceworker", { timeout: 10000 });
-      }
-    } catch (error) {
-      t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-      return;
-    }
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
 
@@ -821,12 +833,6 @@ test("live extension service-owned batch emits heartbeat while a background tab 
 });
 
 test("live extension service-owned batch pauses and resumes through companion job state", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
@@ -867,30 +873,15 @@ test("live extension service-owned batch pauses and resumes through companion jo
     const firstUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/pause-a`;
     const secondUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/pause-b`;
 
-    try {
-      browserContext = await playwright.chromium.launchPersistentContext(userDataDir, {
-        headless: true,
-        channel: "chromium",
-        args: [
-          "--host-resolver-rules=MAP bbs.quantclass.localhost 127.0.0.1",
-          `--disable-extensions-except=${ROOT}`,
-          `--load-extension=${ROOT}`
-        ]
-      });
-    } catch (error) {
-      t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-      return;
-    }
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
-    let worker = browserContext.serviceWorkers()[0];
-    try {
-      if (!worker) {
-        worker = await browserContext.waitForEvent("serviceworker", { timeout: 10000 });
-      }
-    } catch (error) {
-      t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-      return;
-    }
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
 
@@ -949,12 +940,6 @@ test("live extension service-owned batch pauses and resumes through companion jo
 });
 
 test("live extension service-owned batch cancel keeps unclaimed items canceled", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
@@ -995,30 +980,15 @@ test("live extension service-owned batch cancel keeps unclaimed items canceled",
     const firstUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/cancel-a`;
     const secondUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/cancel-b`;
 
-    try {
-      browserContext = await playwright.chromium.launchPersistentContext(userDataDir, {
-        headless: true,
-        channel: "chromium",
-        args: [
-          "--host-resolver-rules=MAP bbs.quantclass.localhost 127.0.0.1",
-          `--disable-extensions-except=${ROOT}`,
-          `--load-extension=${ROOT}`
-        ]
-      });
-    } catch (error) {
-      t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-      return;
-    }
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
-    let worker = browserContext.serviceWorkers()[0];
-    try {
-      if (!worker) {
-        worker = await browserContext.waitForEvent("serviceworker", { timeout: 10000 });
-      }
-    } catch (error) {
-      t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-      return;
-    }
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
 
@@ -1046,6 +1016,7 @@ test("live extension service-owned batch cancel keeps unclaimed items canceled",
     await sidepanel.locator("#processBatchBtn").click();
 
     const running = await waitForBatchJobItem(serviceUrl, token, firstUrl, ({ item }) => item.status === "running");
+    sidepanel.once("dialog", (dialog) => dialog.accept());
     await sidepanel.locator("#cancelBatchBtn").click();
     await waitForJobEvent(serviceUrl, token, running.job.id, "job_canceled");
     await waitForBatchJobItem(serviceUrl, token, firstUrl, ({ job, item }) => job.status === "canceled" && item.status === "canceled");
@@ -1075,12 +1046,6 @@ test("live extension service-owned batch cancel keeps unclaimed items canceled",
 });
 
 test("live extension restores and resumes a service-owned batch after Chromium closes mid-job", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const restartedUserDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-restart-"));
@@ -1124,32 +1089,16 @@ test("live extension restores and resumes a service-owned batch after Chromium c
     const secondUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/restart-b`;
 
     const launchExtension = async (profileDir) => {
-      try {
-        return await playwright.chromium.launchPersistentContext(profileDir, {
-          headless: true,
-          channel: "chromium",
-          args: [
-            "--host-resolver-rules=MAP bbs.quantclass.localhost 127.0.0.1",
-            `--disable-extensions-except=${ROOT}`,
-            `--load-extension=${ROOT}`
-          ]
-        });
-      } catch (error) {
-        t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-        return null;
-      }
+      return launchPersistentChromium(
+        t,
+        profileDir,
+        extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+      );
     };
 
     const openConfiguredSidepanel = async (context) => {
-      let worker = context.serviceWorkers()[0];
-      try {
-        if (!worker) {
-          worker = await context.waitForEvent("serviceworker", { timeout: 10000 });
-        }
-      } catch (error) {
-        t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-        return null;
-      }
+      const worker = await extensionServiceWorker(t, context);
+      if (!worker) return null;
       const extensionId = new URL(worker.url()).host;
       assert.ok(extensionId, "extension id was not available");
       const sidepanel = await context.newPage();
@@ -1253,12 +1202,6 @@ test("live extension restores and resumes a service-owned batch after Chromium c
 });
 
 test("live extension batch capture smoke preserves QuantClass multi-page continuation", async (t) => {
-  const playwright = loadPlaywright();
-  if (!playwright?.chromium) {
-    t.skip("Playwright is unavailable");
-    return;
-  }
-
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
@@ -1294,30 +1237,15 @@ test("live extension batch capture smoke preserves QuantClass multi-page continu
     const page1Url = `http://bbs.quantclass.localhost:${fixture.port}/thread/88000`;
     const page2Url = `http://bbs.quantclass.localhost:${fixture.port}/thread/88000?page=2`;
 
-    try {
-      browserContext = await playwright.chromium.launchPersistentContext(userDataDir, {
-        headless: true,
-        channel: "chromium",
-        args: [
-          "--host-resolver-rules=MAP bbs.quantclass.localhost 127.0.0.1",
-          `--disable-extensions-except=${ROOT}`,
-          `--load-extension=${ROOT}`
-        ]
-      });
-    } catch (error) {
-      t.skip(`Chromium extension launch is unavailable: ${error.message}`);
-      return;
-    }
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
 
-    let worker = browserContext.serviceWorkers()[0];
-    try {
-      if (!worker) {
-        worker = await browserContext.waitForEvent("serviceworker", { timeout: 10000 });
-      }
-    } catch (error) {
-      t.skip(`Chromium did not expose the extension service worker: ${error.message}`);
-      return;
-    }
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
 

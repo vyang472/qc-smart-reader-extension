@@ -15,17 +15,17 @@
       </div>
     </header>
 
-    <nav class="tabs" aria-label="主导航">
-      <button class="tab active" data-tab="chat">聊天</button>
-      <button class="tab" data-tab="batch">批量</button>
-      <button class="tab" data-tab="agents">Agent</button>
-      <button class="tab" data-tab="knowledge">知识库</button>
-      <button class="tab" data-tab="deliverables">交付</button>
-      <button class="tab" data-tab="settings">设置</button>
+    <nav class="tabs" role="tablist" aria-label="主导航">
+      <button id="tab-chat" class="tab active" role="tab" aria-selected="true" aria-controls="chat" tabindex="0" data-tab="chat">聊天</button>
+      <button id="tab-batch" class="tab" role="tab" aria-selected="false" aria-controls="batch" tabindex="-1" data-tab="batch">批量</button>
+      <button id="tab-agents" class="tab" role="tab" aria-selected="false" aria-controls="agents" tabindex="-1" data-tab="agents">Agent</button>
+      <button id="tab-knowledge" class="tab" role="tab" aria-selected="false" aria-controls="knowledge" tabindex="-1" data-tab="knowledge">知识库</button>
+      <button id="tab-deliverables" class="tab" role="tab" aria-selected="false" aria-controls="deliverables" tabindex="-1" data-tab="deliverables">交付</button>
+      <button id="tab-settings" class="tab" role="tab" aria-selected="false" aria-controls="settings" tabindex="-1" data-tab="settings">设置</button>
     </nav>
 
     <main>
-      <section id="chat" class="panel active">
+      <section id="chat" class="panel active" role="tabpanel" aria-labelledby="tab-chat">
         <div class="toolbar">
           <button id="readPageBtn" class="primary">读取当前页</button>
           <button id="useSelectionBtn">使用选中文本</button>
@@ -56,11 +56,11 @@
           <button id="clearBtn">清空结果</button>
         </div>
 
-        <div id="status" class="status"></div>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
         <section id="answers" class="answers"></section>
       </section>
 
-      <section id="batch" class="panel">
+      <section id="batch" class="panel" role="tabpanel" aria-labelledby="tab-batch">
         <h2>批量采集</h2>
         <p class="hint">一行一个 URL。处理时会复用当前 Chrome 登录态，逐个打开后台标签页读取并写入本地 Vault。</p>
 
@@ -84,7 +84,7 @@
           <button id="clearBatchBtn">清空队列</button>
         </div>
 
-        <div id="batchStatus" class="status"></div>
+        <div id="batchStatus" class="status" role="status" aria-live="polite"></div>
         <div id="batchProgress" class="batch-progress" aria-live="polite"></div>
         <div id="batchList" class="batch-list"></div>
 
@@ -92,24 +92,35 @@
         <p class="hint">输入本地 PDF 路径或 PDF URL。本地路径由 companion service 读取，解析结果会按页写入 Vault。</p>
         <label class="field-label" for="pdfInput">PDF 路径或 URL</label>
         <input id="pdfInput" type="text" placeholder="/Users/me/Downloads/paper.pdf">
+        <label class="option-row" for="pdfOcrInput">
+          <input id="pdfOcrInput" type="checkbox" checked>
+          <span>
+            <strong>扫描件自动 OCR</strong>
+            <small>检测到图片型或低文本 PDF 时自动识别；失败会保留可用文本并明确提示。</small>
+          </span>
+        </label>
         <div class="toolbar">
           <button id="ingestPdfBtn" class="primary">导入 PDF</button>
         </div>
+        <p id="pdfImportStatus" class="status import-status" role="status" aria-live="polite"></p>
 
         <h2>YouTube 字幕导入</h2>
-        <p class="hint">先粘贴你已获取的字幕文本或带时间戳字幕；当前版本不做音频转写。</p>
+        <p class="hint">字幕文本留空时自动获取公开视频字幕；粘贴文本时使用手工字幕。自动模式只读取公开字幕，不做音频转写。</p>
         <label class="field-label" for="youtubeUrlInput">YouTube URL</label>
         <input id="youtubeUrlInput" type="url" placeholder="https://www.youtube.com/watch?v=...">
         <label class="field-label" for="youtubeTitleInput">标题</label>
         <input id="youtubeTitleInput" type="text" placeholder="可选，留空使用视频 ID">
-        <label class="field-label" for="youtubeTranscriptInput">字幕文本</label>
-        <textarea id="youtubeTranscriptInput" rows="8" placeholder="[00:00] 第一段字幕&#10;[00:15] 第二段字幕"></textarea>
+        <label class="field-label" for="youtubeLanguageInput">字幕语言优先级（可选）</label>
+        <input id="youtubeLanguageInput" type="text" placeholder="zh-Hans,en">
+        <label class="field-label" for="youtubeTranscriptInput">字幕文本（可选）</label>
+        <textarea id="youtubeTranscriptInput" rows="8" placeholder="留空自动获取公开字幕；或粘贴 [00:00] 第一段字幕"></textarea>
         <div class="toolbar">
-          <button id="ingestYoutubeBtn" class="primary">导入字幕</button>
+          <button id="ingestYoutubeBtn" class="primary">自动获取字幕（automatic · 自动选择）</button>
         </div>
+        <p id="youtubeImportStatus" class="status import-status" role="status" aria-live="polite"></p>
       </section>
 
-      <section id="agents" class="panel">
+      <section id="agents" class="panel" role="tabpanel" aria-labelledby="tab-agents">
         <h2>邀请 Agent 一起阅读</h2>
         <div id="agentList" class="agent-list"></div>
         <div class="prompt-box">
@@ -118,7 +129,7 @@
         </div>
       </section>
 
-      <section id="knowledge" class="panel">
+      <section id="knowledge" class="panel" role="tabpanel" aria-labelledby="tab-knowledge">
         <div class="toolbar">
           <button id="refreshKbBtn">刷新</button>
           <button id="exportMarkdownBtn">导出 Markdown</button>
@@ -162,6 +173,10 @@
         <div id="sourceDetail" class="source-detail"></div>
 
         <h2>阅读笔记</h2>
+        <div class="pending-notes-bar">
+          <p id="pendingNotesStatus" class="status" role="status" aria-live="polite">待同步 0 条本地笔记。</p>
+          <button id="syncPendingNotesBtn" type="button" disabled>同步到 Vault</button>
+        </div>
         <div id="kbList" class="kb-list"></div>
 
         <h2>结构化知识</h2>
@@ -240,7 +255,7 @@
         <div id="learningItemList" class="kb-list"></div>
       </section>
 
-      <section id="deliverables" class="panel">
+      <section id="deliverables" class="panel" role="tabpanel" aria-labelledby="tab-deliverables">
         <h2>交付工作台</h2>
         <p class="hint">基于当前来源和最近一次阅读结果生成 Markdown 交付物，写入本地 Vault 的 <code>wiki/deliverables/</code>。</p>
 
@@ -347,8 +362,17 @@
         <div id="strategyReviewList" class="strategy-feedback-list"></div>
       </section>
 
-      <section id="settings" class="panel">
+      <section id="settings" class="panel" role="tabpanel" aria-labelledby="tab-settings">
         <h2>本地服务</h2>
+        <p id="settingsStatus" class="status settings-status" role="status" aria-live="polite"></p>
+        <section id="setupGuide" class="setup-guide" aria-labelledby="setupGuideTitle">
+          <h3 id="setupGuideTitle">首次使用 · 3 步完成</h3>
+          <ol>
+            <li>正式版双击 Companion 包里的 <code>install.command</code>；源码开发时才用 <code>start.command</code>。</li>
+            <li>粘贴安装器复制的 Pairing Token，点击“测试本地服务”。</li>
+            <li>选择模型服务商；第一次发送网页内容前确认下面的隐私说明。</li>
+          </ol>
+        </section>
         <label class="field-label" for="serviceUrlInput">Companion URL</label>
         <input id="serviceUrlInput" type="url" placeholder="http://127.0.0.1:37621">
 
@@ -444,11 +468,26 @@
         <label class="field-label" for="apiKeyInput">API Key</label>
         <input id="apiKeyInput" type="password" placeholder="留空表示沿用本地服务已保存 key">
 
+        <label class="field-label" for="codexCommandInput">Codex CLI 命令</label>
+        <input id="codexCommandInput" type="text" placeholder="留空自动查找 codex；也可填 /opt/homebrew/bin/codex exec">
+
+        <label class="field-label" for="codexTimeoutInput">Codex 超时（秒）</label>
+        <input id="codexTimeoutInput" type="number" min="10" max="3600" step="10" value="300">
+
         <label class="field-label" for="modelInput">模型名</label>
         <input id="modelInput" type="text" placeholder="gpt-5 或 claude-sonnet-4-6">
 
         <label class="field-label" for="temperatureInput">Temperature</label>
         <input id="temperatureInput" type="number" min="0" max="2" step="0.1">
+
+        <label class="option-row privacy-consent" for="modelDataConsentInput">
+          <input id="modelDataConsentInput" type="checkbox">
+          <span>
+            <strong>我同意把我主动提交的材料发送给所选模型</strong>
+            <small>模型操作可能发送网页标题、URL、正文、问题和引用给 Codex/OpenAI 或你配置的第三方端点。本地采集、保存与 Mock 模式不需要此同意。你可以随时取消。</small>
+          </span>
+        </label>
+        <p class="hint">数据默认保存在本机 Vault，不用于广告或开发者分析。<a href="PRIVACY.md" target="_blank" rel="noreferrer">查看完整隐私说明</a>。</p>
 
         <div class="toolbar">
           <button id="saveSettingsBtn" class="primary">保存设置</button>
@@ -456,7 +495,7 @@
           <button id="clearApiKeyBtn">清除服务端 Key</button>
         </div>
         <p class="hint">模型 API Key 保存到 companion service 的本地配置文件，不再写入 Chrome storage。OpenAI-compatible 可填 OpenAI、OpenRouter、DeepSeek、智谱兼容网关等支持 /chat/completions 的地址。</p>
-        <p class="hint">选 <strong>Codex CLI</strong> 时不需要 Base URL 和 API Key：companion service 直接调用本机 <code>codex exec</code>，用你已登录的 ChatGPT 订阅。模型名留空即用 Codex 默认模型；单次调用比 API 慢，适合逐篇精读，不适合上百条批量。</p>
+        <p class="hint">选 <strong>Codex CLI</strong> 时不需要 Base URL 和 API Key：companion service 直接调用本机 <code>codex exec</code>，用你已登录的 ChatGPT 订阅。命令留空会从服务进程的 PATH 自动查找；模型名留空即用 Codex 默认模型。单次调用比 API 慢，适合逐篇精读，不适合上百条批量。</p>
       </section>
     </main>
 
