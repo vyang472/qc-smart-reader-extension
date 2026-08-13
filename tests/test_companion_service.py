@@ -510,6 +510,48 @@ class CompanionServiceCase(unittest.TestCase):
             "http://localhost:11434/v1/chat/completions",
         )
 
+    def test_model_http_errors_close_unreliable_response_bodies_without_masking_status(self) -> None:
+        redirect_body = mock.Mock()
+        redirect_body.read.side_effect = AssertionError("redirect bodies must never be read")
+        redirect_error = urllib.error.HTTPError(
+            "http://127.0.0.1/model",
+            307,
+            "Temporary Redirect",
+            {},
+            redirect_body,
+        )
+        redirect_opener = mock.Mock()
+        redirect_opener.open.side_effect = redirect_error
+        with mock.patch.object(server.urllib.request, "build_opener", return_value=redirect_opener):
+            with self.assertRaisesRegex(ValueError, "model HTTP 307: redirects are refused"):
+                self.store.post_model_json(
+                    "http://127.0.0.1/model",
+                    {"model": "fixture"},
+                    {"authorization": "Bearer must-not-cross"},
+                )
+        redirect_body.read.assert_not_called()
+        redirect_body.close.assert_called_once_with()
+
+        failed_body = mock.Mock()
+        failed_body.read.side_effect = ConnectionResetError(54, "connection reset")
+        failed_error = urllib.error.HTTPError(
+            "http://127.0.0.1/model",
+            503,
+            "Unavailable",
+            {},
+            failed_body,
+        )
+        failed_opener = mock.Mock()
+        failed_opener.open.side_effect = failed_error
+        with mock.patch.object(server.urllib.request, "build_opener", return_value=failed_opener):
+            with self.assertRaisesRegex(ValueError, "model HTTP 503: the error response body could not be read"):
+                self.store.post_model_json(
+                    "http://127.0.0.1/model",
+                    {"model": "fixture"},
+                    {"authorization": "Bearer fixture"},
+                )
+        failed_body.close.assert_called_once_with()
+
     def test_capture_writes_vault_chunks_and_search(self) -> None:
         text = "\n\n".join(
             [

@@ -10832,13 +10832,20 @@ CHUNKS:
                         f"model response exceeded the {MAX_MODEL_RESPONSE_BYTES}-byte limit"
                     )
         except urllib.error.HTTPError as error:
-            body = error.read(MAX_MODEL_RESPONSE_BYTES + 1)
-            error.close()
             if 300 <= error.code < 400:
+                error.close()
                 raise ValueError(
                     f"model HTTP {error.code}: redirects are refused so API credentials cannot be forwarded; "
                     "configure the final HTTPS endpoint directly"
                 ) from error
+            try:
+                body = error.read(MAX_MODEL_RESPONSE_BYTES + 1)
+            except (OSError, http.client.HTTPException) as read_error:
+                raise ValueError(
+                    f"model HTTP {error.code}: the error response body could not be read"
+                ) from read_error
+            finally:
+                error.close()
             try:
                 data = json.loads(body.decode("utf-8"))
                 nested_error = data.get("error") if isinstance(data, dict) else None
