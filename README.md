@@ -34,12 +34,16 @@ QC Smart Reader is a macOS-first Chrome extension and local Python companion. It
 
 The supported release path currently targets **macOS, Chrome 116+, and a Chinese-language product UI**.
 
-1. Download both files from [QC Smart Reader v0.9.0](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0):
+Before starting, make sure the Mac has **Python 3.9+**, Chrome 116+, and internet access for the first Companion install to download its hash-pinned Python wheels. Codex CLI, `yt-dlp`, and the Swift toolchain are optional and only enable their corresponding model, public-caption, and OCR paths.
+
+1. Download these three files from [QC Smart Reader v0.9.0](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0):
    - `qc-smart-reader-companion-0.9.0.zip`
    - `qc-smart-reader-extension-0.9.0.zip`
-2. Extract the Companion ZIP, then double-click `install.command` (or run `bash install.command`). It installs a per-user background service, verifies readiness, and copies the Pairing Token.
-3. Extract the Extension ZIP. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder containing `manifest.json`.
-4. Open the QC Smart Reader side panel. In **设置**, enter `http://127.0.0.1:37621`, paste the Pairing Token, and click **测试本地服务**.
+   - `SHA256SUMS`
+2. In the download directory, run `shasum -a 256 -c SHA256SUMS` and confirm that both ZIPs report `OK`.
+3. Extract the Companion ZIP, then double-click `install.command` (or run `bash install.command`). It installs a per-user background service, verifies readiness, and copies the Pairing Token.
+4. Extract the Extension ZIP. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder containing `manifest.json`.
+5. Open the QC Smart Reader side panel. In **设置**, enter `http://127.0.0.1:37621`, paste the Pairing Token, and click **测试本地服务**.
 
 That is enough to capture and run deterministic local extraction. To use a model, select one route in **设置 → 模型设置**:
 

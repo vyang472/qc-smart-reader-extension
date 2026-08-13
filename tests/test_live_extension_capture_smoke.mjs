@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { extensionServiceWorker, launchPersistentChromium } from "./browser_runtime.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const TEST_PYTHON = process.env.QC_TEST_PYTHON || "python3";
+const COMPANION_START_TIMEOUT_MS = Number(process.env.QC_COMPANION_START_TIMEOUT_MS || 30000);
 
 function extensionLaunchOptions(hostResolverRule) {
   return {
@@ -70,18 +72,64 @@ async function startFixtureServer(routes) {
   return { server, port };
 }
 
-async function waitForHealth(serviceUrl, timeoutMs = 10000) {
+function startCompanion(dataDir, port) {
+  const child = spawn(
+    TEST_PYTHON,
+    ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(port), "--data-dir", dataDir],
+    {
+      cwd: ROOT,
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
+  let output = "";
+  let spawnError;
+  let exitStatus;
+  child.stdout.on("data", (chunk) => {
+    output += chunk.toString();
+  });
+  child.stderr.on("data", (chunk) => {
+    output += chunk.toString();
+  });
+  child.once("error", (error) => {
+    spawnError = error;
+  });
+  child.once("exit", (code, signal) => {
+    exitStatus = { code, signal };
+  });
+  return {
+    child,
+    output: () => output.trim(),
+    failure: () => {
+      if (spawnError) return `${TEST_PYTHON} could not start: ${spawnError.message}`;
+      if (exitStatus) {
+        const result = exitStatus.signal ? `signal ${exitStatus.signal}` : `code ${exitStatus.code}`;
+        return `${TEST_PYTHON} exited before becoming healthy (${result})`;
+      }
+      return "";
+    }
+  };
+}
+
+async function waitForHealth(serviceUrl, companion, timeoutMs = COMPANION_START_TIMEOUT_MS) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    const failure = companion.failure();
+    if (failure) {
+      throw new Error(`${failure}\nservice output:\n${companion.output()}`);
+    }
     try {
-      const response = await fetch(`${serviceUrl}/health`);
+      const response = await fetch(`${serviceUrl}/health`, { signal: AbortSignal.timeout(1000) });
       if (response.ok) return response.json();
     } catch {
       // Service is still starting.
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`service did not become healthy: ${serviceUrl}`);
+  const state = companion.failure() || `${TEST_PYTHON} was still running after ${timeoutMs} ms`;
+  throw new Error(
+    `service did not become healthy: ${serviceUrl}\nservice state: ${state}\nservice output:\n${companion.output()}`
+  );
 }
 
 async function waitForSources(serviceUrl, token, timeoutMs = 15000) {
@@ -253,7 +301,7 @@ try:
 finally:
     db.close()
 `;
-  await execFilePromise("python3", ["-c", script, join(dataDir, "state", "qc_smart_reader.sqlite3"), jobId], { cwd: ROOT });
+  await execFilePromise(TEST_PYTHON, ["-c", script, join(dataDir, "state", "qc_smart_reader.sqlite3"), jobId], { cwd: ROOT });
 }
 
 function terminate(child) {
@@ -385,26 +433,13 @@ test("live extension batch capture smoke saves a QuantClass fixture through comp
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const fixtureHtml = await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8");
     const fixture = await startFixtureServer(new Map([["/thread/87030", fixtureHtml]]));
@@ -528,26 +563,13 @@ test("live extension reads current page and renders structured knowledge records
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const fixtureHtml = (await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8"))
       .replace(/长上影线是卖出还是买入信号？/g, "Knowledge UI 结构化抽取")
@@ -644,26 +666,13 @@ test("live extension current page uses browser site profile bundle for GitHub is
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const fixtureHtml = await readFile(new URL("./fixtures/github_issue.html", import.meta.url), "utf8");
     const fixture = await startFixtureServer(new Map([["/org/repo/issues/34", fixtureHtml]]));
@@ -750,26 +759,13 @@ test("live extension service-owned batch emits heartbeat while a background tab 
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const fixtureHtml = await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8");
     const fixture = await startFixtureServer(new Map([[
@@ -837,26 +833,13 @@ test("live extension service-owned batch pauses and resumes through companion jo
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const fixtureHtml = await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8");
     const firstHtml = fixtureHtml
@@ -944,26 +927,13 @@ test("live extension service-owned batch cancel keeps unclaimed items canceled",
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const fixtureHtml = await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8");
     const firstHtml = fixtureHtml
@@ -1051,27 +1021,14 @@ test("live extension restores and resumes a service-owned batch after Chromium c
   const restartedUserDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-restart-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let restartedBrowserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const fixtureHtml = await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8");
     const firstHtml = fixtureHtml
@@ -1206,26 +1163,13 @@ test("live extension batch capture smoke preserves QuantClass multi-page continu
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
-  const service = spawn("python3", ["companion_service/server.py", "--host", "127.0.0.1", "--port", String(servicePort), "--data-dir", dataDir], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let serviceOutput = "";
-  service.stdout.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
-  service.stderr.on("data", (chunk) => {
-    serviceOutput += chunk.toString();
-  });
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
   let browserContext;
   let fixtureServer;
 
   try {
-    try {
-      await waitForHealth(serviceUrl);
-    } catch (error) {
-      throw new Error(`${error.message}\nservice output:\n${serviceOutput.trim()}`);
-    }
+    await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
     const page1Html = await readFile(new URL("./fixtures/quantclass_thread_multipage_page1.html", import.meta.url), "utf8");
     const page2Html = await readFile(new URL("./fixtures/quantclass_thread_multipage_page2.html", import.meta.url), "utf8");

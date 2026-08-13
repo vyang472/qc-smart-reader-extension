@@ -6,22 +6,24 @@ This is the first packaged public release. It is macOS-first, runs as a Chrome 1
 
 ## Install
 
-1. Download `qc-smart-reader-companion-0.9.0.zip` and `qc-smart-reader-extension-0.9.0.zip` below.
-2. Unzip the companion package and double-click `install.command`. Keep the copied pairing token.
-3. Unzip the extension package, open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select that folder.
-4. In QC Smart Reader settings, enter `http://127.0.0.1:37621`, paste the pairing token, and test the connection.
+Prerequisites are macOS, Chrome 116+, Python 3.9+, and internet access during the first Companion install for hash-pinned Python wheels. Codex CLI, `yt-dlp`, and the Swift toolchain are optional.
 
-Verify the downloads before installing:
+1. Download `qc-smart-reader-companion-0.9.0.zip`, `qc-smart-reader-extension-0.9.0.zip`, and `SHA256SUMS` below.
+2. Verify both ZIPs from their download directory:
 
-```bash
-shasum -a 256 -c SHA256SUMS
-```
+   ```bash
+   shasum -a 256 -c SHA256SUMS
+   ```
+
+3. Unzip the companion package and double-click `install.command` (or run `bash install.command`). Keep the copied pairing token.
+4. Unzip the extension package, open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select that folder.
+5. In QC Smart Reader settings, enter `http://127.0.0.1:37621`, paste the pairing token, and test the connection.
 
 ## What is included
 
 - User-initiated capture for articles, forum threads, selected text, PDFs, and public YouTube captions.
 - Quote validation before a structured claim can be marked reviewed.
-- Immutable source versions, stale propagation, lineage inspection, and project-isolated records.
+- Versioned source captures, stale propagation, lineage inspection, and project-isolated records.
 - Restart-safe batch jobs with leases, heartbeats, pause/resume, retry, cancel, and recovery.
 - Local Markdown + SQLite storage with schema backup and upgrade checks.
 - Optional Codex CLI, OpenAI-compatible, or Anthropic model providers with explicit consent; deterministic local mock mode remains available.

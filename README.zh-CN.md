@@ -34,12 +34,16 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 
 当前正式支持路径是 **macOS + Chrome 116+ + 简体中文产品界面**。
 
-1. 从 [QC Smart Reader v0.9.0](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0) 下载两个文件：
+开始前请确认 Mac 上已有 **Python 3.9+**、Chrome 116+，并能在首次安装 Companion 时联网下载经过 hash 锁定的 Python wheels。Codex CLI、`yt-dlp` 与 Swift 工具链都是可选依赖，只分别影响对应的模型、公开字幕与 OCR 路线。
+
+1. 从 [QC Smart Reader v0.9.0](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0) 下载三个文件：
    - `qc-smart-reader-companion-0.9.0.zip`
    - `qc-smart-reader-extension-0.9.0.zip`
-2. 解压 Companion ZIP，双击 `install.command`（也可以运行 `bash install.command`）。安装器会安装当前用户的后台服务、验证可用性，并把 Pairing Token 复制到剪贴板。
-3. 解压 Extension ZIP。打开 `chrome://extensions`，开启**开发者模式**，点击**加载已解压的扩展程序**，选择包含 `manifest.json` 的目录。
-4. 打开 QC Smart Reader 侧边栏，在**设置**中填入 `http://127.0.0.1:37621`，粘贴 Pairing Token，点击**测试本地服务**。
+   - `SHA256SUMS`
+2. 在下载目录运行 `shasum -a 256 -c SHA256SUMS`，确认两个 ZIP 都显示 `OK`。
+3. 解压 Companion ZIP，双击 `install.command`（也可以运行 `bash install.command`）。安装器会安装当前用户的后台服务、验证可用性，并把 Pairing Token 复制到剪贴板。
+4. 解压 Extension ZIP。打开 `chrome://extensions`，开启**开发者模式**，点击**加载已解压的扩展程序**，选择包含 `manifest.json` 的目录。
+5. 打开 QC Smart Reader 侧边栏，在**设置**中填入 `http://127.0.0.1:37621`，粘贴 Pairing Token，点击**测试本地服务**。
 
 到这里就可以采集，并使用 deterministic mock 跑完整证据链。需要模型时，在**设置 → 模型设置**中选择：
 

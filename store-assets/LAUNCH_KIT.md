@@ -64,7 +64,7 @@ The core rule is deliberately strict: a claim cannot become reviewed unless it p
 
 The product is a Chrome side panel plus a local Python Companion. It captures pages in your live browser session, imports PDFs and public captions, and stores the durable record as SQLite plus readable Markdown. Model use is optional: Codex CLI, an OpenAI-compatible or Anthropic endpoint, or deterministic local mock extraction.
 
-This is a v0.9.0 public preview. It is macOS-first, the UI is Simplified Chinese, and Chrome Developer mode is required while the store listing is under review. I would especially value reports from people who try a difficult forum thread, a real paper, or the evidence-review workflow. Which step feels least trustworthy or most cumbersome?
+This is a v0.9.0 public preview. It is macOS-first, the UI is Simplified Chinese, and Chrome Developer mode is required until a Chrome Web Store release is approved. I would especially value reports from people who try a difficult forum thread, a real paper, or the evidence-review workflow. Which step feels least trustworthy or most cumbersome?
 
 ### Gallery captions
 
