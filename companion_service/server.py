@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -33,6 +34,11 @@ APP_NAME = "QC Smart Reader"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 37621
 MAX_BODY_BYTES = 25 * 1024 * 1024
+# Separator for hash fingerprints. Kept as a module constant so the fingerprint
+# expressions stay free of backslashes: an f-string expression part may not
+# contain a backslash before Python 3.12, and this service must start on the
+# stock python3 that ships with macOS.
+NULL_JOIN = "\0"
 SOURCE_STATUSES = {"new", "needs_review", "read", "extracted", "reviewed", "rejected", "archived"}
 CLAIM_REVIEW_STATUSES = {"pending_validation", "extracted", "reviewed", "rejected", "archived"}
 EVIDENCE_REVIEW_STATUSES = {"pending_validation", "reviewed", "rejected", "archived"}
@@ -328,6 +334,11 @@ class Store:
             "api_key": "",
             "input_cost_per_1m": None,
             "output_cost_per_1m": None,
+            # provider == "codex" shells out to a locally installed Codex CLI
+            # instead of calling an HTTP API, so a ChatGPT plan can drive
+            # extraction without a pay-as-you-go API key.
+            "codex_command": "",
+            "codex_timeout_seconds": 300,
             "updated_at": "",
             "last_validated_at": "",
         }
@@ -354,9 +365,23 @@ class Store:
     def update_model_settings(self, payload: dict) -> dict:
         settings = self.read_model_settings(include_secret=True)
         provider = normalize_text(payload.get("provider") or settings.get("provider") or "openai")
-        if provider not in {"openai", "anthropic"}:
-            raise ValueError("provider must be openai or anthropic")
+        if provider not in {"openai", "anthropic", "codex"}:
+            raise ValueError("provider must be openai, anthropic, or codex")
         settings["provider"] = provider
+        if "codex_command" in payload:
+            raw_command = payload.get("codex_command")
+            if isinstance(raw_command, list):
+                settings["codex_command"] = [str(part) for part in raw_command if str(part).strip()]
+            else:
+                settings["codex_command"] = normalize_text(str(raw_command or ""))
+        if "codex_timeout_seconds" in payload:
+            try:
+                timeout_seconds = int(float(payload.get("codex_timeout_seconds") or 0))
+            except (TypeError, ValueError):
+                raise ValueError("codex_timeout_seconds must be numeric")
+            if timeout_seconds < 10 or timeout_seconds > 3600:
+                raise ValueError("codex_timeout_seconds must be between 10 and 3600")
+            settings["codex_timeout_seconds"] = timeout_seconds
         settings["base_url"] = normalize_text(payload.get("base_url") or settings.get("base_url") or "")
         settings["model"] = normalize_text(payload.get("model") or settings.get("model") or "")
         try:
@@ -2188,9 +2213,10 @@ source_type: {plan['source_type']}
                 for key, value in item.items()
                 if key not in {"href", "url", "src", "filename", "file_name", "name", "text", "title", "label", "context", "paragraph", "surrounding_text", "floor"}
             }
+            attachment_fingerprint = NULL_JOIN.join([source_id, key])
             output.append(
                 {
-                    "id": f"att_{hashlib.sha256(f'{source_id}\0{key}'.encode('utf-8')).hexdigest()[:14]}",
+                    "id": "att_" + hashlib.sha256(attachment_fingerprint.encode("utf-8")).hexdigest()[:14],
                     "project_id": project_id,
                     "source_id": source_id,
                     "url": url,
@@ -2319,7 +2345,8 @@ source_type: {plan['source_type']}
         site = normalize_text(record.get("site") or infer_site(url))
         captured_at = normalize_text(record.get("captured_at") or utc_now())
         now = utc_now()
-        alias_id = f"salias_{hashlib.sha256(f'{source_id}\0{url}\0{canonical_url}\0{captured_at}'.encode('utf-8')).hexdigest()[:14]}"
+        alias_fingerprint = NULL_JOIN.join([source_id, url, canonical_url, captured_at])
+        alias_id = "salias_" + hashlib.sha256(alias_fingerprint.encode("utf-8")).hexdigest()[:14]
         db.execute(
             """
             INSERT INTO source_aliases(
@@ -2384,7 +2411,8 @@ source_type: {plan['source_type']}
             or 1
         )
         now = utc_now()
-        record_id = f"sver_{hashlib.sha256(f'{project_id}\0{canonical_url}\0{source_id}'.encode('utf-8')).hexdigest()[:14]}"
+        version_fingerprint = NULL_JOIN.join([project_id, canonical_url, source_id])
+        record_id = "sver_" + hashlib.sha256(version_fingerprint.encode("utf-8")).hexdigest()[:14]
         db.execute(
             """
             INSERT INTO source_versions(
@@ -3423,7 +3451,12 @@ browser_tab_id: {browser.get("tab_id", "")}
         ensure_pdf_dependencies()
         try:
             from pypdf import PdfReader
-        except Exception as error:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as error:
+            # A half-installed native dependency (pypdf -> cryptography) can raise
+            # BaseException, not Exception. Without this the handler thread dies and
+            # the extension sees a dropped connection instead of a readable error.
             raise ValueError(f"pypdf is unavailable: {error}") from error
 
         try:
@@ -4865,13 +4898,14 @@ Speaker notes: {notes or "待补充讲稿。"}
 Transition: {section.get('transition') or '待补充过渡语。'}
 """
                 )
+        sections_markdown = "".join(section_lines) or "## 正文段落\n\n待补充分段讲解、案例和过渡语。\n"
         return f"""# {title}
 
 ## 开场
 
 {normalize_text(payload.get("opening") or "今天我们用证据链快速讲清这个专题。")}
 
-{''.join(section_lines) or "## 正文段落\n\n待补充分段讲解、案例和过渡语。\n"}
+{sections_markdown}
 ## 关键结论
 
 {self.claims_markdown(claims) or "- 待提炼。"}
@@ -8144,6 +8178,10 @@ Vault: {package['vault_dir']}
         return {"ok": True, "agent_run": run, "records": records, "source": source}
 
     def model_settings_ready(self, settings: dict) -> bool:
+        if settings.get("provider") == "codex":
+            # The Codex CLI carries its own auth (a ChatGPT plan login), so the
+            # only thing that has to be true is that we can find the binary.
+            return bool(self.resolve_codex_command(settings))
         return bool(
             normalize_text(settings.get("api_key") or "")
             and normalize_text(settings.get("base_url") or "")
@@ -8238,6 +8276,8 @@ Vault: {package['vault_dir']}
         return {"estimated_cost_usd": round(cost, 8), "cost_source": "model_settings_per_1m_tokens"}
 
     def call_model_with_messages(self, settings: dict, messages: list[dict]) -> tuple[str, dict]:
+        if settings.get("provider") == "codex":
+            return self.call_codex_cli(settings, "", messages)
         if settings.get("provider") == "anthropic":
             system_parts = [normalize_text(message.get("content") or "") for message in messages if message.get("role") == "system"]
             anthropic_messages = [
@@ -8484,10 +8524,16 @@ CHUNKS:
 
     def llm_chat(self, payload: dict) -> dict:
         settings = self.read_model_settings(include_secret=True)
-        if not settings.get("api_key"):
-            raise ValueError("model API key is not configured in companion service")
-        if not settings.get("base_url") or not settings.get("model"):
-            raise ValueError("model base_url and model are required")
+        if settings.get("provider") == "codex":
+            if not self.resolve_codex_command(settings):
+                raise ValueError(
+                    "codex CLI was not found. Install it, or set codex_command in the companion service model settings."
+                )
+        else:
+            if not settings.get("api_key"):
+                raise ValueError("model API key is not configured in companion service")
+            if not settings.get("base_url") or not settings.get("model"):
+                raise ValueError("model base_url and model are required")
         prompt = normalize_text(payload.get("prompt") or "")
         messages = payload.get("messages")
         if not prompt and not isinstance(messages, list):
@@ -8503,7 +8549,9 @@ CHUNKS:
             "source_id": payload.get("source_id") or "",
         }
         try:
-            if settings.get("provider") == "anthropic":
+            if settings.get("provider") == "codex":
+                answer, raw = self.call_codex_cli(settings, prompt, messages)
+            elif settings.get("provider") == "anthropic":
                 answer, raw = self.call_anthropic(settings, prompt, messages)
             else:
                 answer, raw = self.call_openai_compatible(settings, prompt, messages)
@@ -8528,6 +8576,129 @@ CHUNKS:
                 status="failed",
             )
             raise
+
+    def resolve_codex_command(self, settings: dict) -> list[str]:
+        """Return the argv prefix used to invoke the Codex CLI, or [] if unusable.
+
+        Defaults to `codex exec`. Override with `codex_command` in model settings
+        (a string is split shell-style, a list is used verbatim) when the binary
+        lives outside PATH or needs extra flags.
+        """
+        raw = settings.get("codex_command") or ""
+        if isinstance(raw, list):
+            command = [str(part) for part in raw if str(part).strip()]
+        else:
+            text = normalize_text(str(raw))
+            try:
+                command = shlex.split(text) if text else []
+            except ValueError:
+                return []
+        if not command:
+            binary = shutil.which("codex")
+            if not binary:
+                return []
+            return [binary, "exec"]
+        head = command[0]
+        if not shutil.which(head) and not Path(head).expanduser().is_file():
+            return []
+        return command
+
+    @staticmethod
+    def flatten_messages_for_cli(prompt: str, messages: list | None) -> str:
+        if not isinstance(messages, list) or not messages:
+            return normalize_text(prompt)
+        parts = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = normalize_text(str(message.get("content") or ""))
+            if not content:
+                continue
+            role = normalize_text(str(message.get("role") or "user")).lower()
+            label = {"system": "SYSTEM", "assistant": "ASSISTANT"}.get(role, "USER")
+            parts.append(f"[{label}]\n{content}")
+        return "\n\n".join(parts).strip()
+
+    def call_codex_cli(self, settings: dict, prompt: str, messages: list | None) -> tuple[str, dict]:
+        command = self.resolve_codex_command(settings)
+        if not command:
+            raise ValueError(
+                "codex CLI was not found. Install it, or set codex_command in the companion service model settings."
+            )
+        text = self.flatten_messages_for_cli(prompt, messages)
+        if not text:
+            raise ValueError("codex provider received an empty prompt")
+        try:
+            timeout_seconds = int(settings.get("codex_timeout_seconds") or 300)
+        except (TypeError, ValueError):
+            timeout_seconds = 300
+
+        def build_argv(output_path: Path, skip_git_check: bool) -> list[str]:
+            argv = [part for part in command if part != "-"]
+            model = normalize_text(settings.get("model") or "")
+            if model and not any(part in {"--model", "-m"} for part in argv):
+                argv += ["--model", model]
+            if not any(part in {"--output-last-message", "-o"} for part in argv):
+                argv += ["--output-last-message", str(output_path)]
+            if skip_git_check and "--skip-git-repo-check" not in argv:
+                argv.append("--skip-git-repo-check")
+            argv.append("-")
+            return argv
+
+        def run_once(work_dir: Path, skip_git_check: bool) -> tuple[subprocess.CompletedProcess, Path, list[str]]:
+            output_path = work_dir / "codex_last_message.txt"
+            argv = build_argv(output_path, skip_git_check)
+            completed = subprocess.run(  # noqa: S603 - argv is operator-configured, never user input
+                argv,
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(work_dir),
+            )
+            return completed, output_path, argv
+
+        with tempfile.TemporaryDirectory(prefix="qc-codex-") as temp_dir:
+            work_dir = Path(temp_dir)
+            try:
+                completed, output_path, argv = run_once(work_dir, skip_git_check=False)
+            except FileNotFoundError as error:
+                raise ValueError(f"codex CLI could not be executed: {error}") from error
+            except subprocess.TimeoutExpired as error:
+                raise ValueError(f"codex CLI timed out after {timeout_seconds}s") from error
+
+            stderr_text = (completed.stderr or "").strip()
+            # Older/newer builds refuse to run outside a git repository. The
+            # scratch cwd is never a repo, so retry once with the opt-out flag
+            # rather than making every caller configure it by hand.
+            if completed.returncode != 0 and "git" in stderr_text.lower() and "--skip-git-repo-check" not in argv:
+                try:
+                    completed, output_path, argv = run_once(work_dir, skip_git_check=True)
+                    stderr_text = (completed.stderr or "").strip()
+                except subprocess.TimeoutExpired as error:
+                    raise ValueError(f"codex CLI timed out after {timeout_seconds}s") from error
+
+            answer = ""
+            if output_path.is_file():
+                answer = output_path.read_text(encoding="utf-8", errors="replace").strip()
+            if not answer:
+                answer = (completed.stdout or "").strip()
+
+            if completed.returncode != 0 and not answer:
+                raise ValueError(
+                    f"codex CLI exited with code {completed.returncode}: {stderr_text[-500:] or 'no stderr output'}"
+                )
+            if not answer:
+                raise ValueError(f"codex CLI returned no message. stderr: {stderr_text[-500:] or 'empty'}")
+
+            raw = {
+                "provider": "codex",
+                "argv": argv,
+                "exit_code": completed.returncode,
+                "stderr_tail": stderr_text[-2000:],
+                "prompt_chars": len(text),
+            }
+            return answer, raw
 
     def call_openai_compatible(self, settings: dict, prompt: str, messages: list | None) -> tuple[str, dict]:
         endpoint = self.join_model_url(settings.get("base_url") or "", "chat/completions")

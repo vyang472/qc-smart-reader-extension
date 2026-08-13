@@ -435,6 +435,7 @@
         <select id="providerSelect">
           <option value="openai">OpenAI-compatible</option>
           <option value="anthropic">Anthropic</option>
+          <option value="codex">Codex CLI（本机，用 ChatGPT 订阅，免 API Key）</option>
         </select>
 
         <label class="field-label" for="baseUrlInput">Base URL</label>
@@ -455,6 +456,7 @@
           <button id="clearApiKeyBtn">清除服务端 Key</button>
         </div>
         <p class="hint">模型 API Key 保存到 companion service 的本地配置文件，不再写入 Chrome storage。OpenAI-compatible 可填 OpenAI、OpenRouter、DeepSeek、智谱兼容网关等支持 /chat/completions 的地址。</p>
+        <p class="hint">选 <strong>Codex CLI</strong> 时不需要 Base URL 和 API Key：companion service 直接调用本机 <code>codex exec</code>，用你已登录的 ChatGPT 订阅。模型名留空即用 Codex 默认模型；单次调用比 API 慢，适合逐篇精读，不适合上百条批量。</p>
       </section>
     </main>
 

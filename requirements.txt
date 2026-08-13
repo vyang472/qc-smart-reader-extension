@@ -1,0 +1,7 @@
+# QC Smart Reader companion service dependencies.
+#
+# The service itself is stdlib-only and will start with none of these installed.
+# pypdf is required only for PDF ingestion (POST /v1/pdfs/extract); without it
+# that one endpoint returns a readable "pypdf is unavailable" error and every
+# other feature keeps working.
+pypdf>=4.0.0
