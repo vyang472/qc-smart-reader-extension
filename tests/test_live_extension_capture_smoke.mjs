@@ -137,6 +137,14 @@ async function waitForHealth(serviceUrl, companion, timeoutMs = COMPANION_START_
   );
 }
 
+async function waitForInteractiveSidepanel(sidepanel) {
+  await sidepanel.waitForFunction(() => (
+    document.documentElement.dataset.qcInteractiveReady === "true" &&
+    document.body.inert === false &&
+    document.body.getAttribute("aria-busy") === "false"
+  ));
+}
+
 async function waitForSources(serviceUrl, token, timeoutMs = 15000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -482,6 +490,7 @@ test("live extension batch capture smoke saves a QuantClass fixture through comp
       { serviceUrl, token }
     );
     await sidepanel.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(sidepanel);
     await sidepanel.locator('button[data-tab="batch"]').click();
     await sidepanel.locator("#batchUrlsInput").fill(fixtureUrl);
     await sidepanel.locator("#enqueueBatchBtn").click();
@@ -616,6 +625,7 @@ test("live extension reads current page and renders structured knowledge records
       { serviceUrl, token }
     );
     await sidepanel.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(sidepanel);
 
     const fixturePage = await browserContext.newPage();
     await fixturePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
@@ -708,6 +718,7 @@ async function exerciseCleanProfileFirstEvidence(t, { browserLocale, htmlLang, d
 
     const sidepanel = await browserContext.newPage();
     await sidepanel.goto(sidepanelUrl);
+    await waitForInteractiveSidepanel(sidepanel);
     await sidepanel.waitForFunction((expected) => document.documentElement.lang === expected, htmlLang);
     assert.equal(await sidepanel.locator("html").getAttribute("lang"), htmlLang);
     assert.equal(await sidepanel.locator("#uiLocaleSelect").inputValue(), "auto");
@@ -845,6 +856,7 @@ async function exerciseCleanProfileFirstEvidence(t, { browserLocale, htmlLang, d
     await sidepanel.close();
     const reopened = await browserContext.newPage();
     await reopened.goto(sidepanelUrl);
+    await waitForInteractiveSidepanel(reopened);
     await reopened.waitForFunction((claimId) => {
       const card = document.querySelector("#quickStartEvidence");
       return card && !card.hidden && card.dataset.claimId === claimId;
@@ -947,6 +959,7 @@ test("live extension current page uses browser site profile bundle for GitHub is
       { serviceUrl, token }
     );
     await sidepanel.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(sidepanel);
 
     const fixturePage = await browserContext.newPage();
     await fixturePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
@@ -1046,6 +1059,7 @@ test("live extension service-owned batch emits heartbeat while a background tab 
       { serviceUrl, token }
     );
     await sidepanel.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(sidepanel);
     await sidepanel.locator('button[data-tab="batch"]').click();
     await sidepanel.locator("#batchUrlsInput").fill(fixtureUrl);
     await sidepanel.locator("#enqueueBatchBtn").click();
@@ -1127,6 +1141,7 @@ test("live extension service-owned batch pauses and resumes through companion jo
       { serviceUrl, token }
     );
     await sidepanel.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(sidepanel);
     await sidepanel.locator('button[data-tab="batch"]').click();
     await sidepanel.locator("#batchUrlsInput").fill(`${firstUrl}\n${secondUrl}`);
     await sidepanel.locator("#enqueueBatchBtn").click();
@@ -1221,6 +1236,7 @@ test("live extension service-owned batch cancel keeps unclaimed items canceled",
       { serviceUrl, token }
     );
     await sidepanel.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(sidepanel);
     await sidepanel.locator('button[data-tab="batch"]').click();
     await sidepanel.locator("#batchUrlsInput").fill(`${firstUrl}\n${secondUrl}`);
     await sidepanel.locator("#enqueueBatchBtn").click();
@@ -1317,6 +1333,7 @@ test("live extension restores and resumes a service-owned batch after Chromium c
         { serviceUrl, token }
       );
       await sidepanel.reload({ waitUntil: "domcontentloaded" });
+      await waitForInteractiveSidepanel(sidepanel);
       await sidepanel.locator('button[data-tab="batch"]').click();
       return sidepanel;
     };
@@ -1480,6 +1497,7 @@ test("live extension batch capture smoke preserves QuantClass multi-page continu
       { serviceUrl, token }
     );
     await sidepanel.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(sidepanel);
     await sidepanel.locator('button[data-tab="batch"]').click();
     await sidepanel.locator("#batchUrlsInput").fill(`${page1Url}\n${page2Url}`);
     await sidepanel.locator("#enqueueBatchBtn").click();
