@@ -17,6 +17,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-width: 360px;
@@ -188,6 +192,130 @@ main {
   margin: 0;
   padding-left: 22px;
   line-height: 1.55;
+}
+
+.quick-start-card,
+.first-evidence-card {
+  margin: 0 0 14px;
+  padding: 14px;
+  border: 1px solid #86d3b2;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #f4fbf8, #eef5ff);
+}
+
+.quick-start-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.quick-start-heading h2,
+.first-evidence-card h3 {
+  margin: 3px 0 6px;
+}
+
+.eyebrow {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+}
+
+.quick-start-steps {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: quick-step;
+}
+
+.quick-start-steps li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  counter-increment: quick-step;
+}
+
+.quick-start-steps li::before {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  border-radius: 50%;
+  background: #e6ebf1;
+  content: counter(quick-step);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.quick-start-steps li.done {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.quick-start-steps li.done::before {
+  color: white;
+  background: var(--green);
+  content: "✓";
+}
+
+.local-only-note,
+.provider-route-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.provider-route-hint {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--blue-soft);
+}
+
+.inline-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.first-evidence-card {
+  border-width: 2px;
+}
+
+.first-evidence-card blockquote {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-left: 4px solid var(--green);
+  background: white;
+  line-height: 1.55;
+}
+
+.first-evidence-claim {
+  font-weight: 750;
+  line-height: 1.5;
+}
+
+.quick-start-highlight {
+  animation: quick-start-pulse 1.8s ease-out;
+  outline: 3px solid #1f9d72;
+  outline-offset: 3px;
+}
+
+@keyframes quick-start-pulse {
+  0%, 40% { box-shadow: 0 0 0 7px rgb(31 157 114 / 22%); }
+  100% { box-shadow: 0 0 0 0 rgb(31 157 114 / 0%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick-start-highlight {
+    animation: none;
+  }
 }
 
 .privacy-consent {

@@ -13,7 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_SCRIPT = ROOT / "scripts" / "release.py"
-EXPECTED_VERSION = "0.9.0"
+EXPECTED_VERSION = "0.9.1"
+EXPECTED_MIN_EXTENSION_VERSION = "0.9.0"
 EXPECTED_EXTENSION_FILES = {
     "LICENSE",
     "PRIVACY.md",
@@ -64,6 +65,8 @@ class ReleaseArtifactTests(unittest.TestCase):
     def test_product_version_and_chrome_floor_are_consistent(self) -> None:
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
         plugin = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
 
         expected_icons = {
             "16": "assets/icons/icon-16.png",
@@ -74,11 +77,16 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertEqual(manifest["name"], "QC Smart Reader")
         self.assertEqual(manifest["version"], EXPECTED_VERSION)
         self.assertEqual(plugin["version"], EXPECTED_VERSION)
+        self.assertEqual(package["version"], EXPECTED_VERSION)
+        self.assertEqual(package_lock["version"], EXPECTED_VERSION)
+        self.assertEqual(package_lock["packages"][""]["version"], EXPECTED_VERSION)
         self.assertEqual(manifest["minimum_chrome_version"], "116")
         self.assertEqual(manifest["icons"], expected_icons)
         self.assertEqual(manifest["action"]["default_icon"], expected_icons)
         installer = (ROOT / "install.command").read_text(encoding="utf-8")
+        server = (ROOT / "companion_service" / "server.py").read_text(encoding="utf-8")
         self.assertIn(f'REQUIRED_SERVICE_VERSION="{EXPECTED_VERSION}"', installer)
+        self.assertIn(f'MIN_EXTENSION_VERSION = "{EXPECTED_MIN_EXTENSION_VERSION}"', server)
         for relative in expected_icons.values():
             self.assertIn(relative, EXPECTED_EXTENSION_FILES)
             self.assertTrue((ROOT / relative).is_file(), relative)
@@ -213,8 +221,8 @@ class ReleaseArtifactTests(unittest.TestCase):
             server_path = source / "companion_service" / "server.py"
             server_path.write_text(
                 server_path.read_text(encoding="utf-8").replace(
-                    'SERVICE_VERSION = "0.9.0"',
                     'SERVICE_VERSION = "0.9.1"',
+                    'SERVICE_VERSION = "0.9.2"',
                     1,
                 ),
                 encoding="utf-8",
@@ -222,9 +230,24 @@ class ReleaseArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(self.release.ReleaseError, "version mismatch"):
                 self.release.validate_release(source, require_clean=False)
 
+    def test_release_rejects_minimum_extension_newer_than_release(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="qc-release-min-extension-drift-") as temp_dir:
+            source = self.make_clean_source(Path(temp_dir) / "source")
+            server_path = source / "companion_service" / "server.py"
+            server_path.write_text(
+                server_path.read_text(encoding="utf-8").replace(
+                    'MIN_EXTENSION_VERSION = "0.9.0"',
+                    'MIN_EXTENSION_VERSION = "0.9.2"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(self.release.ReleaseError, "minimum extension version"):
+                self.release.validate_release(source, require_clean=False)
+
     def test_release_rejects_installer_contract_drift(self) -> None:
         for original, replacement, message in (
-            ('REQUIRED_SERVICE_VERSION="0.9.0"', 'REQUIRED_SERVICE_VERSION="0.9.1"', "installer service version"),
+            ('REQUIRED_SERVICE_VERSION="0.9.1"', 'REQUIRED_SERVICE_VERSION="0.9.2"', "installer service version"),
             ('REQUIRED_API_VERSION="1"', 'REQUIRED_API_VERSION="2"', "installer API version"),
         ):
             with self.subTest(replacement=replacement), tempfile.TemporaryDirectory(
@@ -237,6 +260,23 @@ class ReleaseArtifactTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 with self.assertRaisesRegex(self.release.ReleaseError, message):
+                    self.release.validate_release(source, require_clean=False)
+
+    def test_release_rejects_package_metadata_version_drift(self) -> None:
+        for relative, old, new in (
+            ("package.json", '"version": "0.9.1"', '"version": "0.9.2"'),
+            ("package-lock.json", '"version": "0.9.1"', '"version": "0.9.2"'),
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory(
+                prefix="qc-release-package-version-drift-"
+            ) as temp_dir:
+                source = self.make_clean_source(Path(temp_dir) / "source")
+                metadata = source / relative
+                metadata.write_text(
+                    metadata.read_text(encoding="utf-8").replace(old, new, 1),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(self.release.ReleaseError, "version mismatch"):
                     self.release.validate_release(source, require_clean=False)
 
     def test_release_rejects_fake_active_hash_with_real_hash_only_in_comment(self) -> None:
@@ -270,7 +310,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         required = (
             set(self.release.EXTENSION_FILES)
             | set(self.release.COMPANION_FILES)
-            | {".codex-plugin/plugin.json"}
+            | set(self.release.VERSION_CONTRACT_FILES)
         )
         for relative in sorted(required):
             source = ROOT / relative

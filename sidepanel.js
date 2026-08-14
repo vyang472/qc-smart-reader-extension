@@ -49,9 +49,10 @@ const SELECTION_QUEUED_MESSAGE = "qc-smart-reader-selection-queued";
 const CLAIM_SELECTION_MESSAGE = "qc-smart-reader-claim-selection";
 const FALLBACK_LEGACY_PROJECT_ID = "default";
 const PENDING_NOTE_SYNC_TAG_PREFIX = "qc-local-note:";
-const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.0";
+const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.1";
 const REQUIRED_COMPANION_API_VERSION = 1;
 const MODEL_DATA_CONSENT_VERSION = "2026-08-14-v1";
+const ONBOARDING_MILESTONES_KEY = "onboardingMilestones";
 const BATCH_RETRYABLE_FAILURE_LIMITS = {
   page_timeout: 3,
   network_error: 3,
@@ -144,7 +145,9 @@ const state = {
   strategyTickets: [],
   backtestResults: [],
   strategyReviews: [],
-  claimReviewQueue: []
+  claimReviewQueue: [],
+  onboardingMilestones: {},
+  onboardingReviewVerified: false
 };
 
 let pendingSelectionConsumption = Promise.resolve();
@@ -210,15 +213,20 @@ function assertCurrentSourceProject() {
 }
 
 function resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId) {
-  if (!state.source || previousProjectId === nextProjectId) return false;
-  state.source = null;
-  state.lastAnswer = "";
-  state.lastAnswerSourceFingerprint = "";
-  state.currentSourceDetailId = "";
-  state.currentSourceDetail = null;
-  state.sourceDiffs = {};
-  $("answers").textContent = "";
-  renderSource();
+  if (previousProjectId === nextProjectId) return false;
+  if (state.source) {
+    state.source = null;
+    state.lastAnswer = "";
+    state.lastAnswerSourceFingerprint = "";
+    state.currentSourceDetailId = "";
+    state.currentSourceDetail = null;
+    state.sourceDiffs = {};
+    $("answers").textContent = "";
+    renderSource();
+  }
+  hideQuickStartEvidence();
+  state.onboardingReviewVerified = false;
+  renderQuickStart();
   setStatus(`已切换到项目 ${nextProjectId}；请重新读取该项目的来源。`);
   return true;
 }
@@ -234,6 +242,7 @@ async function init() {
   bindTabs();
   renderAgents();
   bindEvents();
+  await loadOnboardingMilestones();
   await loadSettings();
   bindPendingSelectionMessages();
   await queuePendingSelectionHydration({ automatic: true });
@@ -243,16 +252,12 @@ async function init() {
     await loadBatchQueue();
     return;
   }
-  try {
-    const health = await companionRequest("/health", { method: "GET" });
-    assertCompatibleCompanion(health);
-  } catch (error) {
-    showTab("settings");
-    setSettingsStatus(`本地服务尚未就绪：${error.message}`);
+  const startup = await authenticateCompanionForStartup();
+  if (!startup) {
     await loadBatchQueue();
     return;
   }
-  await loadProjects();
+  if (await loadProjectDashboard({ quiet: true })) setProjectStatus("");
   await loadProjectBrief();
   await loadCapturePlans();
   await refreshKnowledgeWorkspace();
@@ -260,6 +265,28 @@ async function init() {
   await loadDeliverables();
   await loadStrategyWorkspace();
   await loadBatchQueue();
+}
+
+async function authenticateCompanionForStartup() {
+  try {
+    const health = await companionRequest("/health", { method: "GET" });
+    assertCompatibleCompanion(health);
+    const projectsResponse = await companionRequest("/v1/projects", { method: "GET" });
+    state.projects = projectsResponse.projects || [];
+    renderProjectSelect();
+    await markOnboardingMilestone("pairedAt");
+    renderQuickStart({ restored: true });
+    return { health, projects: state.projects };
+  } catch (error) {
+    const card = $("quickStartCard");
+    if (card) card.hidden = true;
+    showTab("settings");
+    const pairingHint = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message)
+      ? "Pairing Token 已失效或不正确："
+      : "本地服务尚未就绪：";
+    setSettingsStatus(`${pairingHint}${error.message}`);
+    return null;
+  }
 }
 
 function bindTabs() {
@@ -314,6 +341,8 @@ function renderAgents() {
 
 function bindEvents() {
   $("readPageBtn").addEventListener("click", readCurrentPage);
+  $("quickStartBtn").addEventListener("click", runQuickStart);
+  $("quickStartAcceptClaimBtn").addEventListener("click", acceptQuickStartClaim);
   $("useSelectionBtn").addEventListener("click", readSelectedTextFromPage);
   $("readSelectorBtn").addEventListener("click", readManualSelectorFromPage);
   $("enqueueNextPagesBtn").addEventListener("click", createNextPageCapturePlans);
@@ -567,44 +596,405 @@ async function readSelectedTextFromPage() {
   }
 }
 
-async function readCurrentPage() {
+async function readCurrentPage(options = {}) {
   setBusy(true);
   setStatus("正在读取当前页面...");
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("没有找到当前标签页。");
-
-    const result = await extractReadablePageFromTab(tab.id);
-
-    const extracted = result || {};
-    state.source = {
-      title: extracted.title || tab.title || "当前页面",
-      projectId: currentProjectId(),
-      url: tab.url || extracted.url || "",
-      canonicalUrl: extracted.canonicalUrl || normalizeUrl(tab.url || extracted.url || ""),
-      text: extracted.text || "",
-      markdown: extracted.markdown || "",
-      kind: extracted.kind || "page",
-      site: extracted.site || inferSiteFromUrl(tab.url || extracted.url || ""),
-      author: extracted.author || "",
-      publishedAt: extracted.publishedAt || "",
-      blocks: extracted.blocks || [],
-      images: extracted.images || [],
-      links: extracted.links || [],
-      nextPages: extracted.nextPages || [],
-      stats: extracted.stats || {},
-      capturedAt: new Date().toISOString()
-    };
-    markCurrentSourceFingerprint();
-    renderSource();
-
-    if (!state.source.text.trim()) {
-      setStatus("没有抽取到正文。PDF 页面可以先选中文本后右键发送，或复制正文到问题框。");
-    } else {
-      setStatus(`已读取 ${countCjkAwareChars(state.source.text)} 字。`);
-    }
+    const capture = await readAndPersistCurrentPage();
+    setStatus(`已读取 ${countCjkAwareChars(state.source.text)} 字；已保存到本地 Vault（${capture.source.id}）。`);
+    return capture;
   } catch (error) {
-    setStatus(`读取失败：${error.message}`);
+    const prefix = error?.pageWasRead && state.source?.text?.trim()
+      ? `已读取 ${countCjkAwareChars(state.source.text)} 字，但未保存到 Vault：`
+      : "读取失败：";
+    setStatus(`${prefix}${error.message}`);
+    if (options?.throwOnError) throw error;
+    return null;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function readAndPersistCurrentPage() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error("没有找到当前标签页。");
+
+  const extracted = await extractFromTab(tab.id, tab);
+  state.source = {
+    ...extracted,
+    projectId: currentProjectId()
+  };
+  markCurrentSourceFingerprint();
+  renderSource();
+  if (!state.source.text.trim()) {
+    throw new Error("没有抽取到正文。PDF 页面可以先选中文本后右键发送。");
+  }
+
+  let capture;
+  try {
+    capture = await ensureCurrentSourceCaptured();
+  } catch (error) {
+    error.pageWasRead = true;
+    throw error;
+  }
+  await markOnboardingMilestone("capturedAt", {
+    lastSourceId: capture.source.id,
+    projectId: currentProjectId()
+  });
+  return capture;
+}
+
+async function loadOnboardingMilestones() {
+  const stored = await chrome.storage.local.get(ONBOARDING_MILESTONES_KEY);
+  const value = stored?.[ONBOARDING_MILESTONES_KEY];
+  state.onboardingMilestones = value && typeof value === "object" && !Array.isArray(value)
+    ? { ...value }
+    : {};
+  state.onboardingReviewVerified = false;
+  return state.onboardingMilestones;
+}
+
+async function markOnboardingMilestone(field, metadata = {}) {
+  if (!field) return state.onboardingMilestones;
+  const previous = state.onboardingMilestones && typeof state.onboardingMilestones === "object"
+    ? state.onboardingMilestones
+    : {};
+  const timestamp = previous[field] && field === "pairedAt"
+    ? previous[field]
+    : new Date().toISOString();
+  const next = { ...previous };
+  if (field === "capturedAt" || (
+    field === "extractedAt"
+      && (previous.projectId !== metadata.projectId || previous.lastSourceId !== metadata.lastSourceId)
+  )) {
+    const downstreamKeys = field === "capturedAt"
+      ? [
+          "extractedAt",
+          "claimReadyAt",
+          "firstReviewedAt",
+          "firstClaimId",
+          "firstEvidenceId",
+          "reviewInvalidatedAt",
+          "reviewInvalidatedFromReviewedAt",
+          "reviewInvalidatedStatus"
+        ]
+      : [
+          "claimReadyAt",
+          "firstReviewedAt",
+          "firstClaimId",
+          "firstEvidenceId",
+          "reviewInvalidatedAt",
+          "reviewInvalidatedFromReviewedAt",
+          "reviewInvalidatedStatus"
+        ];
+    for (const key of downstreamKeys) {
+      delete next[key];
+    }
+    state.onboardingReviewVerified = false;
+  }
+  if (field === "firstReviewedAt") {
+    delete next.reviewInvalidatedAt;
+    delete next.reviewInvalidatedFromReviewedAt;
+    delete next.reviewInvalidatedStatus;
+  }
+  state.onboardingMilestones = {
+    ...next,
+    ...metadata,
+    [field]: timestamp
+  };
+  await chrome.storage.local.set({ [ONBOARDING_MILESTONES_KEY]: state.onboardingMilestones });
+  renderQuickStart();
+  return state.onboardingMilestones;
+}
+
+function renderQuickStart(options = {}) {
+  const card = $("quickStartCard");
+  if (!card) return;
+  const milestones = state.onboardingMilestones || {};
+  const paired = Boolean(milestones.pairedAt && state.settings?.pairingToken);
+  const projectMatches = milestones.projectId === currentProjectId();
+  const reviewedAndVerified = Boolean(
+    projectMatches && milestones.firstReviewedAt && state.onboardingReviewVerified
+  );
+  card.hidden = !paired;
+  if (!paired) return;
+
+  const steps = [
+    ["quickStartPairStep", Boolean(milestones.pairedAt)],
+    ["quickStartCaptureStep", Boolean(projectMatches && milestones.capturedAt)],
+    ["quickStartExtractStep", Boolean(projectMatches && milestones.extractedAt)],
+    ["quickStartEvidenceStep", Boolean(projectMatches && milestones.claimReadyAt)],
+    ["quickStartReviewStep", reviewedAndVerified]
+  ];
+  const completed = steps.filter(([, done]) => done).length;
+  for (const [id, done] of steps) {
+    const node = $(id);
+    node?.classList?.toggle?.("done", done);
+  }
+
+  const progress = $("quickStartProgress");
+  if (progress) {
+    progress.textContent = `${completed} / ${steps.length}`;
+    progress.classList?.toggle?.("done", completed === steps.length);
+    progress.classList?.toggle?.("in-progress", completed !== steps.length);
+  }
+  const button = $("quickStartBtn");
+  if (button) {
+    button.textContent = reviewedAndVerified
+      ? "用当前页再生成一条证据"
+      : projectMatches && milestones.claimReadyAt
+        ? "换当前页生成另一条证据"
+        : projectMatches && milestones.capturedAt
+        ? "继续：用当前页完成证据链"
+        : "从当前页生成第一条证据";
+  }
+  const status = $("quickStartStatus");
+  if (status && options.restored) {
+    const restoredStep = reviewedAndVerified
+      ? "第一条 claim 已完成人工核对"
+      : projectMatches && milestones.reviewInvalidatedAt
+        ? `服务端状态已变为 ${milestones.reviewInvalidatedStatus || "待验证"}，需要重新人工核对`
+      : projectMatches && milestones.claimReadyAt
+        ? "claim 与 exact quote 已就绪，等待人工接受"
+      : projectMatches && milestones.extractedAt
+        ? "已完成本地抽取，等待查看证据"
+        : projectMatches && milestones.capturedAt
+          ? "已保存过来源，可从当前页继续"
+          : "本地服务已配对";
+    status.textContent = `已恢复本地进度：${restoredStep}。`;
+  }
+}
+
+function firstQuoteBackedClaim(records) {
+  const claims = Array.isArray(records?.claims) ? records.claims : [];
+  const evidenceRows = Array.isArray(records?.evidence) ? records.evidence : [];
+  for (const claim of claims) {
+    const evidence = evidenceRows.find((item) => (
+      item.claim_id === claim.id && String(item.quote || "").trim()
+    ));
+    if (evidence) return { claim, evidence };
+  }
+  return null;
+}
+
+function revealQuickStartEvidence(claim, evidence, options = {}) {
+  const card = $("quickStartEvidence");
+  if (!card || !claim || !evidence) return;
+  $("quickStartClaimText").textContent = String(claim.text || "");
+  $("quickStartQuoteText").textContent = String(evidence.quote || "");
+  card.dataset.claimId = claim.id || "";
+  card.dataset.evidenceId = evidence.id || "";
+  card.dataset.projectId = options.projectId || claim.project_id || currentProjectId();
+  card.dataset.claimStatus = claim.status || "";
+  card.hidden = false;
+  const acceptButton = $("quickStartAcceptClaimBtn");
+  const hasLocalReviewMilestone = Boolean(
+    state.onboardingMilestones?.firstReviewedAt
+      && state.onboardingMilestones?.projectId === card.dataset.projectId
+      && state.onboardingMilestones?.firstClaimId === claim.id
+  );
+  const hasInvalidatedReview = Boolean(
+    state.onboardingMilestones?.reviewInvalidatedAt
+      && state.onboardingMilestones?.projectId === card.dataset.projectId
+      && state.onboardingMilestones?.firstClaimId === claim.id
+  );
+  const alreadyReviewed = hasLocalReviewMilestone
+    && state.onboardingReviewVerified
+    && claim.status === "reviewed";
+  if (acceptButton) {
+    acceptButton.dataset.claimId = claim.id || "";
+    acceptButton.disabled = alreadyReviewed;
+    acceptButton.textContent = alreadyReviewed ? "已人工接受" : "我已核对原文，接受这条 claim";
+  }
+  const reviewStatus = $("quickStartReviewStatus");
+  if (reviewStatus) {
+    reviewStatus.textContent = alreadyReviewed
+      ? "这条 claim 已由你人工核对，服务端当前状态为 reviewed。"
+      : hasLocalReviewMilestone || hasInvalidatedReview
+        ? `本地记录显示你曾接受，但服务端当前状态为 ${claim.status || "未知"}；请重新核对后再接受。`
+        : "尚未人工接受；请先核对 claim 是否被 exact quote 支持。";
+  }
+  if (options.focus !== false) {
+    card.classList?.remove?.("quick-start-highlight");
+    void card.offsetWidth;
+    card.classList?.add?.("quick-start-highlight");
+    card.focus?.();
+    card.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }
+
+  for (const node of document.querySelectorAll?.("[data-claim-record-id], [data-evidence-record-id]") || []) {
+    const matches = node.dataset.claimRecordId === claim.id || node.dataset.evidenceRecordId === evidence.id;
+    node.classList?.toggle?.("quick-start-highlight", matches);
+  }
+}
+
+function hideQuickStartEvidence() {
+  const card = $("quickStartEvidence");
+  if (!card) return;
+  card.hidden = true;
+  card.dataset.claimId = "";
+  card.dataset.evidenceId = "";
+  card.dataset.projectId = "";
+  card.dataset.claimStatus = "";
+  $("quickStartClaimText").textContent = "";
+  $("quickStartQuoteText").textContent = "";
+  const button = $("quickStartAcceptClaimBtn");
+  if (button) {
+    button.dataset.claimId = "";
+    button.disabled = true;
+  }
+}
+
+function restoreQuickStartEvidenceFromRecords(records) {
+  const milestones = state.onboardingMilestones || {};
+  state.onboardingReviewVerified = false;
+  hideQuickStartEvidence();
+  if (
+    milestones.projectId !== currentProjectId()
+      || !milestones.claimReadyAt
+      || !milestones.firstClaimId
+      || !milestones.firstEvidenceId
+  ) {
+    renderQuickStart();
+    return false;
+  }
+  const claim = (records?.claims || []).find((item) => item.id === milestones.firstClaimId);
+  const evidence = (records?.evidence || []).find((item) => (
+    item.id === milestones.firstEvidenceId
+      && item.claim_id === milestones.firstClaimId
+      && String(item.quote || "").trim()
+  ));
+  if (!claim || !evidence) {
+    renderQuickStart();
+    return false;
+  }
+  const hadActiveReview = Boolean(milestones.firstReviewedAt);
+  if (hadActiveReview && claim.status === "reviewed") {
+    state.onboardingReviewVerified = true;
+  } else if (hadActiveReview) {
+    invalidateQuickStartReviewMilestone(claim.status || "unknown");
+  }
+  renderQuickStart({ restored: hadActiveReview || Boolean(state.onboardingMilestones?.reviewInvalidatedAt) });
+  revealQuickStartEvidence(claim, evidence, { focus: false, projectId: milestones.projectId });
+  return true;
+}
+
+function invalidateQuickStartReviewMilestone(serverStatus) {
+  const milestones = state.onboardingMilestones || {};
+  if (!milestones.firstReviewedAt) return false;
+  const invalidated = {
+    ...milestones,
+    reviewInvalidatedAt: new Date().toISOString(),
+    reviewInvalidatedFromReviewedAt: milestones.firstReviewedAt,
+    reviewInvalidatedStatus: serverStatus || "unknown"
+  };
+  delete invalidated.firstReviewedAt;
+  state.onboardingMilestones = invalidated;
+  state.onboardingReviewVerified = false;
+  chrome.storage.local.set({ [ONBOARDING_MILESTONES_KEY]: invalidated }).catch((error) => {
+    console.warn("Quick Start review invalidation milestone could not be persisted.", error);
+  });
+  return true;
+}
+
+async function runQuickStart() {
+  await ensureSettingsLoaded();
+  if (!state.settings?.pairingToken) {
+    setStatus("请先在设置中填写 Pairing Token 并测试本地服务。");
+    showTab("settings");
+    return null;
+  }
+
+  setBusy(true);
+  const quickStatus = $("quickStartStatus");
+  try {
+    await markOnboardingMilestone("pairedAt");
+    if (quickStatus) quickStatus.textContent = "1 / 5 正在读取当前页并保存到本地 Vault...";
+    const capture = await readAndPersistCurrentPage();
+    const sourceId = capture?.source?.id;
+    if (!sourceId) throw new Error("本地服务没有返回 source id。");
+
+    if (quickStatus) quickStatus.textContent = "2 / 5 已保存 Vault；正在运行本地模板抽取...";
+    const result = await requestKnowledgeExtraction(sourceId, "mock");
+    await markOnboardingMilestone("extractedAt", { lastSourceId: sourceId, projectId: currentProjectId() });
+    await applyKnowledgeExtractionResult(sourceId, result, "Quick Start 已抽取");
+    const records = result.records || {};
+    const firstEvidence = firstQuoteBackedClaim(records);
+    if (!firstEvidence) {
+      throw new Error("本地模板没有返回同时包含 claim 与 exact quote 的证据链；未标记为完成。");
+    }
+
+    renderKnowledgeRecords(records);
+    revealQuickStartEvidence(firstEvidence.claim, firstEvidence.evidence);
+    await markOnboardingMilestone("claimReadyAt", {
+      lastSourceId: sourceId,
+      projectId: currentProjectId(),
+      firstClaimId: firstEvidence.claim.id || "",
+      firstEvidenceId: firstEvidence.evidence.id || ""
+    });
+    if (quickStatus) quickStatus.textContent = "4 / 5 证据已就绪：请核对 exact quote，再人工接受 claim。";
+    setKnowledgeRecordStatus("Quick Start 已定位第一条 claim 与 exact quote；尚未人工接受，也未调用外部模型。");
+    showTab("knowledge");
+    revealQuickStartEvidence(firstEvidence.claim, firstEvidence.evidence);
+    return { capture, result, ...firstEvidence };
+  } catch (error) {
+    if (quickStatus) quickStatus.textContent = `Quick Start 未完成：${error.message}`;
+    setStatus(`Quick Start 未完成：${error.message}`);
+    return null;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function acceptQuickStartClaim() {
+  const card = $("quickStartEvidence");
+  const claimId = String(card?.dataset?.claimId || state.onboardingMilestones?.firstClaimId || "").trim();
+  const quote = String($("quickStartQuoteText")?.textContent || "").trim();
+  const evidenceProjectId = String(card?.dataset?.projectId || "").trim();
+  if (!evidenceProjectId || evidenceProjectId !== currentProjectId()) {
+    $("quickStartReviewStatus").textContent = "无法接受：这条证据属于另一个项目，已阻止跨项目审阅。";
+    setStatus("已阻止跨项目审阅；请在当前项目重新运行 Quick Start。");
+    return null;
+  }
+  if (!claimId || !quote) {
+    $("quickStartReviewStatus").textContent = "无法接受：缺少 claim 或 exact quote，请重新运行 Quick Start。";
+    return null;
+  }
+
+  setBusy(true);
+  $("quickStartReviewStatus").textContent = "正在保存你的人工接受决定...";
+  try {
+    const result = await companionRequest(`/v1/claims/${encodeURIComponent(claimId)}/review`, {
+      method: "POST",
+      body: {
+        status: "reviewed",
+        reviewer: "quick-start-user",
+        review_note: "Accepted in Quick Start after inspecting the exact quote."
+      }
+    });
+    if (result?.claim?.status !== "reviewed") {
+      throw new Error("本地服务没有确认 claim 已保存为 reviewed；未记录完成里程碑。");
+    }
+    if (card) card.dataset.claimStatus = "reviewed";
+    state.onboardingReviewVerified = true;
+    await markOnboardingMilestone("firstReviewedAt", {
+      projectId: currentProjectId(),
+      firstClaimId: claimId,
+      firstEvidenceId: card?.dataset?.evidenceId || state.onboardingMilestones?.firstEvidenceId || ""
+    });
+    await refreshClaimReviewAfterMutation();
+    $("quickStartReviewStatus").textContent = "已人工接受；该 claim 已保存为 reviewed。";
+    const button = $("quickStartAcceptClaimBtn");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "已人工接受";
+    }
+    $("quickStartStatus").textContent = "5 / 5 已完成：第一条 quote-backed claim 已人工核对并保存。";
+    renderQuickStart();
+    return result;
+  } catch (error) {
+    $("quickStartReviewStatus").textContent = `接受失败：${error.message}`;
+    return null;
   } finally {
     setBusy(false);
   }
@@ -3059,10 +3449,17 @@ async function askAgents() {
     showTab("settings");
     return;
   }
-  if (!hasCurrentModelDataConsent()) {
-    setStatus("首次调用模型前，请在设置中阅读并勾选材料外发同意。采集和本地保存不受影响。");
+  const provider = selectedModelProvider();
+  if (provider === "mock") {
+    setStatus("本地模板只生成可审阅的结构化内容，不生成聊天答案。可使用 Quick Start；如需 Agent 阅读，请在设置中选择并配置外部模型。");
     showTab("settings");
-    $("modelDataConsentInput")?.focus?.();
+    return;
+  }
+  const blockingReason = externalProviderBlockingReason(provider);
+  if (blockingReason) {
+    setStatus(`模型调用已阻止：${blockingReason}。`);
+    showTab("settings");
+    if (!hasCurrentModelDataConsent()) $("modelDataConsentInput")?.focus?.();
     return;
   }
 
@@ -4420,6 +4817,50 @@ function removeEmptyValues(value) {
   return output;
 }
 
+function selectedModelProvider() {
+  return String($("providerSelect")?.value || state.settings?.provider || "mock").trim() || "mock";
+}
+
+function modelProviderLabel(provider = selectedModelProvider()) {
+  return {
+    mock: "本地模板（Mock 模式）",
+    openai: "OpenAI-compatible",
+    anthropic: "Anthropic",
+    codex: "Codex CLI"
+  }[provider] || provider;
+}
+
+function currentProviderReady(provider = selectedModelProvider()) {
+  if (provider === "mock") return true;
+  if (state.settings?.modelSettingsProvider && state.settings.modelSettingsProvider !== provider) return false;
+  return Boolean(state.settings?.modelReady && state.settings?.modelRoute !== "mock");
+}
+
+function externalProviderBlockingReason(provider = selectedModelProvider()) {
+  if (provider === "mock") return "";
+  const issues = [];
+  if (!currentProviderReady(provider)) issues.push("模型配置未就绪");
+  if (!hasCurrentModelDataConsent()) issues.push("未同意将材料发送给所选模型");
+  return issues.length
+    ? `${modelProviderLabel(provider)} ${issues.join("；")}；不会自动改用本地模板（Mock 模式）`
+    : "";
+}
+
+function resolveKnowledgeExtractionMode() {
+  const provider = selectedModelProvider();
+  if (provider === "mock") return "mock";
+  const blockingReason = externalProviderBlockingReason(provider);
+  if (blockingReason) throw new Error(`${blockingReason}。`);
+  return "provider";
+}
+
+async function requestKnowledgeExtraction(sourceId, mode) {
+  return companionRequest(`/v1/sources/${encodeURIComponent(sourceId)}/extract-knowledge`, {
+    method: "POST",
+    body: { mode, max_claims: 5, project_id: currentProjectId() }
+  });
+}
+
 async function extractKnowledgeFromCurrentSource() {
   if (!state.source?.text?.trim()) {
     setKnowledgeRecordStatus("请先读取当前页、选中文本或导入 PDF。");
@@ -4427,17 +4868,23 @@ async function extractKnowledgeFromCurrentSource() {
     return;
   }
 
+  let extractionMode;
+  try {
+    extractionMode = resolveKnowledgeExtractionMode();
+  } catch (error) {
+    setKnowledgeRecordStatus(`抽取已阻止：${error.message}`);
+    showTab("settings");
+    return;
+  }
+
   setBusy(true);
-  const extractionMode = hasCurrentModelDataConsent() ? "provider" : "mock";
-  setKnowledgeRecordStatus(extractionMode === "mock" ? "正在生成本地 Mock 模板（未调用模型）..." : "正在调用已配置模型抽取结构化知识...");
+  setKnowledgeRecordStatus(extractionMode === "mock" ? "正在运行本地模板抽取（Mock 模式，未调用外部模型）..." : "正在调用已配置模型抽取结构化知识...");
   try {
     const capture = await ensureCurrentSourceCaptured();
     const sourceId = capture?.source?.id || state.source.sourceId;
     if (!sourceId) throw new Error("本地服务没有返回 source id。");
-    const result = await companionRequest(`/v1/sources/${encodeURIComponent(sourceId)}/extract-knowledge`, {
-      method: "POST",
-      body: { mode: extractionMode, max_claims: 5, project_id: currentProjectId() }
-    });
+    const result = await requestKnowledgeExtraction(sourceId, extractionMode);
+    await markOnboardingMilestone("extractedAt", { lastSourceId: sourceId, projectId: currentProjectId() });
     await applyKnowledgeExtractionResult(sourceId, result, "已抽取草稿");
   } catch (error) {
     setKnowledgeRecordStatus(`抽取失败：${error.message}`);
@@ -4458,7 +4905,7 @@ async function applyKnowledgeExtractionResult(sourceId, result, label) {
   const run = result.agent_run || {};
   const runInput = run.input || {};
   const modeLabel = runInput.effective_mode === "mock" || run.agent_id === "mock_structured_extractor"
-    ? "Mock 模板 · 未调用外部模型"
+    ? "本地模板 · Mock 模式 · 未调用外部模型"
     : `${runInput.provider || "provider"}${run.model ? ` · ${run.model}` : ""}`;
   await refreshKnowledgeListsAfterMutation();
   setKnowledgeRecordStatus(`${label}：${formatKnowledgeCounts(counts)}；${modeLabel}${run.id ? `；run ${run.id}` : ""}`);
@@ -4467,10 +4914,17 @@ async function applyKnowledgeExtractionResult(sourceId, result, label) {
 
 async function reextractSource(sourceId) {
   if (!sourceId) return null;
+  let extractionMode;
+  try {
+    extractionMode = resolveKnowledgeExtractionMode();
+  } catch (error) {
+    setKnowledgeRecordStatus(`重跑抽取已阻止：${error.message}`);
+    showTab("settings");
+    return null;
+  }
   setBusy(true);
   setKnowledgeRecordStatus("正在重跑结构化抽取...");
   try {
-    const extractionMode = hasCurrentModelDataConsent() ? "provider" : "mock";
     const data = await companionRequest(`/v1/sources/${encodeURIComponent(sourceId)}/reextract`, {
       method: "POST",
       body: {
@@ -4484,6 +4938,7 @@ async function reextractSource(sourceId) {
       state.sourceDiffs[sourceId] = data.diff;
     }
     const result = data.result || {};
+    await markOnboardingMilestone("extractedAt", { lastSourceId: sourceId, projectId: currentProjectId() });
     await applyKnowledgeExtractionResult(sourceId, result, "已重跑抽取");
     if (state.currentSourceDetailId === sourceId) {
       await loadSourceDetail(sourceId);
@@ -4511,11 +4966,14 @@ async function loadKnowledgeRecords() {
   try {
     const data = await companionRequest(`/v1/knowledge/records${queryWithProject({ limit: "50" })}`, { method: "GET" });
     renderKnowledgeRecords(data);
+    restoreQuickStartEvidenceFromRecords(data);
     setKnowledgeRecordStatus("");
+    return data;
   } catch (error) {
     console.warn("Companion knowledge records list failed.", error);
     renderKnowledgeRecords({});
     setKnowledgeRecordStatus(`无法读取结构化记录：${error.message}`);
+    return null;
   }
 }
 
@@ -5049,7 +5507,7 @@ function renderClaimRecord(item) {
     item.reviewer ? `reviewer ${item.reviewer}` : ""
   ].filter(Boolean).join(" · ");
   return `
-    <div class="record-line">
+    <div class="record-line" data-claim-record-id="${escapeHtml(item.id || "")}">
       <label class="claim-select-row">
         <input type="checkbox" value="${escapeHtml(item.id)}" data-claim-select>
         <span>加入专题包</span>
@@ -5097,17 +5555,20 @@ function renderEntityRecord(item) {
 }
 
 function renderEvidenceRecord(item) {
-  return renderRecordLine(
-    item.quote || item.claim_id || "evidence",
-    [
-      item.strength,
-      item.source_id ? `source ${item.source_id}` : "",
-      item.chunk_id ? `chunk ${item.chunk_id}` : "",
-      item.page ? `page ${item.page}` : "",
-      item.floor ? `floor ${item.floor}` : ""
-    ].filter(Boolean).join(" · "),
-    item.url || ""
-  );
+  const meta = [
+    item.strength,
+    item.source_id ? `source ${item.source_id}` : "",
+    item.chunk_id ? `chunk ${item.chunk_id}` : "",
+    item.page ? `page ${item.page}` : "",
+    item.floor ? `floor ${item.floor}` : ""
+  ].filter(Boolean).join(" · ");
+  return `
+    <div class="record-line" data-evidence-record-id="${escapeHtml(item.id || "")}">
+      <strong>${escapeHtml(shortText(item.quote || item.claim_id || "evidence", 180))}</strong>
+      ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+      ${item.url ? `<p>${escapeHtml(shortText(item.url, 260))}</p>` : ""}
+    </div>
+  `;
 }
 
 function renderRelationRecord(item) {
@@ -5573,7 +6034,7 @@ async function loadSettings() {
   state.settings = {
     serviceUrl: "http://127.0.0.1:37621",
     pairingToken: "",
-    provider: "openai",
+    provider: "mock",
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-5",
     temperature: 0.2,
@@ -5582,6 +6043,9 @@ async function loadSettings() {
     modelDataConsent: false,
     modelDataConsentVersion: "",
     modelDataConsentAt: "",
+    modelSettingsProvider: "mock",
+    modelReady: true,
+    modelRoute: "mock",
     projectId: "default",
     ...localSettings
   };
@@ -5620,7 +6084,7 @@ async function saveSettings(options = {}) {
       ...state.settings,
       serviceUrl: $("serviceUrlInput").value.trim() || "http://127.0.0.1:37621",
       pairingToken: $("pairingTokenInput").value.trim(),
-      provider: $("providerSelect").value || state.settings?.provider || "openai",
+      provider: $("providerSelect").value || state.settings?.provider || "mock",
       baseUrl: $("baseUrlInput").value.trim(),
       model: $("modelInput").value.trim(),
       temperature: Number($("temperatureInput").value || 0.2),
@@ -5654,7 +6118,7 @@ async function loadModelSettings() {
 }
 
 function applyModelSettings(settings) {
-  state.settings.provider = settings.provider ?? state.settings.provider ?? "openai";
+  state.settings.provider = settings.provider ?? state.settings.provider ?? "mock";
   state.settings.baseUrl = settings.base_url ?? state.settings.baseUrl ?? "https://api.openai.com/v1";
   state.settings.model = settings.model ?? state.settings.model ?? "gpt-5";
   state.settings.temperature = Number(settings.temperature ?? state.settings.temperature ?? 0.2);
@@ -5662,6 +6126,11 @@ function applyModelSettings(settings) {
   state.settings.codexTimeoutSeconds = normalizeCodexTimeout(
     settings.codex_timeout_seconds ?? state.settings.codexTimeoutSeconds
   );
+  state.settings.modelSettingsProvider = state.settings.provider;
+  state.settings.modelRoute = settings.route || (state.settings.provider === "mock" ? "mock" : "provider");
+  state.settings.modelReady = typeof settings.ready === "boolean"
+    ? settings.ready
+    : fallbackModelSettingsReady(settings, state.settings.provider);
   $("providerSelect").value = state.settings.provider;
   $("baseUrlInput").value = state.settings.baseUrl;
   $("modelInput").value = state.settings.model;
@@ -5675,6 +6144,14 @@ function applyModelSettings(settings) {
   syncProviderControls();
 }
 
+function fallbackModelSettingsReady(settings, provider) {
+  if (provider === "mock") return true;
+  if (provider === "codex") {
+    return Boolean(settings.codex_ready || settings.codex_available || settings.codex_command);
+  }
+  return Boolean(settings.has_api_key);
+}
+
 function normalizeCodexTimeout(value) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return 300;
@@ -5682,15 +6159,42 @@ function normalizeCodexTimeout(value) {
 }
 
 function syncProviderControls() {
-  const isCodex = $("providerSelect")?.value === "codex";
+  const provider = selectedModelProvider();
+  const isMock = provider === "mock";
+  const isCodex = provider === "codex";
   const busy = Boolean(state.busy);
+  for (const [id, hidden] of [
+    ["remoteProviderFields", isMock || isCodex],
+    ["codexProviderFields", !isCodex],
+    ["externalModelFields", isMock],
+    ["modelDataConsentRow", isMock],
+    ["externalModelActions", isMock]
+  ]) {
+    const node = $(id);
+    if (node) node.hidden = hidden;
+  }
   for (const id of ["baseUrlInput", "apiKeyInput", "clearApiKeyBtn"]) {
     const node = $(id);
-    if (node) node.disabled = busy || isCodex;
+    if (node) node.disabled = busy || isMock || isCodex;
   }
   for (const id of ["codexCommandInput", "codexTimeoutInput"]) {
     const node = $(id);
     if (node) node.disabled = busy || !isCodex;
+  }
+  for (const id of ["modelInput", "temperatureInput", "modelDataConsentInput", "testSettingsBtn"]) {
+    const node = $(id);
+    if (node) node.disabled = busy || isMock;
+  }
+  const hint = $("modelRouteHint");
+  if (hint) {
+    if (isMock) {
+      hint.textContent = "零配置模式：结构化抽取在本地生成可审阅模板，不发送网页内容，也不生成虚假聊天答案。";
+    } else {
+      const blockingReason = externalProviderBlockingReason(provider);
+      hint.textContent = blockingReason
+        ? `${blockingReason}。请保存配置并完成隐私同意。`
+        : `${modelProviderLabel(provider)} 已就绪；材料只会在你主动运行模型操作时发送。`;
+    }
   }
 }
 
@@ -6598,7 +7102,12 @@ async function testCompanion() {
     const projectsResponse = await companionRequest("/v1/projects", { method: "GET" });
     state.projects = projectsResponse.projects || [];
     renderProjectSelect();
+    await loadModelSettings();
+    await markOnboardingMilestone("pairedAt");
+    renderQuickStart();
     setSettingsStatus(`本地服务和 Pairing Token 均正常：扩展 ${EXTENSION_VERSION} · 服务 ${health.service_version || health.version} · API ${health.api_version} · ${health.vault_dir || health.data_dir}`);
+    showTab("chat");
+    $("quickStartBtn")?.focus?.();
   } catch (error) {
     const pairingHint = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message)
       ? "Pairing Token 无效或未填写："
@@ -6614,9 +7123,13 @@ async function testSettings() {
   setSettingsStatus("正在保存并测试模型...");
   try {
     await saveSettings();
-    if (!hasCurrentModelDataConsent()) {
-      throw new Error("请先勾选材料外发同意；模型测试会向所选服务商发送测试提示。");
+    const provider = selectedModelProvider();
+    if (provider === "mock") {
+      setSettingsStatus("本地模板已就绪：不调用外部模型，无需发送测试提示。可直接运行 Quick Start。");
+      return;
     }
+    const blockingReason = externalProviderBlockingReason(provider);
+    if (blockingReason) throw new Error(`${blockingReason}。`);
     setSettingsStatus("正在测试模型...");
     const answer = await callLlm("请只回复：QC Smart Reader 连接成功。");
     setSettingsStatus(`模型连接成功：${answer.slice(0, 120)}`);
@@ -6717,6 +7230,8 @@ function setBusy(isBusy) {
   state.busy = state.busyDepth > 0;
   const ids = [
     "readPageBtn",
+    "quickStartBtn",
+    "quickStartAcceptClaimBtn",
     "useSelectionBtn",
     "saveNoteBtn",
     "manualSelectorInput",
@@ -6837,6 +7352,16 @@ function setBusy(isBusy) {
     if (!node) return;
     if (id === "pauseBatchBtn" || id === "cancelBatchBtn") {
       node.disabled = !state.batchRunning;
+      return;
+    }
+    if (id === "quickStartAcceptClaimBtn") {
+      node.disabled = state.busy || Boolean(
+        state.onboardingMilestones?.firstReviewedAt
+          && state.onboardingReviewVerified
+          && state.onboardingMilestones?.projectId === currentProjectId()
+          && state.onboardingMilestones?.firstClaimId === node.dataset.claimId
+          && $("quickStartEvidence")?.dataset?.claimStatus === "reviewed"
+      );
       return;
     }
     node.disabled = state.busy;

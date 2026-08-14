@@ -1,6 +1,6 @@
 {
   "name": "qc-smart-reader-extension",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "description": "Local-first Chrome research companion for turning sources into quote-backed knowledge.",
   "license": "MIT",

@@ -26,6 +26,29 @@
 
     <main>
       <section id="chat" class="panel active" role="tabpanel" aria-labelledby="tab-chat">
+        <section id="quickStartCard" class="quick-start-card" aria-labelledby="quickStartTitle" hidden>
+          <div class="quick-start-heading">
+            <div>
+              <span class="eyebrow">QUICK START</span>
+              <h2 id="quickStartTitle">用当前页完成第一条可核验证据</h2>
+            </div>
+            <span id="quickStartProgress" class="status-pill in-progress">0 / 5</span>
+          </div>
+          <p class="hint">一次完成读取、保存到本地 Vault、本地模板抽取，并打开第一条 claim 与原文 exact quote。全程不调用外部模型。</p>
+          <ol class="quick-start-steps">
+            <li id="quickStartPairStep">配对本地服务</li>
+            <li id="quickStartCaptureStep">读取并持久化当前页</li>
+            <li id="quickStartExtractStep">本地模板抽取</li>
+            <li id="quickStartEvidenceStep">查看 claim + exact quote</li>
+            <li id="quickStartReviewStep">人工核对并接受 claim</li>
+          </ol>
+          <div class="toolbar">
+            <button id="quickStartBtn" class="primary" type="button">从当前页生成第一条证据</button>
+          </div>
+          <p id="quickStartStatus" class="status" role="status" aria-live="polite"></p>
+          <p class="local-only-note">进度只保存在 Chrome 本地存储；不发送使用遥测。</p>
+        </section>
+
         <div class="toolbar">
           <button id="readPageBtn" class="primary">读取当前页</button>
           <button id="useSelectionBtn">使用选中文本</button>
@@ -181,6 +204,18 @@
 
         <h2>结构化知识</h2>
         <p class="hint">把当前来源抽成草稿 claims、entities、evidence、risks 和 tasks，写入本地 Vault 的结构化知识层。</p>
+
+        <article id="quickStartEvidence" class="first-evidence-card" tabindex="-1" hidden>
+          <span class="eyebrow">FIRST EVIDENCE</span>
+          <h3>第一条可核验 Claim</h3>
+          <p id="quickStartClaimText" class="first-evidence-claim"></p>
+          <h3>Exact quote · 原文引用</h3>
+          <blockquote id="quickStartQuoteText"></blockquote>
+          <div class="toolbar">
+            <button id="quickStartAcceptClaimBtn" class="primary" type="button">我已核对原文，接受这条 claim</button>
+          </div>
+          <p id="quickStartReviewStatus" class="status" role="status" aria-live="polite">尚未人工接受。</p>
+        </article>
 
         <div class="toolbar">
           <button id="extractKnowledgeBtn" class="primary">抽取结构化知识</button>
@@ -370,7 +405,7 @@
           <ol>
             <li>正式版双击 Companion 包里的 <code>install.command</code>；源码开发时才用 <code>start.command</code>。</li>
             <li>粘贴安装器复制的 Pairing Token，点击“测试本地服务”。</li>
-            <li>选择模型服务商；第一次发送网页内容前确认下面的隐私说明。</li>
+            <li>配对成功后直接运行 Quick Start；默认本地模板零配置，只有切换外部模型时才需要隐私同意。</li>
           </ol>
         </section>
         <label class="field-label" for="serviceUrlInput">Companion URL</label>
@@ -457,42 +492,52 @@
         <h2>模型设置</h2>
         <label class="field-label" for="providerSelect">服务商</label>
         <select id="providerSelect">
+          <option value="mock" selected>本地模板（零配置，不调用外部模型）</option>
           <option value="openai">OpenAI-compatible</option>
           <option value="anthropic">Anthropic</option>
           <option value="codex">Codex CLI（本机，用 ChatGPT 订阅，免 API Key）</option>
         </select>
+        <p id="modelRouteHint" class="provider-route-hint"></p>
 
-        <label class="field-label" for="baseUrlInput">Base URL</label>
-        <input id="baseUrlInput" type="url" placeholder="https://api.openai.com/v1">
+        <div id="remoteProviderFields">
+          <label class="field-label" for="baseUrlInput">Base URL</label>
+          <input id="baseUrlInput" type="url" placeholder="https://api.openai.com/v1">
 
-        <label class="field-label" for="apiKeyInput">API Key</label>
-        <input id="apiKeyInput" type="password" placeholder="留空表示沿用本地服务已保存 key">
+          <label class="field-label" for="apiKeyInput">API Key</label>
+          <input id="apiKeyInput" type="password" placeholder="留空表示沿用本地服务已保存 key">
+        </div>
 
-        <label class="field-label" for="codexCommandInput">Codex CLI 命令</label>
-        <input id="codexCommandInput" type="text" placeholder="留空自动查找 codex；也可填 /opt/homebrew/bin/codex exec">
+        <div id="codexProviderFields">
+          <label class="field-label" for="codexCommandInput">Codex CLI 命令</label>
+          <input id="codexCommandInput" type="text" placeholder="留空自动查找 codex；也可填 /opt/homebrew/bin/codex exec">
 
-        <label class="field-label" for="codexTimeoutInput">Codex 超时（秒）</label>
-        <input id="codexTimeoutInput" type="number" min="10" max="3600" step="10" value="300">
+          <label class="field-label" for="codexTimeoutInput">Codex 超时（秒）</label>
+          <input id="codexTimeoutInput" type="number" min="10" max="3600" step="10" value="300">
+        </div>
 
-        <label class="field-label" for="modelInput">模型名</label>
-        <input id="modelInput" type="text" placeholder="gpt-5 或 claude-sonnet-4-6">
+        <div id="externalModelFields">
+          <label class="field-label" for="modelInput">模型名</label>
+          <input id="modelInput" type="text" placeholder="gpt-5 或 claude-sonnet-4-6">
 
-        <label class="field-label" for="temperatureInput">Temperature</label>
-        <input id="temperatureInput" type="number" min="0" max="2" step="0.1">
+          <label class="field-label" for="temperatureInput">Temperature</label>
+          <input id="temperatureInput" type="number" min="0" max="2" step="0.1">
+        </div>
 
-        <label class="option-row privacy-consent" for="modelDataConsentInput">
+        <label id="modelDataConsentRow" class="option-row privacy-consent" for="modelDataConsentInput">
           <input id="modelDataConsentInput" type="checkbox">
           <span>
             <strong>我同意把我主动提交的材料发送给所选模型</strong>
-            <small>模型操作可能发送网页标题、URL、正文、问题和引用给 Codex/OpenAI 或你配置的第三方端点。本地采集、保存与 Mock 模式不需要此同意。你可以随时取消。</small>
+            <small>模型操作可能发送网页标题、URL、正文、问题和引用给 Codex/OpenAI 或你配置的第三方端点。本地采集、保存与本地模板（Mock 模式）不需要此同意。你可以随时取消。</small>
           </span>
         </label>
         <p class="hint">数据默认保存在本机 Vault，不用于广告或开发者分析。<a href="PRIVACY.md" target="_blank" rel="noreferrer">查看完整隐私说明</a>。</p>
 
         <div class="toolbar">
           <button id="saveSettingsBtn" class="primary">保存设置</button>
-          <button id="testSettingsBtn">测试模型</button>
-          <button id="clearApiKeyBtn">清除服务端 Key</button>
+          <span id="externalModelActions" class="inline-actions">
+            <button id="testSettingsBtn">测试模型</button>
+            <button id="clearApiKeyBtn">清除服务端 Key</button>
+          </span>
         </div>
         <p class="hint">模型 API Key 保存到 companion service 的本地配置文件，不再写入 Chrome storage。OpenAI-compatible 可填 OpenAI、OpenRouter、DeepSeek、智谱兼容网关等支持 /chat/completions 的地址。</p>
         <p class="hint">选 <strong>Codex CLI</strong> 时不需要 Base URL 和 API Key：companion service 直接调用本机 <code>codex exec</code>，用你已登录的 ChatGPT 订阅。命令留空会从服务进程的 PATH 自动查找；模型名留空即用 Codex 默认模型。单次调用比 API 慢，适合逐篇精读，不适合上百条批量。</p>

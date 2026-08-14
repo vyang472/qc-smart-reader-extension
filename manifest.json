@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "QC Smart Reader",
   "description": "Capture research, verify AI claims against exact quotes, and save an auditable local Markdown + SQLite vault.",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "minimum_chrome_version": "116",
   "action": {
     "default_title": "QC Smart Reader",
