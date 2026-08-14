@@ -318,38 +318,86 @@ function queryWithProject(params = {}) {
 
 init();
 
+function setSidepanelInteractiveReady(isReady) {
+  const ready = Boolean(isReady);
+  if (document.documentElement) {
+    document.documentElement.dataset.qcInteractiveReady = String(ready);
+  }
+  if (document.body) {
+    document.body.inert = !ready;
+    document.body.setAttribute("aria-busy", String(!ready));
+  }
+}
+
 async function init() {
-  await initializeUiLocale();
-  bindTabs();
-  renderAgents();
-  bindEvents();
-  await loadOnboardingMilestones();
-  await loadSettings();
-  bindPendingSelectionMessages();
-  await queuePendingSelectionHydration({ automatic: true });
-  if (!state.settings?.pairingToken) {
+  let interactionHandlersBound = false;
+  let hydrateWorkspaces = false;
+  try {
+    let localeError = null;
+    try {
+      await initializeUiLocale();
+    } catch (error) {
+      localeError = error;
+    }
+    bindTabs();
+    bindEvents();
+    interactionHandlersBound = true;
+    renderAgents();
+    if (localeError) throw localeError;
+    await loadOnboardingMilestones();
+    await loadSettings();
+    bindPendingSelectionMessages();
+    await queuePendingSelectionHydration({ automatic: true });
+    if (!state.settings?.pairingToken) {
+      showTab("settings");
+      setLocalizedSettingsStatus(
+        "settings.status.notPaired",
+        {},
+        "尚未完成配对。请按上方 3 步首次使用指引连接本地服务。"
+      );
+      await loadBatchQueue();
+      return;
+    }
+    const startup = await authenticateCompanionForStartup();
+    await loadBatchQueue();
+    if (!startup) {
+      return;
+    }
+    hydrateWorkspaces = true;
+  } catch (error) {
+    if (!interactionHandlersBound) throw error;
+    console.warn("Essential side-panel startup failed.", error);
     showTab("settings");
     setLocalizedSettingsStatus(
-      "settings.status.notPaired",
-      {},
-      "尚未完成配对。请按上方 3 步首次使用指引连接本地服务。"
+      "settings.status.startupFailed",
+      { error: errorI18nParam(error) },
+      `启动未完成：${error.message}。设置仍可操作；修正问题后请重新打开侧边栏。`
     );
-    await loadBatchQueue();
-    return;
+  } finally {
+    if (interactionHandlersBound) setSidepanelInteractiveReady(true);
   }
-  const startup = await authenticateCompanionForStartup();
-  if (!startup) {
-    await loadBatchQueue();
-    return;
+  if (hydrateWorkspaces) await hydrateStartupWorkspaces();
+}
+
+async function hydrateStartupWorkspaces() {
+  const hydrations = [
+    async () => {
+      if (await loadProjectDashboard({ quiet: true })) setProjectStatus("");
+    },
+    loadProjectBrief,
+    loadCapturePlans,
+    refreshKnowledgeWorkspace,
+    loadTopicPackages,
+    loadDeliverables,
+    loadStrategyWorkspace
+  ];
+  for (const hydrate of hydrations) {
+    try {
+      await hydrate();
+    } catch (error) {
+      console.warn("Optional workspace hydration failed.", error);
+    }
   }
-  if (await loadProjectDashboard({ quiet: true })) setProjectStatus("");
-  await loadProjectBrief();
-  await loadCapturePlans();
-  await refreshKnowledgeWorkspace();
-  await loadTopicPackages();
-  await loadDeliverables();
-  await loadStrategyWorkspace();
-  await loadBatchQueue();
 }
 
 async function authenticateCompanionForStartup() {

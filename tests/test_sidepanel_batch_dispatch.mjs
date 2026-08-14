@@ -82,6 +82,8 @@ async function createSidepanelHarness({
   const i18nJs = await projectFile("sidepanel_i18n.js");
   const js = (await projectFile("sidepanel.js")).replace("\ninit();\n", "\n");
   const nodes = new Map();
+  const documentElement = createMockNode("html");
+  const body = createMockNode("body");
   const storageState = {};
   const intervalCallbacks = [];
   let nextTimerId = 1;
@@ -116,6 +118,8 @@ async function createSidepanelHarness({
       randomUUID: () => `uuid-${nextUuid++}`
     },
     document: {
+      documentElement,
+      body,
       getElementById(id) {
         if (!nodes.has(id)) nodes.set(id, createMockNode(id));
         return nodes.get(id);
@@ -325,6 +329,102 @@ test("sidepanel wires service-owned batch dispatch and heartbeat controls", asyn
   assert.match(js, /cancelBatchQueue[\s\S]*state\.batchCancelRequested = true/);
   assert.match(js, /cancelBatchQueue[\s\S]*postBatchJobActionForItems\(state\.batchQueue, "cancel"\)/);
   assert.match(js, /id === "pauseBatchBtn" \|\| id === "cancelBatchBtn"[\s\S]*node\.disabled = !state\.batchRunning/);
+});
+
+test("sidepanel exposes an explicit interactive-ready contract", async () => {
+  const html = await projectFile("sidepanel.html");
+  assert.match(html, /<html[^>]+data-qc-interactive-ready="false"/);
+  assert.match(html, /<body inert aria-busy="true">/);
+
+  const harness = await createSidepanelHarness();
+  harness.run("setSidepanelInteractiveReady(false)");
+  assert.deepEqual(
+    JSON.parse(harness.run("JSON.stringify({ ready: document.documentElement.dataset.qcInteractiveReady, inert: document.body.inert, busy: document.body['aria-busy'] })")),
+    { ready: "false", inert: true, busy: "true" }
+  );
+  harness.run("setSidepanelInteractiveReady(true)");
+  assert.deepEqual(
+    JSON.parse(harness.run("JSON.stringify({ ready: document.documentElement.dataset.qcInteractiveReady, inert: document.body.inert, busy: document.body['aria-busy'] })")),
+    { ready: "true", inert: false, busy: "false" }
+  );
+});
+
+test("sidepanel becomes interactive before optional workspace hydration finishes", async () => {
+  const harness = await createSidepanelHarness();
+  harness.run(`
+    setSidepanelInteractiveReady(false);
+    initializeUiLocale = async () => {};
+    bindTabs = () => {};
+    renderAgents = () => {};
+    bindEvents = () => { globalThis.interactionHandlersBound = true; };
+    loadOnboardingMilestones = async () => {};
+    loadSettings = async () => { state.settings = { pairingToken: "paired", projectId: "default" }; };
+    bindPendingSelectionMessages = () => {};
+    queuePendingSelectionHydration = async () => {};
+    authenticateCompanionForStartup = async () => ({ health: {}, projects: [] });
+    loadBatchQueue = async () => new Promise((resolve) => {
+      globalThis.finishBatchQueueLoad = () => {
+        globalThis.batchQueueLoaded = true;
+        resolve();
+      };
+    });
+    loadProjectDashboard = async () => {
+      globalThis.optionalHydrationStarted = true;
+      return new Promise((resolve) => { globalThis.finishOptionalHydration = () => resolve(false); });
+    };
+    loadProjectBrief = async () => { throw new Error("optional fixture failed"); };
+    loadCapturePlans = async () => { globalThis.optionalAfterFailureRan = true; };
+    refreshKnowledgeWorkspace = async () => {};
+    loadTopicPackages = async () => {};
+    loadDeliverables = async () => {};
+    loadStrategyWorkspace = async () => {};
+    globalThis.initSettled = false;
+    globalThis.initPromise = init().finally(() => { globalThis.initSettled = true; });
+  `);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.run("globalThis.interactionHandlersBound"), true);
+  assert.equal(harness.run("document.documentElement.dataset.qcInteractiveReady"), "false");
+  assert.equal(harness.run("document.body.inert"), true);
+  assert.equal(harness.run("globalThis.optionalHydrationStarted"), undefined);
+
+  harness.run("globalThis.finishBatchQueueLoad()");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.run("document.documentElement.dataset.qcInteractiveReady"), "true");
+  assert.equal(harness.run("document.body.inert"), false);
+  assert.equal(harness.run("globalThis.batchQueueLoaded"), true);
+  assert.equal(harness.run("globalThis.optionalHydrationStarted"), true);
+  assert.equal(harness.run("globalThis.initSettled"), false);
+
+  harness.run("globalThis.finishOptionalHydration()");
+  await harness.context.initPromise;
+  assert.equal(harness.run("globalThis.initSettled"), true);
+  assert.equal(harness.run("globalThis.optionalAfterFailureRan"), true);
+  assert.equal(harness.run("document.documentElement.dataset.qcInteractiveReady"), "true");
+  assert.equal(harness.run("document.body.inert"), false);
+});
+
+test("essential startup failures keep Settings operable and expose a visible error", async () => {
+  const harness = await createSidepanelHarness();
+  harness.run(`
+    setSidepanelInteractiveReady(false);
+    initializeUiLocale = async () => {};
+    bindTabs = () => {};
+    renderAgents = () => {};
+    bindEvents = () => {};
+    showTab = (tabId) => { globalThis.shownTab = tabId; };
+    loadOnboardingMilestones = async () => { throw new Error("local startup fixture failed"); };
+    globalThis.initPromise = init();
+  `);
+  await harness.context.initPromise;
+
+  assert.equal(harness.run("document.documentElement.dataset.qcInteractiveReady"), "true");
+  assert.equal(harness.run("document.body.inert"), false);
+  assert.equal(harness.run("globalThis.shownTab"), "settings");
+  assert.equal(harness.nodes.get("settingsStatus")?.dataset.i18nDynamicKey, "settings.status.startupFailed");
+  assert.equal(harness.nodes.get("settingsStatus")?.hidden, false);
+  assert.match(harness.nodes.get("settingsStatus")?.textContent || "", /local startup fixture failed/);
 });
 
 test("batch completion summaries report outcomes truthfully in service and local fallback paths", async () => {

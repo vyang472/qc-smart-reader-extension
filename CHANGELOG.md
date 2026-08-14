@@ -24,6 +24,7 @@ This release makes the core path to a first reviewed piece of evidence available
 
 ### Fixed
 
+- Side-panel controls now remain inert until locale, event handlers, Companion authentication, and the project batch queue are ready; slow optional workspace hydration no longer blocks interaction or drops early clicks.
 - Restoring First Evidence now checks the server-owned claim status: `reviewed` restores supported, `rejected` restores unsupported, and any mismatch returns the claim to review instead of trusting stale local progress.
 - First Evidence decisions and completion milestones remain isolated by project, while claim and quote text are preserved verbatim across language changes.
 - Current-page, selector, pagination, and Companion setup failures now keep their dynamic context when rendered in either supported language.
