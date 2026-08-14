@@ -8,22 +8,58 @@ async function projectFile(name) {
 }
 
 function createMockNode(id = "") {
+  const classes = new Set();
   return {
     id,
     children: [],
     className: "",
     dataset: {},
     disabled: false,
+    hidden: false,
     innerHTML: "",
     textContent: "",
     value: "",
+    focused: false,
+    scrolled: false,
     classList: {
-      add() {},
-      remove() {}
+      add(...names) {
+        names.forEach((name) => classes.add(name));
+      },
+      remove(...names) {
+        names.forEach((name) => classes.delete(name));
+      },
+      toggle(name, force) {
+        if (force === true) {
+          classes.add(name);
+          return true;
+        }
+        if (force === false) {
+          classes.delete(name);
+          return false;
+        }
+        if (classes.has(name)) {
+          classes.delete(name);
+          return false;
+        }
+        classes.add(name);
+        return true;
+      },
+      contains(name) {
+        return classes.has(name);
+      }
     },
     addEventListener() {},
     appendChild(child) {
       this.children.push(child);
+    },
+    focus() {
+      this.focused = true;
+    },
+    scrollIntoView() {
+      this.scrolled = true;
+    },
+    setAttribute(name, value) {
+      this[name] = String(value);
     },
     querySelector() {
       return null;
@@ -574,6 +610,7 @@ test("privacy consent is explicit, versioned, and required before model calls", 
     serviceUrl: "http://127.0.0.1:37621",
     pairingToken: "pair-token",
     projectId: "project-1",
+    provider: "openai",
     modelDataConsent: true,
     modelDataConsentVersion: "obsolete-notice"
   };
@@ -613,6 +650,325 @@ test("privacy consent is explicit, versioned, and required before model calls", 
     /扩展版本过旧/
   );
   assert.equal(harness.context.compareProductVersions("0.9.0", "0.9"), 0);
+});
+
+test("local Mock is the zero-config default and external extraction never silently falls back", async () => {
+  const html = await projectFile("sidepanel.html");
+  assert.match(html, /<option value="mock" selected>本地模板/);
+  for (const id of [
+    "modelRouteHint",
+    "remoteProviderFields",
+    "codexProviderFields",
+    "externalModelFields",
+    "modelDataConsentRow",
+    "externalModelActions"
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`), `missing #${id}`);
+  }
+
+  const harness = await createSidepanelHarness();
+  await harness.context.loadSettings();
+  assert.equal(harness.nodes.get("providerSelect").value, "mock");
+  assert.equal(harness.nodes.get("remoteProviderFields").hidden, true);
+  assert.equal(harness.nodes.get("codexProviderFields").hidden, true);
+  assert.equal(harness.nodes.get("externalModelFields").hidden, true);
+  assert.equal(harness.nodes.get("modelDataConsentRow").hidden, true);
+  assert.equal(harness.nodes.get("externalModelActions").hidden, true);
+  assert.equal(harness.context.resolveKnowledgeExtractionMode(), "mock");
+
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "default",
+      provider: "openai",
+      modelSettingsProvider: "openai",
+      modelReady: false,
+      modelRoute: "provider",
+      modelDataConsent: false,
+      modelDataConsentVersion: ""
+    }
+  });
+  harness.nodes.get("providerSelect").value = "openai";
+  assert.throws(
+    () => harness.context.resolveKnowledgeExtractionMode(),
+    /未就绪.*未同意.*不会自动改用本地模板（Mock 模式）/
+  );
+
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "default",
+      provider: "openai",
+      modelSettingsProvider: "openai",
+      modelReady: true,
+      modelRoute: "provider",
+      modelDataConsent: true,
+      modelDataConsentVersion: "2026-08-14-v1"
+    }
+  });
+  assert.equal(harness.context.resolveKnowledgeExtractionMode(), "provider");
+});
+
+test("an invalid stored pairing token cannot unlock or restore Quick Start", async () => {
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/health") {
+        return {
+          ok: true,
+          app: "QC Smart Reader",
+          api_version: 1,
+          service_version: "0.9.0"
+        };
+      }
+      if (call.path === "/v1/projects") {
+        return { ok: false, status: 403, error: "invalid pairing token" };
+      }
+      if (call.path === "/v1/model-settings") {
+        return { ok: true, settings: { provider: "mock", ready: true, route: "mock" } };
+      }
+      return { ok: true };
+    }
+  });
+  harness.storageState.settings = {
+    serviceUrl: "http://127.0.0.1:37621",
+    pairingToken: "stale-token",
+    projectId: "default",
+    provider: "mock"
+  };
+  harness.storageState.onboardingMilestones = {
+    pairedAt: "2026-08-14T00:00:00.000Z",
+    claimReadyAt: "2026-08-14T00:01:00.000Z"
+  };
+
+  await harness.context.loadOnboardingMilestones();
+  await harness.context.loadSettings();
+  const startup = await harness.context.authenticateCompanionForStartup();
+
+  assert.equal(startup, null);
+  assert.equal(harness.nodes.get("quickStartCard").hidden, true);
+  assert.match(harness.nodes.get("settingsStatus").textContent, /Pairing Token.*失效|invalid pairing token/i);
+  assert.ok(harness.fetchCalls.some((call) => call.path === "/v1/projects"), "startup did not probe an authenticated endpoint");
+});
+
+test("reading the current page persists it to Vault immediately and records only local progress", async () => {
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures" && call.method === "POST") {
+        return {
+          ok: true,
+          source: {
+            id: "source-first",
+            project_id: "default",
+            markdown_path: "wiki/sources/source-first.md"
+          },
+          chunks: [{ id: "chunk-first" }]
+        };
+      }
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "default",
+      provider: "mock",
+      modelReady: true,
+      modelRoute: "mock"
+    }
+  });
+
+  const capture = await harness.context.readCurrentPage();
+  assert.equal(capture.source.id, "source-first");
+  const captureCall = harness.fetchCalls.find((call) => call.path === "/v1/captures");
+  assert.ok(captureCall, "read-current-page did not persist a capture");
+  assert.equal(captureCall.body.source.title, "Fixture Page");
+  assert.equal(captureCall.body.project_id, "default");
+  assert.match(harness.nodes.get("status").textContent, /已保存到本地 Vault/);
+  assert.match(harness.storageState.onboardingMilestones.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(harness.storageState.onboardingMilestones.lastSourceId, "source-first");
+  assert.equal(harness.storageState.onboardingMilestones.projectId, "default");
+  assert.equal(
+    harness.fetchCalls.some((call) => /telemetry|analytics|event/i.test(call.path)),
+    false,
+    "local milestones must not be emitted as telemetry"
+  );
+});
+
+test("Quick Start creates a real quote-backed first evidence chain and restores its local milestone", async () => {
+  const js = await projectFile("sidepanel.js");
+  assert.doesNotMatch(js, /[12] \/ 4/, "Quick Start progress copy drifted from its five visible steps");
+  const records = {
+    claims: [{ id: "claim-first", status: "extracted", text: "The fixture supports a verifiable first claim.", evidence_count: 1 }],
+    evidence: [{
+      id: "evidence-first",
+      claim_id: "claim-first",
+      quote: "This fixture page has enough body text to be saved by the companion service."
+    }]
+  };
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures" && call.method === "POST") {
+        return {
+          ok: true,
+          source: { id: "source-first", project_id: "default", markdown_path: "wiki/sources/source-first.md" },
+          chunks: [{ id: "chunk-first" }]
+        };
+      }
+      if (call.path === "/v1/sources/source-first/extract-knowledge" && call.method === "POST") {
+        return {
+          ok: true,
+          source: { id: "source-first", status: "extracted", chunks: [{ id: "chunk-first" }] },
+          records,
+          agent_run: {
+            id: "run-first",
+            agent_id: "mock_structured_extractor",
+            input: { effective_mode: "mock", provider: "mock" }
+          }
+        };
+      }
+      if (call.path === "/v1/knowledge/records") return { ok: true, ...records };
+      if (call.path === "/v1/sources") return { ok: true, sources: [] };
+      if (call.path === "/v1/claims/review-queue") return { ok: true, claims: [] };
+      if (call.path === "/v1/claims/claim-first/review") {
+        records.claims[0].status = "reviewed";
+        return { ok: true, claim: { ...records.claims[0] } };
+      }
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "default",
+      provider: "mock",
+      modelSettingsProvider: "mock",
+      modelReady: true,
+      modelRoute: "mock"
+    }
+  });
+
+  await harness.context.runQuickStart();
+
+  const captureIndex = harness.fetchCalls.findIndex((call) => call.path === "/v1/captures");
+  const extractIndex = harness.fetchCalls.findIndex((call) => call.path === "/v1/sources/source-first/extract-knowledge");
+  assert.ok(captureIndex >= 0 && extractIndex > captureIndex, "Quick Start must capture before extracting");
+  assert.equal(harness.fetchCalls[extractIndex].body.mode, "mock");
+  assert.equal(harness.nodes.get("quickStartClaimText").textContent, records.claims[0].text);
+  assert.equal(harness.nodes.get("quickStartQuoteText").textContent, records.evidence[0].quote);
+  assert.equal(harness.nodes.get("quickStartEvidence").hidden, false);
+  assert.match(harness.storageState.onboardingMilestones.claimReadyAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(harness.storageState.onboardingMilestones.firstClaimId, "claim-first");
+  assert.equal(harness.storageState.onboardingMilestones.firstEvidenceId, "evidence-first");
+  assert.equal(harness.storageState.onboardingMilestones.firstReviewedAt, undefined);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /尚未人工接受/);
+
+  await harness.context.acceptQuickStartClaim();
+  const reviewCall = harness.fetchCalls.find((call) => call.path === "/v1/claims/claim-first/review");
+  assert.ok(reviewCall, "the user's explicit accept action was not persisted");
+  assert.equal(reviewCall.body.status, "reviewed");
+  assert.match(harness.storageState.onboardingMilestones.firstReviewedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /已人工接受/);
+  assert.equal(harness.nodes.get("quickStartProgress").textContent, "5 / 5");
+  assert.equal(harness.nodes.get("quickStartProgress").classList.contains("done"), true);
+
+  const restored = await createSidepanelHarness();
+  restored.storageState.onboardingMilestones = structuredClone(harness.storageState.onboardingMilestones);
+  restored.setState({ settings: { pairingToken: "pair-token", projectId: "default" } });
+  await restored.context.loadOnboardingMilestones();
+  restored.context.restoreQuickStartEvidenceFromRecords(records);
+  assert.equal(restored.nodes.get("quickStartProgress").textContent, "5 / 5");
+  assert.equal(restored.nodes.get("quickStartProgress").classList.contains("done"), true);
+  assert.match(restored.nodes.get("quickStartStatus").textContent, /已恢复.*人工核对/);
+});
+
+test("Quick Start restore requires the server claim to remain reviewed", async () => {
+  const firstReviewedAt = "2026-08-14T00:03:00.000Z";
+  const harness = await createSidepanelHarness();
+  harness.setState({
+    settings: { pairingToken: "pair-token", projectId: "default" },
+    onboardingMilestones: {
+      pairedAt: "2026-08-14T00:00:00.000Z",
+      projectId: "default",
+      capturedAt: "2026-08-14T00:01:00.000Z",
+      extractedAt: "2026-08-14T00:01:30.000Z",
+      claimReadyAt: "2026-08-14T00:02:00.000Z",
+      firstReviewedAt,
+      firstClaimId: "claim-first",
+      firstEvidenceId: "evidence-first"
+    }
+  });
+
+  const restored = harness.context.restoreQuickStartEvidenceFromRecords({
+    claims: [{ id: "claim-first", project_id: "default", status: "pending_validation", text: "Needs revalidation" }],
+    evidence: [{ id: "evidence-first", claim_id: "claim-first", quote: "Exact source quote" }]
+  });
+
+  assert.equal(restored, true);
+  assert.equal(harness.nodes.get("quickStartProgress").textContent, "4 / 5");
+  assert.equal(harness.nodes.get("quickStartProgress").classList.contains("done"), false);
+  assert.match(harness.nodes.get("quickStartStatus").textContent, /pending_validation.*重新人工核对/);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /服务端当前状态为 pending_validation/);
+  assert.equal(harness.storageState.onboardingMilestones.firstReviewedAt, undefined);
+  assert.equal(harness.storageState.onboardingMilestones.reviewInvalidatedFromReviewedAt, firstReviewedAt);
+  assert.equal(harness.storageState.onboardingMilestones.reviewInvalidatedStatus, "pending_validation");
+});
+
+test("Quick Start evidence and review actions stay isolated to their project", async () => {
+  const harness = await createSidepanelHarness();
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "project-b",
+      provider: "mock"
+    },
+    onboardingMilestones: {
+      pairedAt: "2026-08-14T00:00:00.000Z",
+      projectId: "project-a",
+      capturedAt: "2026-08-14T00:01:00.000Z",
+      claimReadyAt: "2026-08-14T00:02:00.000Z",
+      firstClaimId: "claim-a",
+      firstEvidenceId: "evidence-a"
+    }
+  });
+  harness.context.revealQuickStartEvidence(
+    { id: "claim-a", project_id: "project-a", status: "extracted", text: "Project A claim" },
+    { id: "evidence-a", claim_id: "claim-a", quote: "Exact quote from project A" },
+    { focus: false, projectId: "project-a" }
+  );
+  const card = harness.nodes.get("quickStartEvidence");
+
+  const review = await harness.context.acceptQuickStartClaim();
+  assert.equal(review, null);
+  assert.equal(
+    harness.fetchCalls.some((call) => call.path === "/v1/claims/claim-a/review"),
+    false,
+    "a stale evidence card reviewed a claim from another project"
+  );
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /另一个项目|跨项目/);
+
+  const restored = harness.context.restoreQuickStartEvidenceFromRecords({
+    claims: [{ id: "claim-a", project_id: "project-a", text: "Project A claim" }],
+    evidence: [{ id: "evidence-a", claim_id: "claim-a", quote: "Exact quote from project A" }]
+  });
+  assert.equal(restored, false);
+  assert.equal(card.hidden, true);
+  assert.equal(card.dataset.claimId, "");
+  assert.equal(card.dataset.evidenceId, "");
+  assert.equal(card.dataset.projectId, "");
+  assert.equal(card.dataset.claimStatus, "");
+
+  await harness.context.markOnboardingMilestone("extractedAt", {
+    projectId: "project-b",
+    lastSourceId: "source-b"
+  });
+  assert.equal(harness.storageState.onboardingMilestones.projectId, "project-b");
+  assert.equal(harness.storageState.onboardingMilestones.claimReadyAt, undefined);
+  assert.equal(harness.storageState.onboardingMilestones.firstClaimId, undefined);
 });
 
 test("stale model answers cannot be rebound to another source or deliverable", async () => {

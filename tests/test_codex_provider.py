@@ -472,7 +472,7 @@ class CodexProviderCase(unittest.TestCase):
     def test_model_settings_rejects_unknown_provider_and_bad_timeout(self) -> None:
         with self.assertRaises(AssertionError) as unknown:
             self.request("/v1/model-settings", {"provider": "gemini"}, method="POST")
-        self.assertIn("provider must be openai, anthropic, or codex", str(unknown.exception))
+        self.assertIn("provider must be mock, openai, anthropic, or codex", str(unknown.exception))
 
         with self.assertRaises(AssertionError) as timeout:
             self.request("/v1/model-settings", {"provider": "codex", "codex_timeout_seconds": 5}, method="POST")

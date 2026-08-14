@@ -54,6 +54,8 @@ COMPANION_FILES = (
 VERSION_CONTRACT_FILES = (
     "manifest.json",
     ".codex-plugin/plugin.json",
+    "package.json",
+    "package-lock.json",
     "companion_service/server.py",
 )
 
@@ -132,6 +134,11 @@ def _validate_chrome_version(value: object, field: str) -> str:
     if any(part > 65535 for part in parts):
         raise ReleaseError(f"{field} components must be between 0 and 65535")
     return version
+
+
+def _chrome_version_parts(value: str) -> tuple[int, ...]:
+    parts = tuple(int(part) for part in value.split("."))
+    return parts + (0,) * (4 - len(parts))
 
 
 def _read_python_constants(path: Path, required: Sequence[str]) -> dict[str, object]:
@@ -269,12 +276,28 @@ def validate_dependency_lock(source_dir: Path) -> None:
 def validate_version_contract(source_dir: Path) -> str:
     manifest = _read_json(source_dir / "manifest.json")
     plugin = _read_json(source_dir / ".codex-plugin" / "plugin.json")
+    package = _read_json(source_dir / "package.json")
+    package_lock = _read_json(source_dir / "package-lock.json")
     extension_version = _validate_chrome_version(manifest.get("version"), "manifest.json version")
     plugin_version = _validate_chrome_version(plugin.get("version"), ".codex-plugin/plugin.json version")
-    if extension_version != plugin_version:
+    package_version = _validate_chrome_version(package.get("version"), "package.json version")
+    package_lock_version = _validate_chrome_version(package_lock.get("version"), "package-lock.json version")
+    package_lock_root = package_lock.get("packages", {}).get("", {})
+    package_lock_root_version = _validate_chrome_version(
+        package_lock_root.get("version"),
+        "package-lock.json root package version",
+    )
+    declared_versions = {
+        "manifest.json": extension_version,
+        ".codex-plugin/plugin.json": plugin_version,
+        "package.json": package_version,
+        "package-lock.json": package_lock_version,
+        "package-lock.json root package": package_lock_root_version,
+    }
+    if any(version != extension_version for version in declared_versions.values()):
         raise ReleaseError(
             "release version mismatch: "
-            f"manifest.json={extension_version}, .codex-plugin/plugin.json={plugin_version}"
+            + ", ".join(f"{name}={version}" for name, version in declared_versions.items())
         )
     minimum_chrome = str(manifest.get("minimum_chrome_version") or "").strip()
     if minimum_chrome != "116":
@@ -288,15 +311,19 @@ def validate_version_contract(source_dir: Path) -> str:
         service["MIN_EXTENSION_VERSION"],
         "MIN_EXTENSION_VERSION",
     )
-    if service_version != extension_version or minimum_extension != extension_version:
+    if service_version != extension_version:
         raise ReleaseError(
             "release version mismatch: "
-            f"extension={extension_version}, service={service_version}, "
-            f"minimum extension={minimum_extension}"
+            f"extension={extension_version}, service={service_version}"
+        )
+    if _chrome_version_parts(minimum_extension) > _chrome_version_parts(extension_version):
+        raise ReleaseError(
+            "minimum extension version cannot be newer than the release: "
+            f"minimum extension={minimum_extension}, extension={extension_version}"
         )
     if service["API_VERSION"] != 1 or service["SCHEMA_VERSION"] != 1:
         raise ReleaseError(
-            "release 0.9.0 requires companion API_VERSION=1 and SCHEMA_VERSION=1"
+            f"release {extension_version} requires companion API_VERSION=1 and SCHEMA_VERSION=1"
         )
     installer = _read_shell_constants(
         source_dir / "install.command",

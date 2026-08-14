@@ -662,6 +662,151 @@ test("live extension reads current page and renders structured knowledge records
   }
 });
 
+test("clean profile pairs, creates first evidence, requires human acceptance, and restores reviewed state", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "qc-live-first-evidence-service-"));
+  const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-first-evidence-chrome-"));
+  const servicePort = await freePort();
+  const serviceUrl = `http://127.0.0.1:${servicePort}`;
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
+  let browserContext;
+  let fixtureServer;
+
+  try {
+    await waitForHealth(serviceUrl, companion);
+    const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
+    const fixtureHtml = (await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8"))
+      .replace(/长上影线是卖出还是买入信号？/g, "First Evidence clean-profile 验收")
+      .replace(
+        "所以做了简单验证。",
+        "所以做了简单验证。 First Evidence exact quote must remain visible after the user reviews the claim."
+      );
+    const fixture = await startFixtureServer(new Map([["/thread/first-evidence", fixtureHtml]]));
+    fixtureServer = fixture.server;
+    const fixtureUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/first-evidence`;
+
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
+
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
+    const extensionId = new URL(worker.url()).host;
+    assert.ok(extensionId, "extension id was not available");
+    const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
+
+    const sidepanel = await browserContext.newPage();
+    await sidepanel.goto(sidepanelUrl);
+    assert.equal(await sidepanel.locator("#providerSelect").inputValue(), "mock");
+    assert.equal(await sidepanel.locator("#quickStartCard").isHidden(), true);
+
+    await sidepanel.locator("#serviceUrlInput").fill(serviceUrl);
+    await sidepanel.locator("#pairingTokenInput").fill(token);
+    await sidepanel.locator("#testCompanionBtn").click();
+    await sidepanel.waitForFunction(() => {
+      const status = document.querySelector("#settingsStatus")?.textContent || "";
+      return status.includes("Pairing Token 均正常");
+    }, null, { timeout: 15000 });
+    await sidepanel.waitForFunction(() => !document.querySelector("#quickStartCard")?.hidden);
+    assert.match(await sidepanel.locator("#modelRouteHint").textContent(), /零配置模式/);
+    assert.equal(await sidepanel.locator("#modelDataConsentRow").isHidden(), true);
+
+    const fixturePage = await browserContext.newPage();
+    await fixturePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await fixturePage.bringToFront();
+    await sidepanel.evaluate(() => document.querySelector("#quickStartBtn")?.click());
+    await sidepanel.waitForFunction(() => {
+      const card = document.querySelector("#quickStartEvidence");
+      const claim = document.querySelector("#quickStartClaimText")?.textContent || "";
+      const quote = document.querySelector("#quickStartQuoteText")?.textContent || "";
+      return card && !card.hidden && claim.length > 10 && quote.length > 10;
+    }, null, { timeout: 30000 });
+
+    const firstEvidence = await sidepanel.evaluate(() => ({
+      claimId: document.querySelector("#quickStartEvidence")?.dataset.claimId || "",
+      evidenceId: document.querySelector("#quickStartEvidence")?.dataset.evidenceId || "",
+      claim: document.querySelector("#quickStartClaimText")?.textContent || "",
+      quote: document.querySelector("#quickStartQuoteText")?.textContent || "",
+      reviewStatus: document.querySelector("#quickStartReviewStatus")?.textContent || ""
+    }));
+    assert.ok(firstEvidence.claimId, "Quick Start did not expose a real claim id");
+    assert.ok(firstEvidence.evidenceId, "Quick Start did not expose a real evidence id");
+    assert.match(firstEvidence.reviewStatus, /尚未人工接受/);
+
+    const capturedSources = await waitForSources(serviceUrl, token);
+    const capturedSource = capturedSources.find((source) => source.url === fixtureUrl);
+    assert.ok(capturedSource, "Quick Start did not persist the current page before extraction");
+    const capturedDetail = (
+      await serviceJson(serviceUrl, token, `/v1/sources/${encodeURIComponent(capturedSource.id)}`)
+    ).source;
+    assert.ok(
+      capturedDetail.text.includes(firstEvidence.quote),
+      `displayed quote was not exact source text: ${JSON.stringify(firstEvidence.quote)}`
+    );
+
+    let records = await waitForKnowledgeRecords(
+      serviceUrl,
+      token,
+      (data) => (data.claims || []).some((claim) => claim.id === firstEvidence.claimId),
+      15000
+    );
+    assert.notEqual(
+      records.claims.find((claim) => claim.id === firstEvidence.claimId)?.status,
+      "reviewed",
+      "Quick Start auto-reviewed a claim before the user accepted it"
+    );
+
+    await sidepanel.locator("#quickStartAcceptClaimBtn").click();
+    await sidepanel.waitForFunction(() => (
+      document.querySelector("#quickStartReviewStatus")?.textContent || ""
+    ).includes("已人工接受"), null, { timeout: 15000 });
+
+    records = await waitForKnowledgeRecords(
+      serviceUrl,
+      token,
+      (data) => (data.claims || []).some((claim) => (
+        claim.id === firstEvidence.claimId && claim.status === "reviewed"
+      )),
+      15000
+    );
+    const reviewed = records.claims.find((claim) => claim.id === firstEvidence.claimId);
+    assert.equal(reviewed?.status, "reviewed");
+
+    const localProgress = await worker.evaluate(async () => (
+      await chrome.storage.local.get("onboardingMilestones")
+    ).onboardingMilestones);
+    assert.ok(localProgress.capturedAt);
+    assert.ok(localProgress.claimReadyAt);
+    assert.ok(localProgress.firstReviewedAt);
+    assert.equal(localProgress.projectId, "default");
+    assert.equal(localProgress.firstClaimId, firstEvidence.claimId);
+    assert.equal("claim" in localProgress, false, "claim content should not be copied into local milestones");
+    assert.equal("quote" in localProgress, false, "quote content should not be copied into local milestones");
+
+    await sidepanel.close();
+    const reopened = await browserContext.newPage();
+    await reopened.goto(sidepanelUrl);
+    await reopened.waitForFunction((claimId) => {
+      const card = document.querySelector("#quickStartEvidence");
+      return card && !card.hidden && card.dataset.claimId === claimId;
+    }, firstEvidence.claimId, { timeout: 20000 });
+    assert.equal(await reopened.locator("#quickStartClaimText").textContent(), firstEvidence.claim);
+    assert.equal(await reopened.locator("#quickStartQuoteText").textContent(), firstEvidence.quote);
+    assert.match(await reopened.locator("#quickStartReviewStatus").textContent(), /reviewed|人工核对/);
+    assert.equal(await reopened.locator("#quickStartAcceptClaimBtn").isDisabled(), true);
+    assert.match(await reopened.locator("#quickStartStatus").textContent(), /已恢复.*人工核对/);
+  } finally {
+    if (browserContext) await browserContext.close();
+    if (fixtureServer) await new Promise((resolve) => fixtureServer.close(resolve));
+    await terminate(service);
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
 test("live extension current page uses browser site profile bundle for GitHub issue threads", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "qc-live-service-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-chrome-"));

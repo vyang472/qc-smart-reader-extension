@@ -36,7 +36,7 @@ from uuid import uuid4
 
 
 APP_NAME = "QC Smart Reader"
-SERVICE_VERSION = "0.9.0"
+SERVICE_VERSION = "0.9.1"
 API_VERSION = 1
 SCHEMA_VERSION = 1
 MIN_EXTENSION_VERSION = "0.9.0"
@@ -575,7 +575,7 @@ class Store:
 
     def default_model_settings(self) -> dict:
         return {
-            "provider": "openai",
+            "provider": "mock",
             "base_url": "https://api.openai.com/v1",
             "model": "gpt-5",
             "temperature": 0.2,
@@ -615,6 +615,14 @@ class Store:
                 ) from error
             if not isinstance(loaded, dict):
                 raise RuntimeError("model settings JSON must contain an object")
+            # Settings written before providers were explicit contained the
+            # OpenAI-compatible connection fields but no provider key. Keep
+            # those installations on their previous route after upgrading;
+            # only genuinely new installations should default to local mock.
+            if "provider" not in loaded and any(
+                key in loaded for key in ("api_key", "base_url", "model")
+            ):
+                settings["provider"] = "openai"
             settings.update(loaded)
         if include_secret:
             return settings
@@ -625,13 +633,19 @@ class Store:
         api_key = settings.get("api_key") or ""
         output["has_api_key"] = bool(api_key)
         output["api_key_hint"] = f"...{api_key[-4:]}" if api_key else ""
+        is_mock = settings.get("provider") == "mock"
+        # Public readiness answers whether the selected route can run now.
+        # model_settings_ready remains the stricter external-model check used
+        # by auto extraction, where mock must deliberately report False.
+        output["ready"] = True if is_mock else self.model_settings_ready(settings)
+        output["route"] = "mock" if is_mock else "provider"
         return output
 
     def update_model_settings(self, payload: dict) -> dict:
         settings = self.read_model_settings(include_secret=True)
-        provider = normalize_text(payload.get("provider") or settings.get("provider") or "openai")
-        if provider not in {"openai", "anthropic", "codex"}:
-            raise ValueError("provider must be openai, anthropic, or codex")
+        provider = normalize_text(payload.get("provider") or settings.get("provider") or "mock")
+        if provider not in {"mock", "openai", "anthropic", "codex"}:
+            raise ValueError("provider must be mock, openai, anthropic, or codex")
         settings["provider"] = provider
         if "codex_command" in payload:
             raw_command = payload.get("codex_command")
@@ -10075,7 +10089,10 @@ Vault: {package['vault_dir']}
         return {"ok": True, "agent_run": run, "records": records, "source": source}
 
     def model_settings_ready(self, settings: dict) -> bool:
-        if settings.get("provider") == "codex":
+        provider = settings.get("provider")
+        if provider == "mock":
+            return False
+        if provider == "codex":
             # The Codex CLI carries its own auth (a ChatGPT plan login), so the
             # only thing that has to be true is that we can find the binary.
             return bool(self.resolve_codex_command(settings))
@@ -10173,6 +10190,8 @@ Vault: {package['vault_dir']}
         return {"estimated_cost_usd": round(cost, 8), "cost_source": "model_settings_per_1m_tokens"}
 
     def call_model_with_messages(self, settings: dict, messages: list[dict]) -> tuple[str, dict]:
+        if settings.get("provider") == "mock":
+            raise ValueError("mock provider cannot call an external model")
         if settings.get("provider") == "codex":
             return self.call_codex_cli(settings, "", messages)
         if settings.get("provider") == "anthropic":
@@ -10421,6 +10440,8 @@ CHUNKS:
 
     def llm_chat(self, payload: dict) -> dict:
         settings = self.read_model_settings(include_secret=True)
+        if settings.get("provider") == "mock":
+            raise ValueError("mock provider does not support chat; select an external provider")
         if settings.get("provider") == "codex":
             if not self.resolve_codex_command(settings):
                 raise ValueError(

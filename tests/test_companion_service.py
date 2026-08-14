@@ -145,8 +145,8 @@ class CompanionServiceCase(unittest.TestCase):
 
     def test_pairing_token_required_and_cors_allowlist(self) -> None:
         health = self.request("/health", token=False)
-        self.assertEqual(health["version"], "0.9.0")
-        self.assertEqual(health["service_version"], "0.9.0")
+        self.assertEqual(health["version"], "0.9.1")
+        self.assertEqual(health["service_version"], "0.9.1")
         self.assertEqual(health["api_version"], 1)
         self.assertEqual(health["schema_version"], 1)
         self.assertEqual(health["min_extension_version"], "0.9.0")
@@ -415,7 +415,10 @@ class CompanionServiceCase(unittest.TestCase):
         model_thread.start()
         try:
             initial = self.request("/v1/model-settings")["settings"]
+            self.assertEqual(initial["provider"], "mock")
             self.assertFalse(initial["has_api_key"])
+            self.assertTrue(initial["ready"])
+            self.assertEqual(initial["route"], "mock")
             self.assertNotIn("api_key", initial)
 
             saved = self.request(
@@ -430,6 +433,8 @@ class CompanionServiceCase(unittest.TestCase):
                 method="POST",
             )["settings"]
             self.assertTrue(saved["has_api_key"])
+            self.assertTrue(saved["ready"])
+            self.assertEqual(saved["route"], "provider")
             self.assertNotIn("api_key", saved)
             self.assertEqual(saved["api_key_hint"], "...side")
 
@@ -454,6 +459,58 @@ class CompanionServiceCase(unittest.TestCase):
             model_httpd.shutdown()
             model_httpd.server_close()
             model_thread.join(timeout=5)
+
+    def test_mock_provider_is_explicit_and_never_calls_an_external_model(self) -> None:
+        settings = self.request(
+            "/v1/model-settings",
+            {
+                "provider": "mock",
+                # Retained credentials from a previously configured provider
+                # must not make the local mock route externally callable.
+                "base_url": "https://api.example.com/v1",
+                "api_key": "must-not-be-used",
+                "model": "previous-model",
+            },
+            method="POST",
+        )["settings"]
+        self.assertEqual(settings["provider"], "mock")
+        self.assertTrue(settings["ready"])
+        self.assertEqual(settings["route"], "mock")
+        private = self.store.read_model_settings(include_secret=True)
+        self.assertFalse(self.store.model_settings_ready(private))
+
+        with mock.patch.object(self.store, "call_openai_compatible") as openai_call, mock.patch.object(
+            self.store, "call_anthropic"
+        ) as anthropic_call, mock.patch.object(self.store, "call_codex_cli") as codex_call:
+            with self.assertRaisesRegex(ValueError, "mock provider cannot call an external model"):
+                self.store.call_model_with_messages(private, [{"role": "user", "content": "stay local"}])
+            with self.assertRaisesRegex(AssertionError, "mock provider does not support chat"):
+                self.request("/v1/llm/chat", {"prompt": "do not send this"}, method="POST")
+            openai_call.assert_not_called()
+            anthropic_call.assert_not_called()
+            codex_call.assert_not_called()
+
+    def test_legacy_providerless_model_settings_remain_openai_compatible(self) -> None:
+        self.store.model_settings_path.write_text(
+            json.dumps(
+                {
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "legacy-key",
+                    "model": "legacy-model",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.store.model_settings_path.chmod(0o600)
+
+        private = self.store.read_model_settings(include_secret=True)
+        self.assertEqual(private["provider"], "openai")
+        self.assertTrue(self.store.model_settings_ready(private))
+        public = self.store.read_model_settings()
+        self.assertEqual(public["provider"], "openai")
+        self.assertTrue(public["ready"])
+        self.assertEqual(public["route"], "provider")
+        self.assertNotIn("api_key", public)
 
     def test_model_transport_refuses_redirects_and_insecure_remote_endpoints(self) -> None:
         target_requests: list[dict] = []
@@ -5461,11 +5518,13 @@ class CompanionServiceCase(unittest.TestCase):
         )
         source_id = capture["source"]["id"]
 
-        result = self.request(
-            f"/v1/sources/{source_id}/extract-knowledge",
-            {"mode": "mock", "max_claims": 3},
-            method="POST",
-        )
+        with mock.patch.object(self.store, "provider_extract_structured_payload") as provider_extract:
+            result = self.request(
+                f"/v1/sources/{source_id}/extract-knowledge",
+                {"mode": "auto", "max_claims": 3},
+                method="POST",
+            )
+            provider_extract.assert_not_called()
         self.assertEqual(result["agent_run"]["agent_id"], "mock_structured_extractor")
         self.assertEqual(result["agent_run"]["status"], "success")
         self.assertEqual(result["source"]["status"], "extracted")
@@ -5512,6 +5571,8 @@ class CompanionServiceCase(unittest.TestCase):
         self.assertEqual(agent_runs[0]["model"], "mock-structured-v1")
         self.assertIn("mock-structured-v1", agent_runs[0]["input_json"])
         mock_run_input = json.loads(agent_runs[0]["input_json"])
+        self.assertEqual(mock_run_input["mode"], "auto")
+        self.assertEqual(mock_run_input["effective_mode"], "mock")
         self.assertEqual(mock_run_input["provider"], "mock")
         self.assertEqual(mock_run_input["schema_version"], "structured-knowledge-v1")
         self.assertEqual(mock_run_input["prompt_version"], "mock-structured-v1")
