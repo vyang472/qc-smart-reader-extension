@@ -12,8 +12,8 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TEST_PYTHON = process.env.QC_TEST_PYTHON || "python3";
 const COMPANION_START_TIMEOUT_MS = Number(process.env.QC_COMPANION_START_TIMEOUT_MS || 30000);
 
-function extensionLaunchOptions(hostResolverRule) {
-  return {
+function extensionLaunchOptions(hostResolverRule, locale = "") {
+  const options = {
     headless: true,
     channel: "chromium",
     args: [
@@ -22,6 +22,11 @@ function extensionLaunchOptions(hostResolverRule) {
       `--load-extension=${ROOT}`
     ]
   };
+  if (locale) {
+    options.locale = locale;
+    options.args.unshift(`--lang=${locale}`);
+  }
+  return options;
 }
 
 function freePort() {
@@ -662,9 +667,9 @@ test("live extension reads current page and renders structured knowledge records
   }
 });
 
-test("clean profile pairs, creates first evidence, requires human acceptance, and restores reviewed state", async (t) => {
-  const dataDir = await mkdtemp(join(tmpdir(), "qc-live-first-evidence-service-"));
-  const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-first-evidence-chrome-"));
+async function exerciseCleanProfileFirstEvidence(t, { browserLocale, htmlLang, decisionStatus }) {
+  const dataDir = await mkdtemp(join(tmpdir(), `qc-live-first-evidence-${htmlLang}-service-`));
+  const userDataDir = await mkdtemp(join(tmpdir(), `qc-live-first-evidence-${htmlLang}-chrome-`));
   const servicePort = await freePort();
   const serviceUrl = `http://127.0.0.1:${servicePort}`;
   const companion = startCompanion(dataDir, servicePort);
@@ -675,12 +680,15 @@ test("clean profile pairs, creates first evidence, requires human acceptance, an
   try {
     await waitForHealth(serviceUrl, companion);
     const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
+    const localizedTitle = htmlLang === "zh-CN"
+      ? "First Evidence 简体中文 clean-profile 验收"
+      : "First Evidence en-US clean-profile acceptance";
+    const localizedQuote = htmlLang === "zh-CN"
+      ? "First Evidence 中文路径必须保留来源中的 exact quote，并让用户明确做出支持或不支持判断。"
+      : "First Evidence must preserve the exact source quote and wait for the user to mark the claim supported or unsupported.";
     const fixtureHtml = (await readFile(new URL("./fixtures/quantclass_thread.html", import.meta.url), "utf8"))
-      .replace(/长上影线是卖出还是买入信号？/g, "First Evidence clean-profile 验收")
-      .replace(
-        "所以做了简单验证。",
-        "所以做了简单验证。 First Evidence exact quote must remain visible after the user reviews the claim."
-      );
+      .replace(/长上影线是卖出还是买入信号？/g, localizedTitle)
+      .replace("所以做了简单验证。", localizedQuote);
     const fixture = await startFixtureServer(new Map([["/thread/first-evidence", fixtureHtml]]));
     fixtureServer = fixture.server;
     const fixtureUrl = `http://bbs.quantclass.localhost:${fixture.port}/thread/first-evidence`;
@@ -688,18 +696,26 @@ test("clean profile pairs, creates first evidence, requires human acceptance, an
     browserContext = await launchPersistentChromium(
       t,
       userDataDir,
-      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1")
+      extensionLaunchOptions("MAP bbs.quantclass.localhost 127.0.0.1", browserLocale)
     );
-    if (!browserContext) return;
+    if (!browserContext) return null;
 
     const worker = await extensionServiceWorker(t, browserContext);
-    if (!worker) return;
+    if (!worker) return null;
     const extensionId = new URL(worker.url()).host;
     assert.ok(extensionId, "extension id was not available");
     const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
 
     const sidepanel = await browserContext.newPage();
     await sidepanel.goto(sidepanelUrl);
+    await sidepanel.waitForFunction((expected) => document.documentElement.lang === expected, htmlLang);
+    assert.equal(await sidepanel.locator("html").getAttribute("lang"), htmlLang);
+    assert.equal(await sidepanel.locator("#uiLocaleSelect").inputValue(), "auto");
+    assert.equal(
+      await worker.evaluate(async () => (await chrome.storage.local.get("uiLocale")).uiLocale),
+      undefined,
+      "clean-profile Auto locale must not persist an explicit language preference"
+    );
     assert.equal(await sidepanel.locator("#providerSelect").inputValue(), "mock");
     assert.equal(await sidepanel.locator("#quickStartCard").isHidden(), true);
 
@@ -707,11 +723,17 @@ test("clean profile pairs, creates first evidence, requires human acceptance, an
     await sidepanel.locator("#pairingTokenInput").fill(token);
     await sidepanel.locator("#testCompanionBtn").click();
     await sidepanel.waitForFunction(() => {
-      const status = document.querySelector("#settingsStatus")?.textContent || "";
-      return status.includes("Pairing Token 均正常");
+      const status = document.querySelector("#settingsStatus");
+      const quickStart = document.querySelector("#quickStartCard");
+      return status?.dataset.i18nDynamicKey === "settings.status.success" && !quickStart?.hidden;
     }, null, { timeout: 15000 });
-    await sidepanel.waitForFunction(() => !document.querySelector("#quickStartCard")?.hidden);
-    assert.match(await sidepanel.locator("#modelRouteHint").textContent(), /零配置模式/);
+    const pairingStatus = await sidepanel.locator("#settingsStatus").textContent();
+    assert.match(
+      pairingStatus || "",
+      htmlLang === "zh-CN"
+        ? /本地服务和 Pairing Token 均正常/
+        : /Local Companion and Pairing Token are ready/
+    );
     assert.equal(await sidepanel.locator("#modelDataConsentRow").isHidden(), true);
 
     const fixturePage = await browserContext.newPage();
@@ -724,17 +746,32 @@ test("clean profile pairs, creates first evidence, requires human acceptance, an
       const quote = document.querySelector("#quickStartQuoteText")?.textContent || "";
       return card && !card.hidden && claim.length > 10 && quote.length > 10;
     }, null, { timeout: 30000 });
+    assert.equal(await sidepanel.locator("#quickStartProgress").textContent(), "2 / 3");
+    assert.equal(
+      await sidepanel.evaluate(() => document.activeElement?.id || ""),
+      "quickStartEvidence",
+      "First Evidence must receive focus when it is revealed"
+    );
 
     const firstEvidence = await sidepanel.evaluate(() => ({
       claimId: document.querySelector("#quickStartEvidence")?.dataset.claimId || "",
       evidenceId: document.querySelector("#quickStartEvidence")?.dataset.evidenceId || "",
       claim: document.querySelector("#quickStartClaimText")?.textContent || "",
       quote: document.querySelector("#quickStartQuoteText")?.textContent || "",
-      reviewStatus: document.querySelector("#quickStartReviewStatus")?.textContent || ""
+      reviewStatus: document.querySelector("#quickStartReviewStatus")?.textContent || "",
+      reviewStatusKey: document.querySelector("#quickStartReviewStatus")?.dataset.i18nDynamicKey || ""
     }));
     assert.ok(firstEvidence.claimId, "Quick Start did not expose a real claim id");
     assert.ok(firstEvidence.evidenceId, "Quick Start did not expose a real evidence id");
-    assert.match(firstEvidence.reviewStatus, /尚未人工接受/);
+    assert.equal(firstEvidence.reviewStatusKey, "firstEvidence.review.pending");
+    assert.match(
+      firstEvidence.reviewStatus,
+      htmlLang === "zh-CN" ? /这段原文是否支持这条 claim/ : /Does this exact quote support the claim/
+    );
+    assert.equal(await sidepanel.locator("#quickStartAcceptClaimBtn").isVisible(), true);
+    assert.equal(await sidepanel.locator("#quickStartRejectClaimBtn").isVisible(), true);
+    assert.equal(await sidepanel.locator("#quickStartAcceptClaimBtn").isDisabled(), false);
+    assert.equal(await sidepanel.locator("#quickStartRejectClaimBtn").isDisabled(), false);
 
     const capturedSources = await waitForSources(serviceUrl, token);
     const capturedSource = capturedSources.find((source) => source.url === fixtureUrl);
@@ -753,34 +790,53 @@ test("clean profile pairs, creates first evidence, requires human acceptance, an
       (data) => (data.claims || []).some((claim) => claim.id === firstEvidence.claimId),
       15000
     );
-    assert.notEqual(
-      records.claims.find((claim) => claim.id === firstEvidence.claimId)?.status,
-      "reviewed",
-      "Quick Start auto-reviewed a claim before the user accepted it"
+    assert.equal(
+      ["reviewed", "rejected"].includes(
+        records.claims.find((claim) => claim.id === firstEvidence.claimId)?.status
+      ),
+      false,
+      "Quick Start made a decision before the user chose supported or unsupported"
     );
 
-    await sidepanel.locator("#quickStartAcceptClaimBtn").click();
-    await sidepanel.waitForFunction(() => (
-      document.querySelector("#quickStartReviewStatus")?.textContent || ""
-    ).includes("已人工接受"), null, { timeout: 15000 });
+    const decisionButton = decisionStatus === "rejected"
+      ? "#quickStartRejectClaimBtn"
+      : "#quickStartAcceptClaimBtn";
+    const savedStatusKey = decisionStatus === "rejected"
+      ? "firstEvidence.review.rejectedSaved"
+      : "firstEvidence.review.accepted";
+    await sidepanel.locator(decisionButton).click();
+    await sidepanel.waitForFunction(({ expectedStatus, expectedStatusKey }) => {
+      const card = document.querySelector("#quickStartEvidence");
+      const status = document.querySelector("#quickStartReviewStatus");
+      const accept = document.querySelector("#quickStartAcceptClaimBtn");
+      const reject = document.querySelector("#quickStartRejectClaimBtn");
+      const progress = document.querySelector("#quickStartProgress");
+      return card?.dataset.claimStatus === expectedStatus
+        && status?.dataset.i18nDynamicKey === expectedStatusKey
+        && accept?.disabled
+        && reject?.disabled
+        && progress?.textContent === "3 / 3";
+    }, { expectedStatus: decisionStatus, expectedStatusKey: savedStatusKey }, { timeout: 15000 });
 
     records = await waitForKnowledgeRecords(
       serviceUrl,
       token,
       (data) => (data.claims || []).some((claim) => (
-        claim.id === firstEvidence.claimId && claim.status === "reviewed"
+        claim.id === firstEvidence.claimId && claim.status === decisionStatus
       )),
       15000
     );
-    const reviewed = records.claims.find((claim) => claim.id === firstEvidence.claimId);
-    assert.equal(reviewed?.status, "reviewed");
+    const decided = records.claims.find((claim) => claim.id === firstEvidence.claimId);
+    assert.equal(decided?.status, decisionStatus);
 
     const localProgress = await worker.evaluate(async () => (
       await chrome.storage.local.get("onboardingMilestones")
     ).onboardingMilestones);
     assert.ok(localProgress.capturedAt);
     assert.ok(localProgress.claimReadyAt);
-    assert.ok(localProgress.firstReviewedAt);
+    assert.ok(localProgress.firstDecisionAt);
+    assert.equal(localProgress.firstDecisionStatus, decisionStatus);
+    assert.equal(Boolean(localProgress.firstReviewedAt), decisionStatus === "reviewed");
     assert.equal(localProgress.projectId, "default");
     assert.equal(localProgress.firstClaimId, firstEvidence.claimId);
     assert.equal("claim" in localProgress, false, "claim content should not be copied into local milestones");
@@ -793,11 +849,32 @@ test("clean profile pairs, creates first evidence, requires human acceptance, an
       const card = document.querySelector("#quickStartEvidence");
       return card && !card.hidden && card.dataset.claimId === claimId;
     }, firstEvidence.claimId, { timeout: 20000 });
+    assert.equal(await reopened.locator("html").getAttribute("lang"), htmlLang);
+    assert.equal(await reopened.locator("#uiLocaleSelect").inputValue(), "auto");
     assert.equal(await reopened.locator("#quickStartClaimText").textContent(), firstEvidence.claim);
     assert.equal(await reopened.locator("#quickStartQuoteText").textContent(), firstEvidence.quote);
-    assert.match(await reopened.locator("#quickStartReviewStatus").textContent(), /reviewed|人工核对/);
+    assert.equal(await reopened.locator("#quickStartProgress").textContent(), "3 / 3");
+    assert.equal(
+      await reopened.locator("#quickStartEvidence").getAttribute("data-claim-status"),
+      decisionStatus
+    );
+    assert.equal(
+      await reopened.locator("#quickStartReviewStatus").getAttribute("data-i18n-dynamic-key"),
+      decisionStatus === "rejected"
+        ? "firstEvidence.review.rejected"
+        : "firstEvidence.review.reviewed"
+    );
     assert.equal(await reopened.locator("#quickStartAcceptClaimBtn").isDisabled(), true);
-    assert.match(await reopened.locator("#quickStartStatus").textContent(), /已恢复.*人工核对/);
+    assert.equal(await reopened.locator("#quickStartRejectClaimBtn").isDisabled(), true);
+    assert.equal(
+      await reopened.locator("#quickStartStatus").getAttribute("data-i18n-dynamic-key"),
+      "quickStart.restore.prefix"
+    );
+    assert.match(
+      await reopened.locator("#quickStartStatus").textContent() || "",
+      htmlLang === "zh-CN" ? /已恢复本地进度/ : /Restored local progress/
+    );
+    return { firstEvidence, decisionStatus };
   } finally {
     if (browserContext) await browserContext.close();
     if (fixtureServer) await new Promise((resolve) => fixtureServer.close(resolve));
@@ -805,6 +882,22 @@ test("clean profile pairs, creates first evidence, requires human acceptance, an
     await rm(dataDir, { recursive: true, force: true });
     await rm(userDataDir, { recursive: true, force: true });
   }
+}
+
+test("en-US Auto locale clean profile accepts supported First Evidence and restores reviewed state", async (t) => {
+  await exerciseCleanProfileFirstEvidence(t, {
+    browserLocale: "en-US",
+    htmlLang: "en",
+    decisionStatus: "reviewed"
+  });
+});
+
+test("zh-CN Auto locale clean profile rejects unsupported First Evidence and restores rejected state", async (t) => {
+  await exerciseCleanProfileFirstEvidence(t, {
+    browserLocale: "zh-CN",
+    htmlLang: "zh-CN",
+    decisionStatus: "rejected"
+  });
 });
 
 test("live extension current page uses browser site profile bundle for GitHub issue threads", async (t) => {
@@ -862,7 +955,9 @@ test("live extension current page uses browser site profile bundle for GitHub is
     await sidepanel.waitForFunction(() => document.querySelector("#sourceTitle")?.textContent.includes("Fix stale source quality blockers"), null, { timeout: 15000 });
     await sidepanel.waitForFunction(() => {
       const text = document.querySelector("#sourcePreview")?.textContent || "";
-      return text.includes("profile: github-issue") && text.includes("评论: 1") && text.includes("附件: 1");
+      return text.includes("profile: github-issue")
+        && /(?:comments|评论): 1/.test(text)
+        && /(?:attachments|附件): 1/.test(text);
     }, null, { timeout: 15000 });
 
     await sidepanel.locator('button[data-tab="knowledge"]').click();
@@ -1252,27 +1347,56 @@ test("live extension restores and resumes a service-owned batch after Chromium c
       ({ job, item }) => job.id === running.job.id && item.status === "failed" && item.error_category === "stuck_running"
     );
 
+    const eventsBeforeRestartProcess = await serviceJson(
+      serviceUrl,
+      token,
+      `/v1/jobs/${encodeURIComponent(running.job.id)}/events?limit=400`
+    );
+    const priorEventIds = new Set((eventsBeforeRestartProcess.events || []).map((event) => event.id));
+    assert.ok(
+      (eventsBeforeRestartProcess.events || []).some((event) => (
+        event.event_type === "job_retry_failed" && event.data?.reset_count === 0
+      )),
+      "initial batch preparation did not record its zero-item retry event"
+    );
+    assert.ok(
+      (eventsBeforeRestartProcess.events || []).some((event) => event.event_type === "job_resumed"),
+      "initial batch preparation did not record its resume event"
+    );
+
     await restartedSidepanel.waitForFunction(() => !document.querySelector("#processBatchBtn")?.disabled, null, { timeout: 10000 });
     await restartedSidepanel.locator("#processBatchBtn").click();
-    await waitForJobEvent(serviceUrl, token, running.job.id, "job_retry_failed");
-    await waitForJobEvent(serviceUrl, token, running.job.id, "job_resumed");
+    await waitForJobEvent(
+      serviceUrl,
+      token,
+      running.job.id,
+      "job_retry_failed",
+      (event) => !priorEventIds.has(event.id) && event.data?.reset_count === 1
+    );
+    await waitForJobEvent(
+      serviceUrl,
+      token,
+      running.job.id,
+      "job_resumed",
+      (event) => !priorEventIds.has(event.id)
+    );
 
-	    const finalFirst = await waitForBatchJobItem(serviceUrl, token, firstUrl, ({ item }) => item.status === "success" && item.source_id, 30000);
-	    const finalSecond = await waitForBatchJobItem(serviceUrl, token, secondUrl, ({ item }) => item.status === "success" && item.source_id, 30000);
-	    const finalJob = await waitForBatchJobItem(
-	      serviceUrl,
-	      token,
-	      firstUrl,
-	      ({ job }) => job.status === "success" && job.progress === 1 && job.items.every((item) => item.status === "success"),
-	      30000
-	    );
-	    assert.equal(finalFirst.job.id, running.job.id);
-	    assert.equal(finalSecond.job.id, running.job.id);
-	    assert.equal(finalJob.job.id, running.job.id);
-	    assert.equal(finalJob.job.status, "success");
-	    assert.equal(finalJob.job.progress, 1);
-	    assert.ok(finalFirst.item.attempts >= 2, `expected recovered item to be claimed again, got attempts=${finalFirst.item.attempts}`);
-	    assert.equal(finalJob.job.items.filter((item) => item.status === "running").length, 0);
+    const finalFirst = await waitForBatchJobItem(serviceUrl, token, firstUrl, ({ item }) => item.status === "success" && item.source_id, 30000);
+    const finalSecond = await waitForBatchJobItem(serviceUrl, token, secondUrl, ({ item }) => item.status === "success" && item.source_id, 30000);
+    const finalJob = await waitForBatchJobItem(
+      serviceUrl,
+      token,
+      firstUrl,
+      ({ job }) => job.status === "success" && job.progress === 1 && job.items.every((item) => item.status === "success"),
+      30000
+    );
+    assert.equal(finalFirst.job.id, running.job.id);
+    assert.equal(finalSecond.job.id, running.job.id);
+    assert.equal(finalJob.job.id, running.job.id);
+    assert.equal(finalJob.job.status, "success");
+    assert.equal(finalJob.job.progress, 1);
+    assert.ok(finalFirst.item.attempts >= 2, `expected recovered item to be claimed again, got attempts=${finalFirst.item.attempts}`);
+    assert.equal(finalJob.job.items.filter((item) => item.status === "running").length, 0);
 
     const firstDetail = (await serviceJson(serviceUrl, token, `/v1/sources/${encodeURIComponent(finalFirst.item.source_id)}`)).source;
     const secondDetail = (await serviceJson(serviceUrl, token, `/v1/sources/${encodeURIComponent(finalSecond.item.source_id)}`)).source;

@@ -13,11 +13,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_SCRIPT = ROOT / "scripts" / "release.py"
-EXPECTED_VERSION = "0.9.1"
+EXPECTED_VERSION = "0.9.2"
 EXPECTED_MIN_EXTENSION_VERSION = "0.9.0"
 EXPECTED_EXTENSION_FILES = {
     "LICENSE",
     "PRIVACY.md",
+    "_locales/en/messages.json",
+    "_locales/zh_CN/messages.json",
     "assets/icons/icon-16.png",
     "assets/icons/icon-32.png",
     "assets/icons/icon-48.png",
@@ -27,7 +29,23 @@ EXPECTED_EXTENSION_FILES = {
     "manifest.json",
     "sidepanel.css",
     "sidepanel.html",
+    "sidepanel_i18n.js",
     "sidepanel.js",
+}
+EXPECTED_LOCALE_MESSAGES = {
+    "_locales/en/messages.json": {
+        "extensionDescription": {
+            "message": (
+                "Turn web research into reviewable claims backed by exact quotes—"
+                "stored in a local Markdown + SQLite vault."
+            ),
+        },
+    },
+    "_locales/zh_CN/messages.json": {
+        "extensionDescription": {
+            "message": "把网页研究资料转成由原文精确引文支撑、等待核验的 claim，并保存到本地 Markdown + SQLite 知识库。",
+        },
+    },
 }
 EXPECTED_COMPANION_FILES = {
     "LICENSE",
@@ -104,6 +122,23 @@ class ReleaseArtifactTests(unittest.TestCase):
             ["http://*/*", "https://*/*"],
         )
 
+    def test_manifest_localization_contract_is_complete(self) -> None:
+        manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["name"], "QC Smart Reader")
+        self.assertEqual(manifest["default_locale"], "en")
+        self.assertEqual(manifest["description"], "__MSG_extensionDescription__")
+
+        loaded_messages = {
+            relative: json.loads((ROOT / relative).read_text(encoding="utf-8"))
+            for relative in EXPECTED_LOCALE_MESSAGES
+        }
+        self.assertEqual(loaded_messages, EXPECTED_LOCALE_MESSAGES)
+        self.assertEqual(
+            {frozenset(messages) for messages in loaded_messages.values()},
+            {frozenset({"extensionDescription"})},
+        )
+
     def test_release_allowlists_are_intentionally_narrow(self) -> None:
         self.assertEqual(set(self.release.EXTENSION_FILES), EXPECTED_EXTENSION_FILES)
         self.assertEqual(set(self.release.COMPANION_FILES), EXPECTED_COMPANION_FILES)
@@ -172,6 +207,15 @@ class ReleaseArtifactTests(unittest.TestCase):
                 self.assertIn("manifest.json", extension.namelist())
                 self.assertFalse(any(name.startswith("qc-smart-reader-extension/") for name in extension.namelist()))
                 packaged_manifest = json.loads(extension.read("manifest.json"))
+                self.assertEqual(packaged_manifest["default_locale"], "en")
+                self.assertEqual(packaged_manifest["description"], "__MSG_extensionDescription__")
+                self.assertEqual(
+                    {
+                        relative: json.loads(extension.read(relative))
+                        for relative in EXPECTED_LOCALE_MESSAGES
+                    },
+                    EXPECTED_LOCALE_MESSAGES,
+                )
                 referenced_icons = set(packaged_manifest["icons"].values()) | set(
                     packaged_manifest["action"]["default_icon"].values()
                 )
@@ -233,8 +277,8 @@ class ReleaseArtifactTests(unittest.TestCase):
             server_path = source / "companion_service" / "server.py"
             server_path.write_text(
                 server_path.read_text(encoding="utf-8").replace(
-                    'SERVICE_VERSION = "0.9.1"',
                     'SERVICE_VERSION = "0.9.2"',
+                    'SERVICE_VERSION = "0.9.3"',
                     1,
                 ),
                 encoding="utf-8",
@@ -249,7 +293,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             server_path.write_text(
                 server_path.read_text(encoding="utf-8").replace(
                     'MIN_EXTENSION_VERSION = "0.9.0"',
-                    'MIN_EXTENSION_VERSION = "0.9.2"',
+                    'MIN_EXTENSION_VERSION = "0.9.3"',
                     1,
                 ),
                 encoding="utf-8",
@@ -259,7 +303,7 @@ class ReleaseArtifactTests(unittest.TestCase):
 
     def test_release_rejects_installer_contract_drift(self) -> None:
         for original, replacement, message in (
-            ('REQUIRED_SERVICE_VERSION="0.9.1"', 'REQUIRED_SERVICE_VERSION="0.9.2"', "installer service version"),
+            ('REQUIRED_SERVICE_VERSION="0.9.2"', 'REQUIRED_SERVICE_VERSION="0.9.3"', "installer service version"),
             ('REQUIRED_API_VERSION="1"', 'REQUIRED_API_VERSION="2"', "installer API version"),
         ):
             with self.subTest(replacement=replacement), tempfile.TemporaryDirectory(
@@ -276,8 +320,8 @@ class ReleaseArtifactTests(unittest.TestCase):
 
     def test_release_rejects_package_metadata_version_drift(self) -> None:
         for relative, old, new in (
-            ("package.json", '"version": "0.9.1"', '"version": "0.9.2"'),
-            ("package-lock.json", '"version": "0.9.1"', '"version": "0.9.2"'),
+            ("package.json", '"version": "0.9.2"', '"version": "0.9.3"'),
+            ("package-lock.json", '"version": "0.9.2"', '"version": "0.9.3"'),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory(
                 prefix="qc-release-package-version-drift-"

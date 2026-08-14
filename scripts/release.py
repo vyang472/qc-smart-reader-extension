@@ -21,6 +21,8 @@ from typing import Dict, Iterable, NamedTuple, Sequence
 EXTENSION_FILES = (
     "LICENSE",
     "PRIVACY.md",
+    "_locales/en/messages.json",
+    "_locales/zh_CN/messages.json",
     "assets/icons/icon-16.png",
     "assets/icons/icon-32.png",
     "assets/icons/icon-48.png",
@@ -30,6 +32,7 @@ EXTENSION_FILES = (
     "manifest.json",
     "sidepanel.css",
     "sidepanel.html",
+    "sidepanel_i18n.js",
     "sidepanel.js",
 )
 

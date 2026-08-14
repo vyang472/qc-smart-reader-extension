@@ -49,7 +49,7 @@ const SELECTION_QUEUED_MESSAGE = "qc-smart-reader-selection-queued";
 const CLAIM_SELECTION_MESSAGE = "qc-smart-reader-claim-selection";
 const FALLBACK_LEGACY_PROJECT_ID = "default";
 const PENDING_NOTE_SYNC_TAG_PREFIX = "qc-local-note:";
-const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.1";
+const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.2";
 const REQUIRED_COMPANION_API_VERSION = 1;
 const MODEL_DATA_CONSENT_VERSION = "2026-08-14-v1";
 const ONBOARDING_MILESTONES_KEY = "onboardingMilestones";
@@ -147,13 +147,93 @@ const state = {
   strategyReviews: [],
   claimReviewQueue: [],
   onboardingMilestones: {},
-  onboardingReviewVerified: false
+  onboardingDecisionVerified: false
 };
 
 let pendingSelectionConsumption = Promise.resolve();
 let pendingSelectionMessagesBound = false;
 
 const $ = (id) => document.getElementById(id);
+
+function uiText(key, params = {}, fallback = "") {
+  const translated = globalThis.QCI18n?.t?.(key, params);
+  return translated && translated !== key ? translated : fallback || key;
+}
+
+function setLocalizedNodeText(node, key, params = {}, fallback = "") {
+  if (!node) return;
+  if (node.dataset) {
+    node.dataset.i18nDynamicKey = key;
+    node.dataset.i18nParams = JSON.stringify(params);
+  }
+  node.textContent = uiText(key, params, fallback);
+}
+
+function clearLocalizedNodeText(node) {
+  if (!node) return;
+  if (node.dataset) {
+    delete node.dataset.i18nDynamicKey;
+    delete node.dataset.i18nParams;
+  }
+  node.removeAttribute?.("data-i18n-dynamic-key");
+  node.removeAttribute?.("data-i18n-params");
+}
+
+function setRawNodeText(node, value) {
+  if (!node) return;
+  clearLocalizedNodeText(node);
+  node.textContent = value || "";
+}
+
+function localizedError(key, fallback, params = {}) {
+  const error = new Error(uiText(key, params, fallback));
+  error.uiI18nKey = key;
+  error.uiI18nParams = params;
+  return error;
+}
+
+function errorI18nParam(error) {
+  return error?.uiI18nKey
+    ? { i18nKey: error.uiI18nKey, params: error.uiI18nParams || {} }
+    : String(error?.message || error || "");
+}
+
+function refreshLocalizedNode(node) {
+  const key = node?.dataset?.i18nDynamicKey;
+  if (!key) return;
+  let params = {};
+  try {
+    params = JSON.parse(node.dataset.i18nParams || "{}");
+  } catch (_error) {
+    params = {};
+  }
+  node.textContent = uiText(key, params);
+}
+
+async function initializeUiLocale() {
+  await globalThis.QCI18n?.initialize?.(document);
+  renderSource();
+}
+
+async function setUiLocale(preference) {
+  if (!globalThis.QCI18n?.set) return "zh-CN";
+  const locale = await globalThis.QCI18n.set(preference, document);
+  refreshLocalizedNode($("status"));
+  refreshLocalizedNode($("settingsStatus"));
+  renderSource();
+  renderQuickStart();
+  renderQuickStartEvidenceChrome();
+  updateAdvancedLanguageNotice();
+  return locale;
+}
+
+function updateAdvancedLanguageNotice(activeTabId = "") {
+  const notice = $("advancedLanguageNotice");
+  if (!notice) return;
+  const tabId = activeTabId || document.querySelector?.(".tab.active")?.dataset?.tab || "chat";
+  const advancedTabs = new Set(["batch", "agents", "deliverables"]);
+  notice.hidden = globalThis.QCI18n?.get?.() !== "en" || !advancedTabs.has(tabId);
+}
 
 function sourceFingerprint(source) {
   const text = String(source?.text || "");
@@ -225,7 +305,7 @@ function resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId) 
     renderSource();
   }
   hideQuickStartEvidence();
-  state.onboardingReviewVerified = false;
+  state.onboardingDecisionVerified = false;
   renderQuickStart();
   setStatus(`已切换到项目 ${nextProjectId}；请重新读取该项目的来源。`);
   return true;
@@ -239,6 +319,7 @@ function queryWithProject(params = {}) {
 init();
 
 async function init() {
+  await initializeUiLocale();
   bindTabs();
   renderAgents();
   bindEvents();
@@ -248,7 +329,11 @@ async function init() {
   await queuePendingSelectionHydration({ automatic: true });
   if (!state.settings?.pairingToken) {
     showTab("settings");
-    setSettingsStatus("尚未完成配对。请按上方 3 步首次使用指引连接本地服务。");
+    setLocalizedSettingsStatus(
+      "settings.status.notPaired",
+      {},
+      "尚未完成配对。请按上方 3 步首次使用指引连接本地服务。"
+    );
     await loadBatchQueue();
     return;
   }
@@ -281,10 +366,14 @@ async function authenticateCompanionForStartup() {
     const card = $("quickStartCard");
     if (card) card.hidden = true;
     showTab("settings");
-    const pairingHint = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message)
-      ? "Pairing Token 已失效或不正确："
-      : "本地服务尚未就绪：";
-    setSettingsStatus(`${pairingHint}${error.message}`);
+    const invalidToken = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message);
+    setLocalizedSettingsStatus(
+      invalidToken ? "settings.status.staleToken" : "settings.status.notReady",
+      { error: errorI18nParam(error) },
+      invalidToken
+        ? `Pairing Token 已失效或不正确：${error.message}`
+        : `本地服务尚未就绪：${error.message}`
+    );
     return null;
   }
 }
@@ -303,6 +392,7 @@ function bindTabs() {
       tab.setAttribute("aria-selected", "true");
       tab.tabIndex = 0;
       $(tab.dataset.tab).classList.add("active");
+      updateAdvancedLanguageNotice(tab.dataset.tab);
     });
     tab.addEventListener("keydown", (event) => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -316,6 +406,7 @@ function bindTabs() {
       tabs[nextIndex].focus();
     });
   });
+  updateAdvancedLanguageNotice(tabs.find((tab) => tab.classList.contains("active"))?.dataset?.tab || "chat");
 }
 
 function renderAgents() {
@@ -340,9 +431,15 @@ function renderAgents() {
 }
 
 function bindEvents() {
+  $("uiLocaleSelect")?.addEventListener("change", (event) => {
+    setUiLocale(event.currentTarget?.value || event.target?.value || "auto").catch((error) => {
+      console.warn("UI locale could not be updated.", error);
+    });
+  });
   $("readPageBtn").addEventListener("click", readCurrentPage);
   $("quickStartBtn").addEventListener("click", runQuickStart);
   $("quickStartAcceptClaimBtn").addEventListener("click", acceptQuickStartClaim);
+  $("quickStartRejectClaimBtn").addEventListener("click", rejectQuickStartClaim);
   $("useSelectionBtn").addEventListener("click", readSelectedTextFromPage);
   $("readSelectorBtn").addEventListener("click", readManualSelectorFromPage);
   $("enqueueNextPagesBtn").addEventListener("click", createNextPageCapturePlans);
@@ -493,14 +590,14 @@ function notificationTargetsCurrentPanel(options, target) {
 async function hydratePendingSelection(options = {}) {
   await ensureSettingsLoaded();
   if (state.busy && !options.automatic) {
-    setStatus("当前操作尚未完成，暂不能切换来源。");
+    setLocalizedStatus("currentPage.pending.busy");
     return false;
   }
   const target = await currentSidePanelTarget();
   const targetsThisPanel = notificationTargetsCurrentPanel(options, target);
   if (options.automatic && state.source) {
     if (targetsThisPanel) {
-      setStatus("收到新的右键选中文本，已保留在待载入队列；点击“使用选中文本”切换来源。");
+      setLocalizedStatus("currentPage.pending.deferred");
     }
     return false;
   }
@@ -518,19 +615,29 @@ async function hydratePendingSelection(options = {}) {
     });
   } catch (error) {
     console.warn("Pending selection claim failed.", error);
-    if (!options.automatic) setStatus(`读取待选文本失败：${error.message}`);
+    if (!options.automatic) {
+      setLocalizedStatus("currentPage.pending.failed", { error: errorI18nParam(error) });
+    }
     return false;
   }
   if (!response?.ok) {
-    if (!options.automatic) setStatus(`读取待选文本失败：${response?.error || "后台服务未响应"}`);
+    if (!options.automatic) {
+      setLocalizedStatus("currentPage.pending.failed", {
+        error: response?.error || { i18nKey: "currentPage.pending.noResponse" }
+      });
+    }
     return false;
   }
   if (!response.selection) {
     if (response.reason === "queue_full") {
-      setStatus(`待载入选中文本已达上限（${Number(response.pendingCount || 20)} 条），本次选择未入队且没有覆盖旧内容。请先点击“使用选中文本”处理队列后再试。`);
+      setLocalizedStatus("currentPage.pending.queueFull", {
+        count: Number(response.pendingCount || 20)
+      });
     }
     if (response.reason === "project_mismatch") {
-      setStatus(`有一条右键选中文本属于项目 ${response.selectionProjectId || "其他项目"}；切回该项目后再载入。`);
+      setLocalizedStatus("currentPage.pending.projectMismatch", {
+        projectId: response.selectionProjectId || { i18nKey: "status.unknown" }
+      });
     }
     return false;
   }
@@ -538,11 +645,16 @@ async function hydratePendingSelection(options = {}) {
   const pending = response.selection;
   const pendingProjectId = String(pending.projectId || currentProjectId()).trim() || currentProjectId();
   if (pendingProjectId !== currentProjectId()) {
-    setStatus(`右键选中文本属于项目 ${pendingProjectId}，不能载入当前项目 ${currentProjectId()}。`);
+    setLocalizedStatus("currentPage.pending.cannotLoadProject", {
+      selectionProjectId: pendingProjectId,
+      currentProjectId: currentProjectId()
+    });
     return false;
   }
+  const fallbackTitleKey = "currentPage.selection.defaultTitle";
   state.source = {
-    title: pending.title || "选中文本",
+    title: pending.title || uiText(fallbackTitleKey, {}, "选中文本"),
+    titleI18nKey: pending.title ? "" : fallbackTitleKey,
     projectId: pendingProjectId,
     url: pending.url || "",
     text: pending.text,
@@ -553,7 +665,7 @@ async function hydratePendingSelection(options = {}) {
   };
   markCurrentSourceFingerprint();
   renderSource();
-  setStatus("已载入右键选中的文本。");
+  setLocalizedStatus("currentPage.pending.loaded");
   return true;
 }
 
@@ -562,22 +674,24 @@ async function readSelectedTextFromPage() {
   if (loadedFromMenu) return;
 
   setBusy(true);
-  setStatus("正在读取当前页选中文本...");
+  setLocalizedStatus("currentPage.selection.loading");
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("没有找到当前标签页。");
+    if (!tab?.id) throw localizedError("currentPage.error.noTab", "没有找到当前标签页。");
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => String(window.getSelection?.() || "").trim()
     });
 
     if (!result) {
-      setStatus("当前页没有选中文本。可以先选中正文，或在页面里右键发送到阅读器。");
+      setLocalizedStatus("currentPage.selection.none");
       return;
     }
 
+    const fallbackTitleKey = "currentPage.selection.defaultTitle";
     state.source = {
-      title: tab.title || "选中文本",
+      title: tab.title || uiText(fallbackTitleKey, {}, "选中文本"),
+      titleI18nKey: tab.title ? "" : fallbackTitleKey,
       projectId: currentProjectId(),
       url: tab.url || "",
       text: result,
@@ -588,9 +702,13 @@ async function readSelectedTextFromPage() {
     };
     markCurrentSourceFingerprint();
     renderSource();
-    setStatus(`已读取选中文本 ${countCjkAwareChars(result)} 字。`);
+    setLocalizedStatus("currentPage.selection.success", {
+      count: countCjkAwareChars(result)
+    });
   } catch (error) {
-    setStatus(`读取选中文本失败：${error.message}`);
+    setLocalizedStatus("currentPage.selection.failed", {
+      error: errorI18nParam(error)
+    });
   } finally {
     setBusy(false);
   }
@@ -598,16 +716,22 @@ async function readSelectedTextFromPage() {
 
 async function readCurrentPage(options = {}) {
   setBusy(true);
-  setStatus("正在读取当前页面...");
+  setLocalizedStatus("currentPage.status.reading");
   try {
     const capture = await readAndPersistCurrentPage();
-    setStatus(`已读取 ${countCjkAwareChars(state.source.text)} 字；已保存到本地 Vault（${capture.source.id}）。`);
+    setLocalizedStatus("currentPage.status.saved", {
+      count: countCjkAwareChars(state.source.text),
+      sourceId: capture.source.id
+    });
     return capture;
   } catch (error) {
-    const prefix = error?.pageWasRead && state.source?.text?.trim()
-      ? `已读取 ${countCjkAwareChars(state.source.text)} 字，但未保存到 Vault：`
-      : "读取失败：";
-    setStatus(`${prefix}${error.message}`);
+    const key = error?.pageWasRead && state.source?.text?.trim()
+      ? "currentPage.status.readNotSaved"
+      : "currentPage.status.failed";
+    setLocalizedStatus(key, {
+      count: countCjkAwareChars(state.source?.text || ""),
+      error: errorI18nParam(error)
+    });
     if (options?.throwOnError) throw error;
     return null;
   } finally {
@@ -615,9 +739,19 @@ async function readCurrentPage(options = {}) {
   }
 }
 
+function sourceRequiresAuthentication(source = {}) {
+  const flags = source.quality_flags || source.qualityFlags || {};
+  return Boolean(
+    source.stats?.authRequired
+      || source.stats?.auth_required
+      || flags.authRequired
+      || flags.auth_required
+  );
+}
+
 async function readAndPersistCurrentPage() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error("没有找到当前标签页。");
+  if (!tab?.id) throw localizedError("currentPage.error.noTab", "没有找到当前标签页。");
 
   const extracted = await extractFromTab(tab.id, tab);
   state.source = {
@@ -626,8 +760,17 @@ async function readAndPersistCurrentPage() {
   };
   markCurrentSourceFingerprint();
   renderSource();
+  if (sourceRequiresAuthentication(state.source)) {
+    throw localizedError(
+      "currentPage.error.authRequired",
+      "页面需要登录或权限，无法采集正文。"
+    );
+  }
   if (!state.source.text.trim()) {
-    throw new Error("没有抽取到正文。PDF 页面可以先选中文本后右键发送。");
+    throw localizedError(
+      "currentPage.error.noBody",
+      "没有抽取到正文。PDF 页面可以先选中文本后右键发送。"
+    );
   }
 
   let capture;
@@ -650,7 +793,7 @@ async function loadOnboardingMilestones() {
   state.onboardingMilestones = value && typeof value === "object" && !Array.isArray(value)
     ? { ...value }
     : {};
-  state.onboardingReviewVerified = false;
+  state.onboardingDecisionVerified = false;
   return state.onboardingMilestones;
 }
 
@@ -671,18 +814,30 @@ async function markOnboardingMilestone(field, metadata = {}) {
       ? [
           "extractedAt",
           "claimReadyAt",
+          "firstDecisionAt",
+          "firstDecisionStatus",
           "firstReviewedAt",
           "firstClaimId",
           "firstEvidenceId",
+          "decisionInvalidatedAt",
+          "decisionInvalidatedFromAt",
+          "decisionInvalidatedFromStatus",
+          "decisionInvalidatedStatus",
           "reviewInvalidatedAt",
           "reviewInvalidatedFromReviewedAt",
           "reviewInvalidatedStatus"
         ]
       : [
           "claimReadyAt",
+          "firstDecisionAt",
+          "firstDecisionStatus",
           "firstReviewedAt",
           "firstClaimId",
           "firstEvidenceId",
+          "decisionInvalidatedAt",
+          "decisionInvalidatedFromAt",
+          "decisionInvalidatedFromStatus",
+          "decisionInvalidatedStatus",
           "reviewInvalidatedAt",
           "reviewInvalidatedFromReviewedAt",
           "reviewInvalidatedStatus"
@@ -690,12 +845,19 @@ async function markOnboardingMilestone(field, metadata = {}) {
     for (const key of downstreamKeys) {
       delete next[key];
     }
-    state.onboardingReviewVerified = false;
+    state.onboardingDecisionVerified = false;
   }
-  if (field === "firstReviewedAt") {
+  if (field === "firstDecisionAt" || field === "firstReviewedAt") {
+    delete next.decisionInvalidatedAt;
+    delete next.decisionInvalidatedFromAt;
+    delete next.decisionInvalidatedFromStatus;
+    delete next.decisionInvalidatedStatus;
     delete next.reviewInvalidatedAt;
     delete next.reviewInvalidatedFromReviewedAt;
     delete next.reviewInvalidatedStatus;
+  }
+  if (field === "firstDecisionAt" && metadata.firstDecisionStatus === "rejected") {
+    delete next.firstReviewedAt;
   }
   state.onboardingMilestones = {
     ...next,
@@ -707,14 +869,43 @@ async function markOnboardingMilestone(field, metadata = {}) {
   return state.onboardingMilestones;
 }
 
+function quickStartDecisionStatus(milestones = state.onboardingMilestones || {}) {
+  const status = String(milestones.firstDecisionStatus || "").trim();
+  if ((status === "reviewed" || status === "rejected") && milestones.firstDecisionAt) {
+    return status;
+  }
+  return milestones.firstReviewedAt ? "reviewed" : "";
+}
+
+function migrateLegacyQuickStartDecisionMilestone(milestones) {
+  if (
+    !milestones?.firstReviewedAt
+      || milestones.firstDecisionAt
+      || milestones.firstDecisionStatus
+  ) {
+    return milestones;
+  }
+  const migrated = {
+    ...milestones,
+    firstDecisionAt: milestones.firstReviewedAt,
+    firstDecisionStatus: "reviewed"
+  };
+  state.onboardingMilestones = migrated;
+  chrome.storage.local.set({ [ONBOARDING_MILESTONES_KEY]: migrated }).catch((error) => {
+    console.warn("Legacy Quick Start decision milestone could not be migrated.", error);
+  });
+  return migrated;
+}
+
 function renderQuickStart(options = {}) {
   const card = $("quickStartCard");
   if (!card) return;
   const milestones = state.onboardingMilestones || {};
   const paired = Boolean(milestones.pairedAt && state.settings?.pairingToken);
   const projectMatches = milestones.projectId === currentProjectId();
-  const reviewedAndVerified = Boolean(
-    projectMatches && milestones.firstReviewedAt && state.onboardingReviewVerified
+  const decisionStatus = quickStartDecisionStatus(milestones);
+  const decisionAndVerified = Boolean(
+    projectMatches && decisionStatus && state.onboardingDecisionVerified
   );
   card.hidden = !paired;
   if (!paired) return;
@@ -722,9 +913,7 @@ function renderQuickStart(options = {}) {
   const steps = [
     ["quickStartPairStep", Boolean(milestones.pairedAt)],
     ["quickStartCaptureStep", Boolean(projectMatches && milestones.capturedAt)],
-    ["quickStartExtractStep", Boolean(projectMatches && milestones.extractedAt)],
-    ["quickStartEvidenceStep", Boolean(projectMatches && milestones.claimReadyAt)],
-    ["quickStartReviewStep", reviewedAndVerified]
+    ["quickStartReviewStep", decisionAndVerified]
   ];
   const completed = steps.filter(([, done]) => done).length;
   for (const [id, done] of steps) {
@@ -740,28 +929,40 @@ function renderQuickStart(options = {}) {
   }
   const button = $("quickStartBtn");
   if (button) {
-    button.textContent = reviewedAndVerified
-      ? "用当前页再生成一条证据"
+    const buttonKey = decisionAndVerified
+      ? "quickStart.button.again"
       : projectMatches && milestones.claimReadyAt
-        ? "换当前页生成另一条证据"
+        ? "quickStart.button.another"
         : projectMatches && milestones.capturedAt
-        ? "继续：用当前页完成证据链"
-        : "从当前页生成第一条证据";
+          ? "quickStart.button.continue"
+          : "quickStart.button.first";
+    setLocalizedNodeText(button, buttonKey);
   }
   const status = $("quickStartStatus");
   if (status && options.restored) {
-    const restoredStep = reviewedAndVerified
-      ? "第一条 claim 已完成人工核对"
-      : projectMatches && milestones.reviewInvalidatedAt
-        ? `服务端状态已变为 ${milestones.reviewInvalidatedStatus || "待验证"}，需要重新人工核对`
-      : projectMatches && milestones.claimReadyAt
-        ? "claim 与 exact quote 已就绪，等待人工接受"
-      : projectMatches && milestones.extractedAt
-        ? "已完成本地抽取，等待查看证据"
-        : projectMatches && milestones.capturedAt
-          ? "已保存过来源，可从当前页继续"
-          : "本地服务已配对";
-    status.textContent = `已恢复本地进度：${restoredStep}。`;
+    let stepKey = "quickStart.restore.paired";
+    let stepParams = {};
+    if (decisionAndVerified) {
+      stepKey = decisionStatus === "rejected"
+        ? "quickStart.restore.rejected"
+        : "quickStart.restore.reviewed";
+    } else if (projectMatches && (milestones.decisionInvalidatedAt || milestones.reviewInvalidatedAt)) {
+      stepKey = "quickStart.restore.invalidated";
+      stepParams = {
+        status: milestones.decisionInvalidatedStatus
+          || milestones.reviewInvalidatedStatus
+          || uiText("status.unknown", {}, "待验证")
+      };
+    } else if (projectMatches && milestones.claimReadyAt) {
+      stepKey = "quickStart.restore.evidence";
+    } else if (projectMatches && milestones.extractedAt) {
+      stepKey = "quickStart.restore.extracted";
+    } else if (projectMatches && milestones.capturedAt) {
+      stepKey = "quickStart.restore.captured";
+    }
+    setLocalizedNodeText(status, "quickStart.restore.prefix", {
+      step: { i18nKey: stepKey, params: stepParams }
+    });
   }
 }
 
@@ -787,33 +988,7 @@ function revealQuickStartEvidence(claim, evidence, options = {}) {
   card.dataset.projectId = options.projectId || claim.project_id || currentProjectId();
   card.dataset.claimStatus = claim.status || "";
   card.hidden = false;
-  const acceptButton = $("quickStartAcceptClaimBtn");
-  const hasLocalReviewMilestone = Boolean(
-    state.onboardingMilestones?.firstReviewedAt
-      && state.onboardingMilestones?.projectId === card.dataset.projectId
-      && state.onboardingMilestones?.firstClaimId === claim.id
-  );
-  const hasInvalidatedReview = Boolean(
-    state.onboardingMilestones?.reviewInvalidatedAt
-      && state.onboardingMilestones?.projectId === card.dataset.projectId
-      && state.onboardingMilestones?.firstClaimId === claim.id
-  );
-  const alreadyReviewed = hasLocalReviewMilestone
-    && state.onboardingReviewVerified
-    && claim.status === "reviewed";
-  if (acceptButton) {
-    acceptButton.dataset.claimId = claim.id || "";
-    acceptButton.disabled = alreadyReviewed;
-    acceptButton.textContent = alreadyReviewed ? "已人工接受" : "我已核对原文，接受这条 claim";
-  }
-  const reviewStatus = $("quickStartReviewStatus");
-  if (reviewStatus) {
-    reviewStatus.textContent = alreadyReviewed
-      ? "这条 claim 已由你人工核对，服务端当前状态为 reviewed。"
-      : hasLocalReviewMilestone || hasInvalidatedReview
-        ? `本地记录显示你曾接受，但服务端当前状态为 ${claim.status || "未知"}；请重新核对后再接受。`
-        : "尚未人工接受；请先核对 claim 是否被 exact quote 支持。";
-  }
+  renderQuickStartEvidenceChrome();
   if (options.focus !== false) {
     card.classList?.remove?.("quick-start-highlight");
     void card.offsetWidth;
@@ -828,6 +1003,66 @@ function revealQuickStartEvidence(claim, evidence, options = {}) {
   }
 }
 
+function renderQuickStartEvidenceChrome() {
+  const card = $("quickStartEvidence");
+  const acceptButton = $("quickStartAcceptClaimBtn");
+  const rejectButton = $("quickStartRejectClaimBtn");
+  const reviewStatus = $("quickStartReviewStatus");
+  if (!card) return;
+  const claimId = card.dataset?.claimId || "";
+  const claimStatus = card.dataset?.claimStatus || "";
+  const decisionStatus = quickStartDecisionStatus();
+  const hasLocalDecision = Boolean(
+    decisionStatus
+      && state.onboardingMilestones?.projectId === card.dataset.projectId
+      && state.onboardingMilestones?.firstClaimId === claimId
+  );
+  const hasInvalidatedDecision = Boolean(
+    (state.onboardingMilestones?.decisionInvalidatedAt || state.onboardingMilestones?.reviewInvalidatedAt)
+      && state.onboardingMilestones?.projectId === card.dataset.projectId
+      && state.onboardingMilestones?.firstClaimId === claimId
+  );
+  const alreadyDecided = hasLocalDecision
+    && state.onboardingDecisionVerified
+    && claimStatus === decisionStatus;
+  if (acceptButton) {
+    acceptButton.dataset.claimId = claimId;
+    acceptButton.disabled = state.busy || alreadyDecided;
+    setLocalizedNodeText(
+      acceptButton,
+      alreadyDecided && decisionStatus === "reviewed"
+        ? "firstEvidence.acceptedButton"
+        : "firstEvidence.accept"
+    );
+  }
+  if (rejectButton) {
+    rejectButton.dataset.claimId = claimId;
+    rejectButton.disabled = state.busy || alreadyDecided;
+    setLocalizedNodeText(
+      rejectButton,
+      alreadyDecided && decisionStatus === "rejected"
+        ? "firstEvidence.rejectedButton"
+        : "firstEvidence.reject"
+    );
+  }
+  if (reviewStatus) {
+    if (alreadyDecided) {
+      setLocalizedNodeText(
+        reviewStatus,
+        decisionStatus === "rejected"
+          ? "firstEvidence.review.rejected"
+          : "firstEvidence.review.reviewed"
+      );
+    } else if (hasLocalDecision || hasInvalidatedDecision) {
+      setLocalizedNodeText(reviewStatus, "firstEvidence.review.previous", {
+        status: claimStatus || uiText("status.unknown", {}, "未知")
+      });
+    } else {
+      setLocalizedNodeText(reviewStatus, "firstEvidence.review.pending");
+    }
+  }
+}
+
 function hideQuickStartEvidence() {
   const card = $("quickStartEvidence");
   if (!card) return;
@@ -838,16 +1073,17 @@ function hideQuickStartEvidence() {
   card.dataset.claimStatus = "";
   $("quickStartClaimText").textContent = "";
   $("quickStartQuoteText").textContent = "";
-  const button = $("quickStartAcceptClaimBtn");
-  if (button) {
+  for (const id of ["quickStartAcceptClaimBtn", "quickStartRejectClaimBtn"]) {
+    const button = $(id);
+    if (!button) continue;
     button.dataset.claimId = "";
     button.disabled = true;
   }
 }
 
 function restoreQuickStartEvidenceFromRecords(records) {
-  const milestones = state.onboardingMilestones || {};
-  state.onboardingReviewVerified = false;
+  let milestones = state.onboardingMilestones || {};
+  state.onboardingDecisionVerified = false;
   hideQuickStartEvidence();
   if (
     milestones.projectId !== currentProjectId()
@@ -864,33 +1100,57 @@ function restoreQuickStartEvidenceFromRecords(records) {
       && item.claim_id === milestones.firstClaimId
       && String(item.quote || "").trim()
   ));
-  if (!claim || !evidence) {
+  if (!claim || (claim.project_id && claim.project_id !== milestones.projectId) || !evidence) {
     renderQuickStart();
     return false;
   }
-  const hadActiveReview = Boolean(milestones.firstReviewedAt);
-  if (hadActiveReview && claim.status === "reviewed") {
-    state.onboardingReviewVerified = true;
-  } else if (hadActiveReview) {
-    invalidateQuickStartReviewMilestone(claim.status || "unknown");
+  if (milestones.firstReviewedAt && claim.status === "reviewed") {
+    milestones = migrateLegacyQuickStartDecisionMilestone(milestones);
   }
-  renderQuickStart({ restored: hadActiveReview || Boolean(state.onboardingMilestones?.reviewInvalidatedAt) });
+  const localDecisionStatus = quickStartDecisionStatus(milestones);
+  const hadActiveDecision = Boolean(localDecisionStatus);
+  if (hadActiveDecision && claim.status === localDecisionStatus) {
+    state.onboardingDecisionVerified = true;
+  } else if (hadActiveDecision) {
+    invalidateQuickStartDecisionMilestone(claim.status || "unknown");
+  }
+  renderQuickStart({
+    restored: hadActiveDecision || Boolean(
+      state.onboardingMilestones?.decisionInvalidatedAt
+        || state.onboardingMilestones?.reviewInvalidatedAt
+    )
+  });
   revealQuickStartEvidence(claim, evidence, { focus: false, projectId: milestones.projectId });
   return true;
 }
 
-function invalidateQuickStartReviewMilestone(serverStatus) {
+function invalidateQuickStartDecisionMilestone(serverStatus) {
   const milestones = state.onboardingMilestones || {};
-  if (!milestones.firstReviewedAt) return false;
+  const previousStatus = quickStartDecisionStatus(milestones);
+  const previousAt = milestones.firstDecisionAt || milestones.firstReviewedAt;
+  if (!previousStatus || !previousAt) return false;
+  const invalidatedAt = new Date().toISOString();
   const invalidated = {
     ...milestones,
-    reviewInvalidatedAt: new Date().toISOString(),
-    reviewInvalidatedFromReviewedAt: milestones.firstReviewedAt,
-    reviewInvalidatedStatus: serverStatus || "unknown"
+    decisionInvalidatedAt: invalidatedAt,
+    decisionInvalidatedFromAt: previousAt,
+    decisionInvalidatedFromStatus: previousStatus,
+    decisionInvalidatedStatus: serverStatus || "unknown"
   };
+  if (previousStatus === "reviewed") {
+    invalidated.reviewInvalidatedAt = invalidatedAt;
+    invalidated.reviewInvalidatedFromReviewedAt = milestones.firstReviewedAt || previousAt;
+    invalidated.reviewInvalidatedStatus = serverStatus || "unknown";
+  } else {
+    delete invalidated.reviewInvalidatedAt;
+    delete invalidated.reviewInvalidatedFromReviewedAt;
+    delete invalidated.reviewInvalidatedStatus;
+  }
+  delete invalidated.firstDecisionAt;
+  delete invalidated.firstDecisionStatus;
   delete invalidated.firstReviewedAt;
   state.onboardingMilestones = invalidated;
-  state.onboardingReviewVerified = false;
+  state.onboardingDecisionVerified = false;
   chrome.storage.local.set({ [ONBOARDING_MILESTONES_KEY]: invalidated }).catch((error) => {
     console.warn("Quick Start review invalidation milestone could not be persisted.", error);
   });
@@ -900,7 +1160,7 @@ function invalidateQuickStartReviewMilestone(serverStatus) {
 async function runQuickStart() {
   await ensureSettingsLoaded();
   if (!state.settings?.pairingToken) {
-    setStatus("请先在设置中填写 Pairing Token 并测试本地服务。");
+    setLocalizedStatus("quickStart.error.pairFirst");
     showTab("settings");
     return null;
   }
@@ -909,19 +1169,22 @@ async function runQuickStart() {
   const quickStatus = $("quickStartStatus");
   try {
     await markOnboardingMilestone("pairedAt");
-    if (quickStatus) quickStatus.textContent = "1 / 5 正在读取当前页并保存到本地 Vault...";
+    setLocalizedNodeText(quickStatus, "quickStart.status.reading");
     const capture = await readAndPersistCurrentPage();
     const sourceId = capture?.source?.id;
-    if (!sourceId) throw new Error("本地服务没有返回 source id。");
+    if (!sourceId) throw localizedError("quickStart.error.noSourceId", "本地服务没有返回 source id。");
 
-    if (quickStatus) quickStatus.textContent = "2 / 5 已保存 Vault；正在运行本地模板抽取...";
+    setLocalizedNodeText(quickStatus, "quickStart.status.extracting");
     const result = await requestKnowledgeExtraction(sourceId, "mock");
     await markOnboardingMilestone("extractedAt", { lastSourceId: sourceId, projectId: currentProjectId() });
     await applyKnowledgeExtractionResult(sourceId, result, "Quick Start 已抽取");
     const records = result.records || {};
     const firstEvidence = firstQuoteBackedClaim(records);
     if (!firstEvidence) {
-      throw new Error("本地模板没有返回同时包含 claim 与 exact quote 的证据链；未标记为完成。");
+      throw localizedError(
+        "quickStart.error.noEvidence",
+        "本地模板没有返回同时包含 claim 与 exact quote 的证据链；未标记为完成。"
+      );
     }
 
     renderKnowledgeRecords(records);
@@ -932,14 +1195,15 @@ async function runQuickStart() {
       firstClaimId: firstEvidence.claim.id || "",
       firstEvidenceId: firstEvidence.evidence.id || ""
     });
-    if (quickStatus) quickStatus.textContent = "4 / 5 证据已就绪：请核对 exact quote，再人工接受 claim。";
-    setKnowledgeRecordStatus("Quick Start 已定位第一条 claim 与 exact quote；尚未人工接受，也未调用外部模型。");
+    setLocalizedNodeText(quickStatus, "quickStart.status.evidenceReady");
+    setLocalizedKnowledgeRecordStatus("quickStart.knowledgeReady");
     showTab("knowledge");
     revealQuickStartEvidence(firstEvidence.claim, firstEvidence.evidence);
     return { capture, result, ...firstEvidence };
   } catch (error) {
-    if (quickStatus) quickStatus.textContent = `Quick Start 未完成：${error.message}`;
-    setStatus(`Quick Start 未完成：${error.message}`);
+    const params = { error: errorI18nParam(error) };
+    setLocalizedNodeText(quickStatus, "quickStart.status.failed", params);
+    setLocalizedStatus("quickStart.status.failed", params);
     return null;
   } finally {
     setBusy(false);
@@ -947,53 +1211,111 @@ async function runQuickStart() {
 }
 
 async function acceptQuickStartClaim() {
+  return decideQuickStartClaim("reviewed");
+}
+
+async function rejectQuickStartClaim() {
+  return decideQuickStartClaim("rejected");
+}
+
+async function decideQuickStartClaim(decisionStatus) {
+  if (decisionStatus !== "reviewed" && decisionStatus !== "rejected") return null;
   const card = $("quickStartEvidence");
+  const milestones = state.onboardingMilestones || {};
   const claimId = String(card?.dataset?.claimId || state.onboardingMilestones?.firstClaimId || "").trim();
+  const claimText = String($("quickStartClaimText")?.textContent || "");
   const quote = String($("quickStartQuoteText")?.textContent || "").trim();
   const evidenceProjectId = String(card?.dataset?.projectId || "").trim();
-  if (!evidenceProjectId || evidenceProjectId !== currentProjectId()) {
-    $("quickStartReviewStatus").textContent = "无法接受：这条证据属于另一个项目，已阻止跨项目审阅。";
-    setStatus("已阻止跨项目审阅；请在当前项目重新运行 Quick Start。");
+  const evidenceId = String(card?.dataset?.evidenceId || "").trim();
+  if (
+    !evidenceProjectId
+      || evidenceProjectId !== currentProjectId()
+      || milestones.projectId !== currentProjectId()
+      || milestones.firstClaimId !== claimId
+      || milestones.firstEvidenceId !== evidenceId
+  ) {
+    setLocalizedNodeText($("quickStartReviewStatus"), "firstEvidence.review.crossProject");
+    setLocalizedStatus("firstEvidence.review.crossProjectStatus");
     return null;
   }
-  if (!claimId || !quote) {
-    $("quickStartReviewStatus").textContent = "无法接受：缺少 claim 或 exact quote，请重新运行 Quick Start。";
+  if (!claimId || !evidenceId || !quote) {
+    setLocalizedNodeText($("quickStartReviewStatus"), "firstEvidence.review.missing");
     return null;
   }
 
   setBusy(true);
-  $("quickStartReviewStatus").textContent = "正在保存你的人工接受决定...";
+  setLocalizedNodeText(
+    $("quickStartReviewStatus"),
+    decisionStatus === "rejected"
+      ? "firstEvidence.review.savingRejected"
+      : "firstEvidence.review.savingReviewed"
+  );
   try {
+    const reviewBody = decisionStatus === "rejected"
+      ? {
+          status: "rejected",
+          reviewer: "quick-start-user",
+          review_note: "Reviewed in First Evidence after comparing the claim with the exact quote.",
+          rejection_reason: "The exact quote does not support this claim."
+        }
+      : {
+          status: "reviewed",
+          reviewer: "quick-start-user",
+          review_note: "Accepted in First Evidence after comparing the claim with the exact quote."
+        };
     const result = await companionRequest(`/v1/claims/${encodeURIComponent(claimId)}/review`, {
       method: "POST",
-      body: {
-        status: "reviewed",
-        reviewer: "quick-start-user",
-        review_note: "Accepted in Quick Start after inspecting the exact quote."
-      }
+      body: reviewBody
     });
-    if (result?.claim?.status !== "reviewed") {
-      throw new Error("本地服务没有确认 claim 已保存为 reviewed；未记录完成里程碑。");
+    if (result?.claim?.status !== decisionStatus) {
+      throw new Error(
+        uiText(
+          "firstEvidence.review.notConfirmed",
+          { status: decisionStatus },
+          `本地服务没有确认 ${decisionStatus} 判断；未记录完成里程碑。`
+        )
+      );
     }
-    if (card) card.dataset.claimStatus = "reviewed";
-    state.onboardingReviewVerified = true;
-    await markOnboardingMilestone("firstReviewedAt", {
+    const metadata = {
       projectId: currentProjectId(),
       firstClaimId: claimId,
-      firstEvidenceId: card?.dataset?.evidenceId || state.onboardingMilestones?.firstEvidenceId || ""
-    });
+      firstEvidenceId: evidenceId,
+      firstDecisionStatus: decisionStatus
+    };
+    if (decisionStatus === "reviewed") metadata.firstReviewedAt = new Date().toISOString();
     await refreshClaimReviewAfterMutation();
-    $("quickStartReviewStatus").textContent = "已人工接受；该 claim 已保存为 reviewed。";
-    const button = $("quickStartAcceptClaimBtn");
-    if (button) {
-      button.disabled = true;
-      button.textContent = "已人工接受";
-    }
-    $("quickStartStatus").textContent = "5 / 5 已完成：第一条 quote-backed claim 已人工核对并保存。";
+    state.onboardingDecisionVerified = true;
+    await markOnboardingMilestone("firstDecisionAt", metadata);
+    revealQuickStartEvidence(
+      {
+        ...result.claim,
+        id: claimId,
+        project_id: currentProjectId(),
+        status: decisionStatus,
+        text: result.claim?.text || claimText
+      },
+      { id: evidenceId, claim_id: claimId, quote },
+      { focus: false, projectId: currentProjectId() }
+    );
+    renderQuickStartEvidenceChrome();
+    setLocalizedNodeText(
+      $("quickStartReviewStatus"),
+      decisionStatus === "rejected"
+        ? "firstEvidence.review.rejectedSaved"
+        : "firstEvidence.review.accepted"
+    );
+    setLocalizedNodeText(
+      $("quickStartStatus"),
+      decisionStatus === "rejected"
+        ? "quickStart.status.completedRejected"
+        : "quickStart.status.completedReviewed"
+    );
     renderQuickStart();
     return result;
   } catch (error) {
-    $("quickStartReviewStatus").textContent = `接受失败：${error.message}`;
+    setLocalizedNodeText($("quickStartReviewStatus"), "firstEvidence.review.failed", {
+      error: errorI18nParam(error)
+    });
     return null;
   } finally {
     setBusy(false);
@@ -1003,22 +1325,34 @@ async function acceptQuickStartClaim() {
 async function readManualSelectorFromPage() {
   const selector = $("manualSelectorInput")?.value.trim() || "";
   if (!selector) {
-    setStatus("请输入正文 CSS 选择器，例如 article、main、#js_content。");
+    setLocalizedStatus("currentPage.selector.required");
     return;
   }
   setBusy(true);
-  setStatus(`正在按选择器读取：${selector}`);
+  setLocalizedStatus("currentPage.selector.reading", { selector });
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("没有找到当前标签页。");
+    if (!tab?.id) throw localizedError("currentPage.error.noTab", "没有找到当前标签页。");
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: extractManualSelectorPage,
       args: [selector]
     });
     const extracted = result || {};
+    if (extracted.error?.code) {
+      throw manualSelectorLocalizedError(extracted.error, selector);
+    }
+    if (!String(extracted.text || "").trim()) {
+      throw localizedError(
+        "currentPage.selector.empty",
+        `选择器匹配到了元素，但没有可读取文本：${selector}。`,
+        { selector }
+      );
+    }
+    const fallbackTitleKey = "currentPage.selector.defaultTitle";
     state.source = {
-      title: extracted.title || tab.title || "手动选择器来源",
+      title: extracted.title || tab.title || uiText(fallbackTitleKey, {}, "手动选择器来源"),
+      titleI18nKey: extracted.title || tab.title ? "" : fallbackTitleKey,
       projectId: currentProjectId(),
       url: tab.url || extracted.url || "",
       canonicalUrl: extracted.canonicalUrl || normalizeUrl(tab.url || extracted.url || ""),
@@ -1038,12 +1372,51 @@ async function readManualSelectorFromPage() {
     };
     markCurrentSourceFingerprint();
     renderSource();
-    setStatus(`已按选择器读取 ${countCjkAwareChars(state.source.text)} 字。`);
+    setLocalizedStatus("currentPage.selector.success", {
+      count: countCjkAwareChars(state.source.text)
+    });
   } catch (error) {
-    setStatus(`选择器读取失败：${error.message}`);
+    const directKeys = new Set([
+      "currentPage.selector.invalid",
+      "currentPage.selector.noMatch",
+      "currentPage.selector.empty",
+      "currentPage.selector.failed"
+    ]);
+    if (directKeys.has(error?.uiI18nKey)) {
+      setLocalizedStatus(error.uiI18nKey, error.uiI18nParams || { selector });
+    } else {
+      setLocalizedStatus("currentPage.selector.failed", {
+        error: errorI18nParam(error)
+      });
+    }
   } finally {
     setBusy(false);
   }
+}
+
+function manualSelectorLocalizedError(metadata = {}, selector = "") {
+  const keys = {
+    selector_invalid: "currentPage.selector.invalid",
+    selector_no_match: "currentPage.selector.noMatch",
+    selector_empty: "currentPage.selector.empty"
+  };
+  const fallbackByCode = {
+    selector_invalid: `CSS 选择器无效：${selector}。`,
+    selector_no_match: `页面中没有匹配该 CSS 选择器：${selector}。`,
+    selector_empty: `选择器匹配到了元素，但没有可读取文本：${selector}。`
+  };
+  const code = String(metadata.code || "selector_error");
+  const key = keys[code] || "currentPage.selector.failed";
+  const error = localizedError(
+    key,
+    fallbackByCode[code] || String(metadata.detail || "选择器读取失败。"),
+    key === "currentPage.selector.failed"
+      ? { error: String(metadata.detail || code) }
+      : { selector }
+  );
+  error.code = code;
+  error.selectorErrorDetail = String(metadata.detail || "");
+  return error;
 }
 
 function extractManualSelectorPage(selector) {
@@ -1051,17 +1424,22 @@ function extractManualSelectorPage(selector) {
   try {
     root = document.querySelector(selector);
   } catch (error) {
-    throw new Error(`选择器无效：${error.message}`);
+    return {
+      error: {
+        code: "selector_invalid",
+        detail: String(error?.message || error || "")
+      }
+    };
   }
   if (!root) {
-    throw new Error(`页面中没有匹配该选择器：${selector}`);
+    return { error: { code: "selector_no_match" } };
   }
   const url = location.href;
   const canonicalUrl = document.querySelector('link[rel="canonical"], link[rel~="canonical"]')?.href || url;
-  const title = document.title || textOf(root.querySelector("h1, h2, h3")) || "手动选择器来源";
+  const title = document.title || textOf(root.querySelector("h1, h2, h3")) || "";
   const bodyText = normalizeText(root.innerText || root.textContent || "");
   if (!bodyText) {
-    throw new Error("选择器匹配到了元素，但没有可读取文本。");
+    return { error: { code: "selector_empty" } };
   }
   const codeBlocks = extractCodeBlocks(root);
   const images = extractImages(root);
@@ -1077,7 +1455,7 @@ function extractManualSelectorPage(selector) {
     .map((node) => `${"#".repeat(Math.min(Number(node.tagName.slice(1)), 3))} ${normalizeText(node.innerText || node.textContent || "")}`)
     .filter((line) => !/^#+\s*$/.test(line));
   const markdown = [
-    `# ${title}`,
+    `# ${title || url}`,
     url,
     canonicalUrl && canonicalUrl !== url ? `Canonical: ${canonicalUrl}` : "",
     `Manual selector: ${selector}`,
@@ -1602,14 +1980,25 @@ function extractReadablePage() {
 
 function renderSource() {
   const source = state.source;
-  $("sourceTitle").textContent = source?.title || "尚未读取内容";
-  $("sourceStats").textContent = `${countCjkAwareChars(source?.text || "")} 字`;
+  if (source?.titleI18nKey) {
+    setLocalizedNodeText($("sourceTitle"), source.titleI18nKey);
+  } else if (source?.title) {
+    setRawNodeText($("sourceTitle"), source.title);
+  } else {
+    setLocalizedNodeText($("sourceTitle"), "currentPage.emptyTitle");
+  }
+  setLocalizedNodeText($("sourceStats"), "currentPage.characters", {
+    count: countCjkAwareChars(source?.text || "")
+  });
   $("sourceUrl").textContent = source?.url || "";
-  $("sourceLine").textContent = !source
-    ? "读取网页、帖子、论文片段"
-    : source.kind === "selection"
-      ? "当前来源：选中文本"
-      : "当前来源：网页正文";
+  setLocalizedNodeText(
+    $("sourceLine"),
+    !source
+      ? "shell.sourceLine.empty"
+      : source.kind === "selection"
+        ? "shell.sourceLine.selection"
+        : "shell.sourceLine.page"
+  );
   renderSourcePreview(source);
 }
 
@@ -1620,26 +2009,26 @@ function renderSourcePreview(source) {
   const nextPageButton = $("enqueueNextPagesBtn");
   if (nextPageButton) {
     nextPageButton.disabled = true;
-    nextPageButton.textContent = "分页加入候选池";
+    setLocalizedNodeText(nextPageButton, "currentPage.enqueuePages");
   }
   if (!source) return;
   const stats = source.stats || {};
   const nextPages = Array.isArray(source.nextPages) ? source.nextPages.filter(Boolean) : [];
   const items = [
-    ["profile", stats.profile || source.site || "generic"],
-    ["质量", `${stats.quality || 0}/100`],
-    ["图片", stats.images ?? source.images?.length ?? 0],
-    ["代码块", stats.codeBlocks ?? 0],
-    ["附件", stats.attachments ?? source.attachments?.length ?? 0],
-    ["评论", stats.comments ?? 0],
-    ["分页", stats.nextPages ?? source.nextPages?.length ?? 0],
-    ["PDF页", stats.pages ?? 0],
-    ["字幕段", stats.transcriptSegments ?? 0],
-    ...(stats.ocrPagesReplaced === undefined ? [] : [["OCR替换页", stats.ocrPagesReplaced]])
+    ["currentPage.summary.profile", stats.profile || source.site || "generic"],
+    ["currentPage.summary.quality", `${stats.quality || 0}/100`],
+    ["currentPage.summary.images", stats.images ?? source.images?.length ?? 0],
+    ["currentPage.summary.codeBlocks", stats.codeBlocks ?? 0],
+    ["currentPage.summary.attachments", stats.attachments ?? source.attachments?.length ?? 0],
+    ["currentPage.summary.comments", stats.comments ?? 0],
+    ["currentPage.summary.nextPages", stats.nextPages ?? source.nextPages?.length ?? 0],
+    ["currentPage.summary.pdfPages", stats.pages ?? 0],
+    ["currentPage.summary.transcriptSegments", stats.transcriptSegments ?? 0],
+    ...(stats.ocrPagesReplaced === undefined ? [] : [["currentPage.summary.ocrPages", stats.ocrPagesReplaced]])
   ];
-  for (const [label, value] of items) {
+  for (const [labelKey, value] of items) {
     const node = document.createElement("span");
-    node.textContent = `${label}: ${value}`;
+    node.textContent = `${uiText(labelKey)}: ${value}`;
     preview.appendChild(node);
   }
   const flags = source.quality_flags || source.qualityFlags || {};
@@ -1653,11 +2042,21 @@ function renderSourcePreview(source) {
   }
   if (nextPages.length) {
     const node = document.createElement("span");
-    node.textContent = `下一页：${nextPages.slice(0, 3).join(" · ")}${nextPages.length > 3 ? ` · +${nextPages.length - 3}` : ""}`;
+    setLocalizedNodeText(node, "currentPage.nextPages.preview", {
+      urls: nextPages.slice(0, 3).join(" · "),
+      more: nextPages.length > 3
+        ? {
+            i18nKey: "currentPage.nextPages.more",
+            params: { count: nextPages.length - 3 }
+          }
+        : ""
+    });
     preview.appendChild(node);
     if (nextPageButton) {
       nextPageButton.disabled = false;
-      nextPageButton.textContent = `分页加入候选池 (${nextPages.length})`;
+      setLocalizedNodeText(nextPageButton, "currentPage.nextPages.button", {
+        count: nextPages.length
+      });
     }
   }
 }
@@ -2696,6 +3095,7 @@ async function extractFromTab(tabId, tab) {
     links: extracted.links || [],
     nextPages: extracted.nextPages || [],
     stats: extracted.stats || {},
+    quality_flags: extracted.quality_flags || extracted.qualityFlags || {},
     capturedAt: new Date().toISOString()
   };
 }
@@ -3424,7 +3824,11 @@ function setStrategyReviewStatus(message) {
 
 function setKnowledgeRecordStatus(message) {
   const node = $("knowledgeRecordStatus");
-  if (node) node.textContent = message || "";
+  setRawNodeText(node, message);
+}
+
+function setLocalizedKnowledgeRecordStatus(key, params = {}, fallback = "") {
+  setLocalizedNodeText($("knowledgeRecordStatus"), key, params, fallback);
 }
 
 function setLearningItemStatus(message) {
@@ -6476,11 +6880,11 @@ async function createNextPageCapturePlans() {
     .map((url) => normalizeUrl(url))
     .filter(Boolean);
   if (!nextPages.length) {
-    setStatus("当前来源没有分页链接。");
+    setLocalizedStatus("currentPage.nextPages.none");
     return;
   }
   setBusy(true);
-  setStatus("正在把分页链接加入 Capture Plan...");
+  setLocalizedStatus("currentPage.nextPages.working", { count: nextPages.length });
   try {
     const data = await companionRequest("/v1/capture-plans", {
       method: "POST",
@@ -6513,10 +6917,12 @@ async function createNextPageCapturePlans() {
     state.capturePlans = data.plans || [];
     await loadCapturePlans({ quiet: true });
     await loadProjectDashboard({ quiet: true });
-    setStatus(`已加入 ${nextPages.length} 个分页候选来源。`);
+    setLocalizedStatus("currentPage.nextPages.success", { count: nextPages.length });
     setCapturePlanStatus(`已加入 ${nextPages.length} 个分页候选来源。`);
   } catch (error) {
-    setStatus(`分页加入候选池失败：${error.message}`);
+    setLocalizedStatus("currentPage.nextPages.failed", {
+      error: errorI18nParam(error)
+    });
   } finally {
     setBusy(false);
   }
@@ -7089,14 +7495,16 @@ function renderLineage(lineage) {
 
 async function testCompanion() {
   setBusy(true);
-  setSettingsStatus("正在测试本地服务和 Pairing Token...");
+  setLocalizedSettingsStatus("settings.status.testing");
   try {
     await saveSettings({ saveModel: false });
-    setSettingsStatus("正在测试本地服务和 Pairing Token...");
+    setLocalizedSettingsStatus("settings.status.testing");
     const health = await companionRequest("/health", { method: "GET" });
     assertCompatibleCompanion(health);
     if (health.pairing_required && !state.settings?.pairingToken) {
-      setSettingsStatus(`本地服务已启动；请填写 Pairing Token：${health.pairing_token_path || "state/pairing_token.txt"}`);
+      setLocalizedSettingsStatus("settings.status.needToken", {
+        path: health.pairing_token_path || "state/pairing_token.txt"
+      });
       return;
     }
     const projectsResponse = await companionRequest("/v1/projects", { method: "GET" });
@@ -7105,14 +7513,20 @@ async function testCompanion() {
     await loadModelSettings();
     await markOnboardingMilestone("pairedAt");
     renderQuickStart();
-    setSettingsStatus(`本地服务和 Pairing Token 均正常：扩展 ${EXTENSION_VERSION} · 服务 ${health.service_version || health.version} · API ${health.api_version} · ${health.vault_dir || health.data_dir}`);
+    setLocalizedSettingsStatus("settings.status.success", {
+      extensionVersion: EXTENSION_VERSION,
+      serviceVersion: health.service_version || health.version,
+      apiVersion: health.api_version,
+      vault: health.vault_dir || health.data_dir
+    });
     showTab("chat");
     $("quickStartBtn")?.focus?.();
   } catch (error) {
-    const pairingHint = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message)
-      ? "Pairing Token 无效或未填写："
-      : "本地服务不可用：";
-    setSettingsStatus(`${pairingHint}${error.message}`);
+    const invalidToken = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message);
+    setLocalizedSettingsStatus(
+      invalidToken ? "settings.status.invalidToken" : "settings.status.unavailable",
+      { error: errorI18nParam(error) }
+    );
   } finally {
     setBusy(false);
   }
@@ -7172,15 +7586,33 @@ function modelDataConsentFields(checked) {
 
 function assertCompatibleCompanion(health) {
   if (!health || health.ok !== true || health.app !== "QC Smart Reader") {
-    throw new Error("连接到的不是 QC Smart Reader companion service。");
+    throw localizedError(
+      "companion.error.wrongService",
+      "该地址有响应，但不是 QC Smart Reader Companion。"
+    );
   }
   const apiVersion = Number(health.api_version);
   if (apiVersion !== REQUIRED_COMPANION_API_VERSION) {
-    throw new Error(`版本不兼容：扩展 ${EXTENSION_VERSION} 需要 Companion API ${REQUIRED_COMPANION_API_VERSION}，当前为 ${health.api_version ?? "旧版/未知"}。请更新并重启 companion service。`);
+    throw localizedError(
+      "companion.error.apiMismatch",
+      `扩展 ${EXTENSION_VERSION} 需要 Companion API ${REQUIRED_COMPANION_API_VERSION}，当前 API 为 ${health.api_version ?? "旧版或未知"}。请更新并重启 Companion。`,
+      {
+        extensionVersion: EXTENSION_VERSION,
+        requiredApi: REQUIRED_COMPANION_API_VERSION,
+        actualApi: health.api_version ?? { i18nKey: "companion.value.legacyUnknown" }
+      }
+    );
   }
   const minimumExtension = String(health.min_extension_version || "").trim();
   if (minimumExtension && compareProductVersions(EXTENSION_VERSION, minimumExtension) < 0) {
-    throw new Error(`扩展版本过旧：Companion 要求扩展 ${minimumExtension} 或更高，当前为 ${EXTENSION_VERSION}。请更新扩展。`);
+    throw localizedError(
+      "companion.error.extensionTooOld",
+      `扩展版本过旧。Companion 要求扩展 ${minimumExtension} 或更高，当前为 ${EXTENSION_VERSION}。请更新扩展。`,
+      {
+        requiredVersion: minimumExtension,
+        currentVersion: EXTENSION_VERSION
+      }
+    );
   }
 }
 
@@ -7229,9 +7661,11 @@ function setBusy(isBusy) {
   state.busyDepth = Math.max(0, Number(state.busyDepth || 0) + (isBusy ? 1 : -1));
   state.busy = state.busyDepth > 0;
   const ids = [
+    "uiLocaleSelect",
     "readPageBtn",
     "quickStartBtn",
     "quickStartAcceptClaimBtn",
+    "quickStartRejectClaimBtn",
     "useSelectionBtn",
     "saveNoteBtn",
     "manualSelectorInput",
@@ -7354,14 +7788,16 @@ function setBusy(isBusy) {
       node.disabled = !state.batchRunning;
       return;
     }
-    if (id === "quickStartAcceptClaimBtn") {
-      node.disabled = state.busy || Boolean(
-        state.onboardingMilestones?.firstReviewedAt
-          && state.onboardingReviewVerified
+    if (id === "quickStartAcceptClaimBtn" || id === "quickStartRejectClaimBtn") {
+      const decisionStatus = quickStartDecisionStatus();
+      const decisionCompleted = Boolean(
+        decisionStatus
+          && state.onboardingDecisionVerified
           && state.onboardingMilestones?.projectId === currentProjectId()
           && state.onboardingMilestones?.firstClaimId === node.dataset.claimId
-          && $("quickStartEvidence")?.dataset?.claimStatus === "reviewed"
+          && $("quickStartEvidence")?.dataset?.claimStatus === decisionStatus
       );
+      node.disabled = state.busy || !node.dataset.claimId || decisionCompleted;
       return;
     }
     node.disabled = state.busy;
@@ -7370,12 +7806,20 @@ function setBusy(isBusy) {
 }
 
 function setStatus(message) {
-  $("status").textContent = message || "";
+  setRawNodeText($("status"), message);
+}
+
+function setLocalizedStatus(key, params = {}, fallback = "") {
+  setLocalizedNodeText($("status"), key, params, fallback);
 }
 
 function setSettingsStatus(message) {
   const node = $("settingsStatus");
-  if (node) node.textContent = message || "";
+  setRawNodeText(node, message);
+}
+
+function setLocalizedSettingsStatus(key, params = {}, fallback = "") {
+  setLocalizedNodeText($("settingsStatus"), key, params, fallback);
 }
 
 function countCjkAwareChars(text) {
@@ -7444,10 +7888,13 @@ async function companionRequest(path, options = {}) {
   try {
     parsedBase = new URL(base);
   } catch (_error) {
-    throw new Error("Companion URL 格式无效。");
+    throw localizedError("companion.error.invalidUrl", "Companion URL 格式无效。");
   }
   if (parsedBase.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]", "::1"].includes(parsedBase.hostname)) {
-    throw new Error("为保护 Pairing Token，Companion URL 仅允许本机 http://127.0.0.1 或 localhost 地址。");
+    throw localizedError(
+      "companion.error.unsafeUrl",
+      "为保护 Pairing Token，Companion URL 仅允许本机 http://127.0.0.1 或 localhost 地址。"
+    );
   }
   const timeoutMs = companionRequestTimeoutMs(path, options);
   const controller = typeof globalThis.AbortController === "function"
@@ -7468,9 +7915,17 @@ async function companionRequest(path, options = {}) {
     text = await response.text();
   } catch (cause) {
     const timedOut = cause?.name === "AbortError";
-    const error = new Error(timedOut
-      ? `Companion 请求超时（${Math.round(timeoutMs / 1000)} 秒）；服务可能仍在处理，请先检查状态再重试。`
-      : cause?.message || "Companion 网络不可达。");
+    const seconds = Math.round(timeoutMs / 1000);
+    const error = timedOut
+      ? localizedError(
+          "companion.error.timeout",
+          `Companion 请求超时（${seconds} 秒）。服务可能仍在处理，请先检查状态再重试。`,
+          { seconds }
+        )
+      : localizedError(
+          "companion.error.network",
+          "无法连接本地 Companion。请确认服务已启动后重试。"
+        );
     error.isNetworkError = true;
     error.code = timedOut ? "companion_timeout" : "companion_network_error";
     error.cause = cause;
@@ -7482,7 +7937,11 @@ async function companionRequest(path, options = {}) {
   try {
     data = text ? JSON.parse(text) : {};
   } catch (cause) {
-    const error = new Error(`Companion 返回了无法解析的响应（HTTP ${response.status}）。`);
+    const error = localizedError(
+      "companion.error.invalidResponse",
+      `Companion 返回了无法解析的响应（HTTP ${response.status}）。`,
+      { status: response.status }
+    );
     error.status = response.status;
     error.code = "invalid_response";
     error.cause = cause;

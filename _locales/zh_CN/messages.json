@@ -1,0 +1,5 @@
+{
+  "extensionDescription": {
+    "message": "把网页研究资料转成由原文精确引文支撑、等待核验的 claim，并保存到本地 Markdown + SQLite 知识库。"
+  }
+}

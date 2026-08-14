@@ -73,10 +73,13 @@ function createMockNode(id = "") {
 async function createSidepanelHarness({
   fetchHandler,
   extractionResult,
+  executeScriptHandler,
   runtimeMessageHandler,
   confirmHandler = () => true,
+  uiLanguage = "zh-CN",
   currentTab = { id: 41, windowId: 7, url: "https://example.com/current", title: "Current tab" }
 } = {}) {
+  const i18nJs = await projectFile("sidepanel_i18n.js");
   const js = (await projectFile("sidepanel.js")).replace("\ninit();\n", "\n");
   const nodes = new Map();
   const storageState = {};
@@ -107,6 +110,7 @@ async function createSidepanelHarness({
     AbortController,
     Math,
     Object,
+    navigator: { language: uiLanguage },
     confirm: confirmHandler,
     crypto: {
       randomUUID: () => `uuid-${nextUuid++}`
@@ -127,6 +131,11 @@ async function createSidepanelHarness({
       }
     },
     chrome: {
+      i18n: {
+        getUILanguage() {
+          return uiLanguage;
+        }
+      },
       runtime: {
         onMessage: {
           addListener(listener) {
@@ -149,6 +158,9 @@ async function createSidepanelHarness({
           },
           async set(values) {
             Object.assign(storageState, values);
+          },
+          async remove(keys) {
+            for (const key of Array.isArray(keys) ? keys : [keys]) delete storageState[key];
           }
         },
         session: {
@@ -176,7 +188,10 @@ async function createSidepanelHarness({
         }
       },
       scripting: {
-        async executeScript() {
+        async executeScript(details) {
+          if (executeScriptHandler) {
+            return [{ result: await executeScriptHandler(details) }];
+          }
           const override = typeof extractionResult === "function" ? await extractionResult() : extractionResult || {};
           return [{
             result: {
@@ -218,7 +233,9 @@ async function createSidepanelHarness({
         ok: data?.ok !== false,
         status: data?.status || 200,
         async text() {
-          return JSON.stringify(data || { ok: true });
+          return Object.prototype.hasOwnProperty.call(data || {}, "rawText")
+            ? String(data.rawText)
+            : JSON.stringify(data || { ok: true });
         }
       };
     },
@@ -238,6 +255,7 @@ async function createSidepanelHarness({
   };
 
   createContext(context);
+  runInContext(i18nJs, context);
   runInContext(js, context);
 
   return {
@@ -797,9 +815,255 @@ test("reading the current page persists it to Vault immediately and records only
   );
 });
 
+test("English selected-text and pending-selection statuses retain dynamic values across locale switches", async () => {
+  const noSelection = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    executeScriptHandler: async () => ""
+  });
+  noSelection.setState({ settings: { projectId: "default" } });
+
+  await noSelection.context.readSelectedTextFromPage();
+  assert.match(noSelection.nodes.get("status").textContent, /No text is selected on this page/i);
+  await noSelection.context.setUiLocale("zh-CN");
+  assert.match(noSelection.nodes.get("status").textContent, /当前页没有选中文本/);
+
+  const queued = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    runtimeMessageHandler: async () => ({
+      ok: true,
+      selection: null,
+      pendingCount: 12,
+      reason: "queue_full"
+    })
+  });
+  queued.setState({ settings: { projectId: "project-a" }, source: null });
+
+  await queued.context.hydratePendingSelection({ noticeId: "notice-en" });
+  assert.match(queued.nodes.get("status").textContent, /12 selected-text items.*queue is full/i);
+  await queued.context.setUiLocale("zh-CN");
+  assert.match(queued.nodes.get("status").textContent, /已有 12 条.*已满/);
+});
+
+test("synthetic selection and selector titles switch locale without mutating source identity", async () => {
+  const selection = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    currentTab: { id: 41, windowId: 7, url: "https://example.com/selection", title: "" },
+    executeScriptHandler: async () => "Verbatim selected text"
+  });
+  selection.setState({ settings: { projectId: "default" } });
+
+  await selection.context.readSelectedTextFromPage();
+  assert.equal(selection.nodes.get("sourceTitle").textContent, "Selected text");
+  assert.equal(selection.run("state.source.title"), "Selected text");
+  const selectionFingerprint = selection.run("sourceFingerprint(state.source)");
+  await selection.context.setUiLocale("zh-CN");
+  assert.equal(selection.nodes.get("sourceTitle").textContent, "选中文本");
+  assert.equal(selection.run("state.source.title"), "Selected text");
+  assert.equal(selection.run("sourceFingerprint(state.source)"), selectionFingerprint);
+
+  const selector = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    currentTab: { id: 41, windowId: 7, url: "https://example.com/selector", title: "" },
+    executeScriptHandler: async () => ({
+      title: "",
+      text: "Verbatim selector text",
+      markdown: "Verbatim selector text",
+      stats: { profile: "manual-selector" }
+    })
+  });
+  selector.setState({ settings: { projectId: "default" } });
+  selector.context.document.getElementById("manualSelectorInput").value = "article";
+
+  await selector.context.readManualSelectorFromPage();
+  assert.equal(selector.nodes.get("sourceTitle").textContent, "Manual selector source");
+  assert.equal(selector.run("state.source.title"), "Manual selector source");
+  const selectorFingerprint = selector.run("sourceFingerprint(state.source)");
+  await selector.context.setUiLocale("zh-CN");
+  assert.equal(selector.nodes.get("sourceTitle").textContent, "手动选择器来源");
+  assert.equal(selector.run("state.source.title"), "Manual selector source");
+  assert.equal(selector.run("sourceFingerprint(state.source)"), selectorFingerprint);
+});
+
+test("English manual-selector failures use stable codes and preserve the raw selector", async () => {
+  const selector = 'article[data-topic="原文"]';
+  const harness = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    executeScriptHandler: async () => ({
+      error: { code: "selector_no_match", detail: "localized page internals must not leak" }
+    })
+  });
+  harness.setState({ settings: { projectId: "default" } });
+  harness.context.document.getElementById("manualSelectorInput").value = selector;
+
+  await harness.context.readManualSelectorFromPage();
+
+  assert.match(harness.nodes.get("status").textContent, /No element matches this CSS selector/i);
+  assert.match(harness.nodes.get("status").textContent, /article\[data-topic="原文"\]/);
+  assert.doesNotMatch(harness.nodes.get("status").textContent, /页面中没有匹配|选择器读取失败/);
+  await harness.context.setUiLocale("zh-CN");
+  assert.match(harness.nodes.get("status").textContent, /页面中没有匹配.*article\[data-topic="原文"\]/);
+});
+
+test("English current-page capture distinguishes auth-required from empty content", async () => {
+  const harness = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    extractionResult: {
+      text: "",
+      markdown: "",
+      stats: { authRequired: true },
+      quality_flags: { auth_required: true }
+    }
+  });
+  harness.setState({ settings: { projectId: "default" } });
+
+  await harness.context.readCurrentPage();
+
+  assert.match(harness.nodes.get("status").textContent, /requires sign-in or permission/i);
+  assert.doesNotMatch(harness.nodes.get("status").textContent, /No article text was extracted/i);
+  assert.equal(harness.fetchCalls.some((call) => call.path === "/v1/captures"), false);
+  await harness.context.setUiLocale("zh-CN");
+  assert.match(harness.nodes.get("status").textContent, /需要登录或权限/);
+
+  const empty = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    extractionResult: {
+      text: "",
+      markdown: "",
+      stats: { emptyContent: true },
+      quality_flags: { empty_content: true }
+    }
+  });
+  empty.setState({ settings: { projectId: "default" } });
+
+  await empty.context.readCurrentPage();
+  assert.match(empty.nodes.get("status").textContent, /No article text was extracted/i);
+  assert.doesNotMatch(empty.nodes.get("status").textContent, /requires sign-in or permission/i);
+  assert.equal(empty.fetchCalls.some((call) => call.path === "/v1/captures"), false);
+});
+
+test("next-page preview, count, and enqueue status remain localized with raw URLs intact", async () => {
+  const nextPages = ["https://example.com/a?page=2", "https://example.com/a?page=3"];
+  const harness = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/capture-plans" && call.method === "POST") {
+        return { ok: true, plans: nextPages.map((url, index) => ({ id: `plan-${index}`, url })) };
+      }
+      if (call.path === "/v1/capture-plans") return { ok: true, plans: [] };
+      if (call.path.includes("/dashboard")) return { ok: true, dashboard: null };
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "default"
+    },
+    source: {
+      projectId: "default",
+      title: "Raw source title",
+      url: "https://example.com/a?page=1",
+      text: "Source text",
+      kind: "thread",
+      nextPages,
+      stats: { nextPages: 2 }
+    }
+  });
+
+  harness.context.renderSource();
+  let preview = harness.nodes.get("sourcePreview").children.map((node) => node.textContent).join(" | ");
+  assert.match(preview, /Next pages: https:\/\/example\.com\/a\?page=2/);
+  assert.match(harness.nodes.get("enqueueNextPagesBtn").textContent, /Add 2 next pages/i);
+
+  await harness.context.setUiLocale("zh-CN");
+  preview = harness.nodes.get("sourcePreview").children.map((node) => node.textContent).join(" | ");
+  assert.match(preview, /下一页：https:\/\/example\.com\/a\?page=2/);
+  assert.match(harness.nodes.get("enqueueNextPagesBtn").textContent, /分页加入候选池 \(2\)/);
+
+  await harness.context.setUiLocale("en");
+  await harness.context.createNextPageCapturePlans();
+  assert.match(harness.nodes.get("status").textContent, /Added 2 next-page sources/i);
+  await harness.context.setUiLocale("zh-CN");
+  assert.match(harness.nodes.get("status").textContent, /已加入 2 个分页候选来源/);
+});
+
+test("English Companion setup errors are deterministic and fully localized", async () => {
+  async function setupHarness(fetchHandler, serviceUrl = "http://127.0.0.1:37621") {
+    const harness = await createSidepanelHarness({ uiLanguage: "en-US", fetchHandler });
+    harness.context.document.getElementById("serviceUrlInput").value = serviceUrl;
+    harness.context.document.getElementById("pairingTokenInput").value = "pair-token";
+    return harness;
+  }
+
+  const scenarios = [
+    {
+      name: "wrong service",
+      handler: async () => ({ ok: true, app: "Something Else", api_version: 1 }),
+      pattern: /not the QC Smart Reader Companion/i
+    },
+    {
+      name: "API mismatch",
+      handler: async () => ({ ok: true, app: "QC Smart Reader", api_version: 9 }),
+      pattern: /requires Companion API 1.*current API is 9/i
+    },
+    {
+      name: "extension too old",
+      handler: async () => ({ ok: true, app: "QC Smart Reader", api_version: 1, min_extension_version: "99.0.0" }),
+      pattern: /extension is too old.*99\.0\.0/i
+    },
+    {
+      name: "timeout",
+      handler: async () => {
+        const error = new Error("system-specific abort detail must not leak");
+        error.name = "AbortError";
+        throw error;
+      },
+      pattern: /request timed out after 45 seconds/i
+    },
+    {
+      name: "network fallback",
+      handler: async () => {
+        throw new Error("系统网络详情不应泄漏");
+      },
+      pattern: /Could not reach the local Companion/i
+    },
+    {
+      name: "invalid response",
+      handler: async () => ({ ok: true, status: 200, rawText: "<html>not JSON</html>" }),
+      pattern: /invalid response.*HTTP 200/i
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const harness = await setupHarness(scenario.handler);
+    await harness.context.testCompanion();
+    assert.match(harness.nodes.get("settingsStatus").textContent, scenario.pattern, scenario.name);
+    assert.doesNotMatch(harness.nodes.get("settingsStatus").textContent, /\p{Script=Han}/u, scenario.name);
+  }
+
+  for (const [name, serviceUrl, pattern] of [
+    ["invalid URL", "not a url", /Companion URL is invalid/i],
+    ["unsafe URL", "https://example.com:37621", /only allows local http:\/\/127\.0\.0\.1 or localhost/i]
+  ]) {
+    const harness = await setupHarness(async () => ({ ok: true }), serviceUrl);
+    await harness.context.testCompanion();
+    assert.match(harness.nodes.get("settingsStatus").textContent, pattern, name);
+    assert.doesNotMatch(harness.nodes.get("settingsStatus").textContent, /\p{Script=Han}/u, name);
+  }
+});
+
 test("Quick Start creates a real quote-backed first evidence chain and restores its local milestone", async () => {
+  const html = await projectFile("sidepanel.html");
   const js = await projectFile("sidepanel.js");
-  assert.doesNotMatch(js, /[12] \/ 4/, "Quick Start progress copy drifted from its five visible steps");
+  assert.match(html, /id="quickStartProgress"[^>]*>0 \/ 3</);
+  assert.match(html, /id="quickStartPairStep"/);
+  assert.match(html, /id="quickStartCaptureStep"/);
+  assert.match(html, /id="quickStartReviewStep"/);
+  assert.doesNotMatch(html, /id="quickStartExtractStep"/);
+  assert.doesNotMatch(html, /id="quickStartEvidenceStep"/);
+  assert.match(html, /id="quickStartRejectClaimBtn"/);
+  assert.doesNotMatch(js, /[1-5] \/ 5/, "Quick Start progress copy drifted from its three visible outcomes");
   const records = {
     claims: [{ id: "claim-first", status: "extracted", text: "The fixture supports a verifiable first claim.", evidence_count: 1 }],
     evidence: [{
@@ -864,25 +1128,174 @@ test("Quick Start creates a real quote-backed first evidence chain and restores 
   assert.equal(harness.storageState.onboardingMilestones.firstClaimId, "claim-first");
   assert.equal(harness.storageState.onboardingMilestones.firstEvidenceId, "evidence-first");
   assert.equal(harness.storageState.onboardingMilestones.firstReviewedAt, undefined);
-  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /尚未人工接受/);
+  assert.equal(harness.storageState.onboardingMilestones.firstDecisionAt, undefined);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /原文.*支持.*claim/);
+  assert.equal(harness.nodes.get("quickStartProgress").textContent, "2 / 3");
+  assert.equal(
+    harness.fetchCalls.some((call) => call.path === "/v1/claims/claim-first/review"),
+    false,
+    "Quick Start must never auto-review a claim"
+  );
 
   await harness.context.acceptQuickStartClaim();
   const reviewCall = harness.fetchCalls.find((call) => call.path === "/v1/claims/claim-first/review");
   assert.ok(reviewCall, "the user's explicit accept action was not persisted");
   assert.equal(reviewCall.body.status, "reviewed");
   assert.match(harness.storageState.onboardingMilestones.firstReviewedAt, /^\d{4}-\d{2}-\d{2}T/);
-  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /已人工接受/);
-  assert.equal(harness.nodes.get("quickStartProgress").textContent, "5 / 5");
+  assert.match(harness.storageState.onboardingMilestones.firstDecisionAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(harness.storageState.onboardingMilestones.firstDecisionStatus, "reviewed");
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /已由你核对|标记为支持/);
+  assert.equal(harness.nodes.get("quickStartProgress").textContent, "3 / 3");
   assert.equal(harness.nodes.get("quickStartProgress").classList.contains("done"), true);
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, true);
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, true);
 
   const restored = await createSidepanelHarness();
   restored.storageState.onboardingMilestones = structuredClone(harness.storageState.onboardingMilestones);
   restored.setState({ settings: { pairingToken: "pair-token", projectId: "default" } });
   await restored.context.loadOnboardingMilestones();
   restored.context.restoreQuickStartEvidenceFromRecords(records);
-  assert.equal(restored.nodes.get("quickStartProgress").textContent, "5 / 5");
+  assert.equal(restored.nodes.get("quickStartProgress").textContent, "3 / 3");
   assert.equal(restored.nodes.get("quickStartProgress").classList.contains("done"), true);
-  assert.match(restored.nodes.get("quickStartStatus").textContent, /已恢复.*人工核对/);
+  assert.match(restored.nodes.get("quickStartStatus").textContent, /已恢复.*支持/);
+});
+
+test("English Quick Start localizes chrome while preserving the claim and exact quote verbatim", async () => {
+  const records = {
+    claims: [{ id: "claim-en", status: "extracted", text: "这条 claim 保留原始语言。", evidence_count: 1 }],
+    evidence: [{
+      id: "evidence-en",
+      claim_id: "claim-en",
+      quote: "原文引用必须保持一字不改。"
+    }]
+  };
+  const harness = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures" && call.method === "POST") {
+        return {
+          ok: true,
+          source: { id: "source-en", project_id: "default", markdown_path: "wiki/sources/source-en.md" },
+          chunks: [{ id: "chunk-en" }]
+        };
+      }
+      if (call.path === "/v1/sources/source-en/extract-knowledge" && call.method === "POST") {
+        return {
+          ok: true,
+          source: { id: "source-en", status: "extracted", chunks: [{ id: "chunk-en" }] },
+          records,
+          agent_run: { id: "run-en", agent_id: "mock_structured_extractor", input: { effective_mode: "mock" } }
+        };
+      }
+      if (call.path === "/v1/claims/claim-en/review") {
+        records.claims[0].status = "reviewed";
+        return { ok: true, claim: { ...records.claims[0] } };
+      }
+      if (call.path === "/v1/knowledge/records") return { ok: true, ...records };
+      if (call.path === "/v1/sources") return { ok: true, sources: [] };
+      if (call.path === "/v1/claims/review-queue") return { ok: true, claims: [] };
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "default",
+      provider: "mock",
+      modelSettingsProvider: "mock",
+      modelReady: true,
+      modelRoute: "mock"
+    }
+  });
+
+  await harness.context.runQuickStart();
+
+  assert.equal(harness.nodes.get("quickStartClaimText").textContent, records.claims[0].text);
+  assert.equal(harness.nodes.get("quickStartQuoteText").textContent, records.evidence[0].quote);
+  assert.match(harness.nodes.get("quickStartStatus").textContent, /2 \/ 3.*exact quote/i);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /Does this exact quote support the claim/i);
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").textContent, "Accept as supported");
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").textContent, "Reject as unsupported");
+
+  await harness.context.acceptQuickStartClaim();
+  assert.match(harness.nodes.get("quickStartStatus").textContent, /3 \/ 3.*reviewed by you/i);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /marked supported/i);
+  assert.equal(harness.nodes.get("quickStartClaimText").textContent, "这条 claim 保留原始语言。");
+  assert.equal(harness.nodes.get("quickStartQuoteText").textContent, "原文引用必须保持一字不改。");
+});
+
+test("switching locale is local-only and does not mutate user input, evidence, settings, or milestones", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "zh-CN" });
+  const settings = { pairingToken: "pair-token", projectId: "default" };
+  const milestones = {
+    pairedAt: "2026-08-15T00:00:00.000Z",
+    projectId: "default",
+    capturedAt: "2026-08-15T00:01:00.000Z",
+    claimReadyAt: "2026-08-15T00:02:00.000Z",
+    firstClaimId: "claim-locale",
+    firstEvidenceId: "evidence-locale"
+  };
+  harness.storageState.settings = structuredClone(settings);
+  harness.storageState.onboardingMilestones = structuredClone(milestones);
+  harness.setState({ settings, onboardingMilestones: milestones });
+  harness.context.document.getElementById("questionInput").value = "用户自己输入的问题";
+  harness.context.revealQuickStartEvidence(
+    { id: "claim-locale", project_id: "default", status: "extracted", text: "Original claim" },
+    { id: "evidence-locale", claim_id: "claim-locale", quote: "Original exact quote" },
+    { focus: false }
+  );
+  const fetchCount = harness.fetchCalls.length;
+
+  await harness.context.setUiLocale("en");
+
+  assert.equal(harness.storageState.uiLocale, "en");
+  assert.deepEqual(harness.storageState.settings, settings);
+  assert.deepEqual(harness.storageState.onboardingMilestones, milestones);
+  assert.equal(harness.nodes.get("questionInput").value, "用户自己输入的问题");
+  assert.equal(harness.nodes.get("quickStartClaimText").textContent, "Original claim");
+  assert.equal(harness.nodes.get("quickStartQuoteText").textContent, "Original exact quote");
+  assert.equal(harness.nodes.get("quickStartReviewStatus").textContent, "Does this exact quote support the claim? Choose the decision that matches the source.");
+  assert.equal(harness.fetchCalls.length, fetchCount, "locale switching must not make a network request");
+});
+
+test("English restore differentiates reviewed from pending-validation server state", async () => {
+  const firstReviewedAt = "2026-08-15T00:03:00.000Z";
+  const baseState = {
+    settings: { pairingToken: "pair-token", projectId: "default" },
+    onboardingMilestones: {
+      pairedAt: "2026-08-15T00:00:00.000Z",
+      projectId: "default",
+      capturedAt: "2026-08-15T00:01:00.000Z",
+      extractedAt: "2026-08-15T00:01:30.000Z",
+      claimReadyAt: "2026-08-15T00:02:00.000Z",
+      firstReviewedAt,
+      firstClaimId: "claim-restore",
+      firstEvidenceId: "evidence-restore"
+    }
+  };
+  const pending = await createSidepanelHarness({ uiLanguage: "en-US" });
+  pending.setState(baseState);
+  pending.context.restoreQuickStartEvidenceFromRecords({
+    claims: [{ id: "claim-restore", project_id: "default", status: "pending_validation", text: "Needs review" }],
+    evidence: [{ id: "evidence-restore", claim_id: "claim-restore", quote: "Exact quote" }]
+  });
+  assert.match(pending.nodes.get("quickStartStatus").textContent, /pending_validation.*compare.*again/i);
+  assert.match(pending.nodes.get("quickStartReviewStatus").textContent, /no longer matches.*pending_validation/i);
+  assert.equal(pending.nodes.get("quickStartProgress").textContent, "2 / 3");
+  assert.equal(pending.nodes.get("quickStartAcceptClaimBtn").disabled, false);
+  assert.equal(pending.nodes.get("quickStartRejectClaimBtn").disabled, false);
+
+  const reviewed = await createSidepanelHarness({ uiLanguage: "en-US" });
+  reviewed.setState(baseState);
+  reviewed.context.restoreQuickStartEvidenceFromRecords({
+    claims: [{ id: "claim-restore", project_id: "default", status: "reviewed", text: "Reviewed claim" }],
+    evidence: [{ id: "evidence-restore", claim_id: "claim-restore", quote: "Exact quote" }]
+  });
+  assert.match(reviewed.nodes.get("quickStartStatus").textContent, /claim was marked supported/i);
+  assert.equal(reviewed.nodes.get("quickStartReviewStatus").textContent, "Saved locally and reviewed by you. This claim is marked supported.");
+  assert.equal(reviewed.storageState.onboardingMilestones.firstDecisionAt, firstReviewedAt);
+  assert.equal(reviewed.storageState.onboardingMilestones.firstDecisionStatus, "reviewed");
 });
 
 test("Quick Start restore requires the server claim to remain reviewed", async () => {
@@ -908,13 +1321,129 @@ test("Quick Start restore requires the server claim to remain reviewed", async (
   });
 
   assert.equal(restored, true);
-  assert.equal(harness.nodes.get("quickStartProgress").textContent, "4 / 5");
+  assert.equal(harness.nodes.get("quickStartProgress").textContent, "2 / 3");
   assert.equal(harness.nodes.get("quickStartProgress").classList.contains("done"), false);
-  assert.match(harness.nodes.get("quickStartStatus").textContent, /pending_validation.*重新人工核对/);
-  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /服务端当前状态为 pending_validation/);
+  assert.match(harness.nodes.get("quickStartStatus").textContent, /pending_validation.*重新对照/);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /服务端当前状态.*pending_validation.*不再一致/);
   assert.equal(harness.storageState.onboardingMilestones.firstReviewedAt, undefined);
   assert.equal(harness.storageState.onboardingMilestones.reviewInvalidatedFromReviewedAt, firstReviewedAt);
   assert.equal(harness.storageState.onboardingMilestones.reviewInvalidatedStatus, "pending_validation");
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, false);
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, false);
+});
+
+test("First Evidence persists and restores a rejected decision without treating it as failure", async () => {
+  const harness = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/claims/claim-reject/review") {
+        return {
+          ok: true,
+          claim: { id: "claim-reject", project_id: "default", status: "rejected", text: "Unsupported claim" }
+        };
+      }
+      if (call.path === "/v1/claims/review-queue") return { ok: true, claims: [] };
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "default" },
+    onboardingMilestones: {
+      pairedAt: "2026-08-15T00:00:00.000Z",
+      projectId: "default",
+      capturedAt: "2026-08-15T00:01:00.000Z",
+      claimReadyAt: "2026-08-15T00:02:00.000Z",
+      firstClaimId: "claim-reject",
+      firstEvidenceId: "evidence-reject"
+    }
+  });
+  harness.context.revealQuickStartEvidence(
+    { id: "claim-reject", project_id: "default", status: "pending_validation", text: "Unsupported claim" },
+    { id: "evidence-reject", claim_id: "claim-reject", quote: "A quote about something else." },
+    { focus: false }
+  );
+
+  harness.context.setBusy(true);
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, true);
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, true);
+  harness.context.setBusy(false);
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, false);
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, false);
+
+  await harness.context.rejectQuickStartClaim();
+
+  const call = harness.fetchCalls.find((item) => item.path === "/v1/claims/claim-reject/review");
+  assert.equal(call.body.status, "rejected");
+  assert.match(call.body.review_note, /First Evidence.*exact quote/i);
+  assert.match(call.body.rejection_reason, /does not support/i);
+  assert.match(harness.storageState.onboardingMilestones.firstDecisionAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(harness.storageState.onboardingMilestones.firstDecisionStatus, "rejected");
+  assert.equal(harness.storageState.onboardingMilestones.firstReviewedAt, undefined);
+  assert.equal(harness.nodes.get("quickStartProgress").textContent, "3 / 3");
+  assert.match(harness.nodes.get("quickStartStatus").textContent, /marked unsupported.*another page/i);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /marked unsupported/i);
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, true);
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, true);
+
+  const restored = await createSidepanelHarness({ uiLanguage: "en-US" });
+  restored.setState({
+    settings: { pairingToken: "pair-token", projectId: "default" },
+    onboardingMilestones: structuredClone(harness.storageState.onboardingMilestones)
+  });
+  const didRestore = restored.context.restoreQuickStartEvidenceFromRecords({
+    claims: [{ id: "claim-reject", project_id: "default", status: "rejected", text: "Unsupported claim" }],
+    evidence: [{ id: "evidence-reject", claim_id: "claim-reject", quote: "A quote about something else." }]
+  });
+  assert.equal(didRestore, true);
+  assert.equal(restored.nodes.get("quickStartProgress").textContent, "3 / 3");
+  assert.match(restored.nodes.get("quickStartStatus").textContent, /claim was marked unsupported/i);
+  assert.match(restored.nodes.get("quickStartReviewStatus").textContent, /marked unsupported/i);
+});
+
+test("a rejected First Evidence decision becomes pending again when server status no longer matches", async () => {
+  const firstDecisionAt = "2026-08-15T00:03:00.000Z";
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  harness.setState({
+    settings: { pairingToken: "pair-token", projectId: "default" },
+    onboardingMilestones: {
+      pairedAt: "2026-08-15T00:00:00.000Z",
+      projectId: "default",
+      capturedAt: "2026-08-15T00:01:00.000Z",
+      claimReadyAt: "2026-08-15T00:02:00.000Z",
+      firstDecisionAt,
+      firstDecisionStatus: "rejected",
+      firstClaimId: "claim-rejected-pending",
+      firstEvidenceId: "evidence-rejected-pending"
+    }
+  });
+
+  const restored = harness.context.restoreQuickStartEvidenceFromRecords({
+    claims: [{
+      id: "claim-rejected-pending",
+      project_id: "default",
+      status: "pending_validation",
+      text: "Review again"
+    }],
+    evidence: [{
+      id: "evidence-rejected-pending",
+      claim_id: "claim-rejected-pending",
+      quote: "Exact quote"
+    }]
+  });
+
+  assert.equal(restored, true);
+  assert.equal(harness.nodes.get("quickStartProgress").textContent, "2 / 3");
+  assert.equal(harness.nodes.get("quickStartProgress").classList.contains("done"), false);
+  assert.equal(harness.storageState.onboardingMilestones.firstDecisionAt, undefined);
+  assert.equal(harness.storageState.onboardingMilestones.firstDecisionStatus, undefined);
+  assert.equal(harness.storageState.onboardingMilestones.firstReviewedAt, undefined);
+  assert.equal(harness.storageState.onboardingMilestones.decisionInvalidatedFromAt, firstDecisionAt);
+  assert.equal(harness.storageState.onboardingMilestones.decisionInvalidatedFromStatus, "rejected");
+  assert.equal(harness.storageState.onboardingMilestones.decisionInvalidatedStatus, "pending_validation");
+  assert.equal(harness.storageState.onboardingMilestones.reviewInvalidatedAt, undefined);
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, false);
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, false);
+  assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /no longer matches.*pending_validation/i);
 });
 
 test("Quick Start evidence and review actions stay isolated to their project", async () => {
@@ -943,7 +1472,9 @@ test("Quick Start evidence and review actions stay isolated to their project", a
   const card = harness.nodes.get("quickStartEvidence");
 
   const review = await harness.context.acceptQuickStartClaim();
+  const rejection = await harness.context.rejectQuickStartClaim();
   assert.equal(review, null);
+  assert.equal(rejection, null);
   assert.equal(
     harness.fetchCalls.some((call) => call.path === "/v1/claims/claim-a/review"),
     false,
@@ -1025,6 +1556,20 @@ test("primary navigation exposes keyboard-accessible tab semantics and live stat
   assert.match(html, /id="status"[^>]*(?:role="status"|aria-live="polite")/);
 });
 
+test("the English advanced-language banner appears only on advanced tabs", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  const notice = harness.context.document.getElementById("advancedLanguageNotice");
+
+  for (const tabId of ["chat", "settings", "knowledge"]) {
+    harness.context.updateAdvancedLanguageNotice(tabId);
+    assert.equal(notice.hidden, true, `${tabId} must not put the advanced banner above first value`);
+  }
+  for (const tabId of ["batch", "agents", "deliverables"]) {
+    harness.context.updateAdvancedLanguageNotice(tabId);
+    assert.equal(notice.hidden, false, `${tabId} should disclose the remaining Chinese interface`);
+  }
+});
+
 test("overlapping operations keep controls disabled until the final task releases busy state", async () => {
   const harness = await createSidepanelHarness();
   harness.context.setBusy(true);
@@ -1032,10 +1577,12 @@ test("overlapping operations keep controls disabled until the final task release
   harness.context.setBusy(false);
   assert.equal(harness.run("state.busy"), true);
   assert.equal(harness.nodes.get("readPageBtn").disabled, true);
+  assert.equal(harness.nodes.get("uiLocaleSelect").disabled, true);
 
   harness.context.setBusy(false);
   assert.equal(harness.run("state.busy"), false);
   assert.equal(harness.nodes.get("readPageBtn").disabled, false);
+  assert.equal(harness.nodes.get("uiLocaleSelect").disabled, false);
 });
 
 test("PDF import requests OCR by default and reports applied, unnecessary, and fallback outcomes", async () => {
