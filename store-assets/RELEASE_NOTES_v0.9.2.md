@@ -21,6 +21,10 @@ The release includes real localized screenshots captured from clean Chrome profi
 - [Simplified Chinese pending review](web-store/zh-CN/01-first-evidence-pending-review.png)
 - [Simplified Chinese reviewed evidence](web-store/zh-CN/02-reviewed-exact-quote.png)
 
+## Startup reliability
+
+The side panel now accepts input only after its locale, event handlers, Companion authentication result, and project batch queue are ready. Slow Dashboard, Knowledge, Deliverables, and other optional workspace loads continue after that point without blocking the interface, preventing early clicks from being silently lost on slower machines.
+
 ## Install
 
 Prerequisites are macOS, Chrome 116+, Python 3.9+, and internet access during the first Companion install for hash-pinned Python wheels. Codex CLI, `yt-dlp`, and the Swift toolchain are optional.
