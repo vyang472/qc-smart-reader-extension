@@ -92,6 +92,18 @@ class ReleaseArtifactTests(unittest.TestCase):
             self.assertTrue((ROOT / relative).is_file(), relative)
         self.assertEqual(self.release.validate_version_contract(ROOT), EXPECTED_VERSION)
 
+    def test_manifest_uses_minimum_permissions_for_supported_web_capture(self) -> None:
+        manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            set(manifest["permissions"]),
+            {"contextMenus", "downloads", "scripting", "sidePanel", "storage"},
+        )
+        self.assertEqual(
+            manifest["host_permissions"],
+            ["http://*/*", "https://*/*"],
+        )
+
     def test_release_allowlists_are_intentionally_narrow(self) -> None:
         self.assertEqual(set(self.release.EXTENSION_FILES), EXPECTED_EXTENSION_FILES)
         self.assertEqual(set(self.release.COMPANION_FILES), EXPECTED_COMPANION_FILES)

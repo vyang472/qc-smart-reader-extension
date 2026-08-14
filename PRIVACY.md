@@ -1,8 +1,8 @@
 # QC Smart Reader Privacy Policy
 
-Last updated: 2026-08-14
+Last updated: 2026-08-15
 
-QC Smart Reader is a local-first research reader. Its single purpose is to let a user intentionally capture material from web pages, PDFs, public YouTube captions, and selected text; analyze that material with a model chosen by the user; and save source-backed notes and research artifacts in a local Vault.
+QC Smart Reader is a local-first research reader. Its single purpose is to turn material the user intentionally selects from web pages, PDFs, public YouTube captions, and selected text into locally stored, quote-backed research claims and artifacts for human review. The product uses a deterministic local template by default; optional model providers are available only when the user selects and configures one.
 
 ## Data the extension handles
 
@@ -18,7 +18,7 @@ QC Smart Reader does not sell data, use it for advertising, build advertising pr
 
 ## Local storage
 
-Captured sources, notes, evidence, jobs, and generated outputs are stored by the companion service in a SQLite database and Markdown Vault selected by the user. Extension settings and temporary recovery queues are stored in Chrome extension storage on the same device. The pairing token and any model API key are stored locally by the companion service with owner-only file permissions; model API keys are not stored in Chrome extension storage.
+Captured sources, notes, evidence, jobs, and generated outputs are stored by the companion service in a SQLite database and Markdown Vault selected by the user. Extension settings, the loopback Pairing Token, and temporary recovery queues are stored in Chrome extension storage on the same device. The Companion also keeps its copy of the Pairing Token and any model API key in local credential files with owner-only permissions; model API keys are not stored in Chrome extension storage.
 
 ## Model providers and data sharing
 
@@ -26,15 +26,14 @@ Model use is optional. Before the first model action, the product asks for affir
 
 - With **Codex CLI**, the local companion launches the user's installed Codex CLI. The CLI may send the prompt and included source content to OpenAI under the user's OpenAI account and applicable OpenAI terms.
 - With **OpenAI-compatible** or **Anthropic**, the companion sends the prompt and included source content to the endpoint explicitly configured by the user. That provider processes the data under its own terms and privacy policy.
-- Deterministic mock output, when explicitly selected, is generated locally and is clearly labeled as mock output.
+- The deterministic local template is the zero-configuration default for Quick Start. It generates a clearly labeled draft locally, makes no external model call, is not an AI summary, and requires human review before a claim becomes reviewed.
 
 QC Smart Reader sends only the material required for the model action the user initiated. It does not run background model analysis without a user action.
 
 ## Browser permissions
 
-- `activeTab` and `scripting`: extract content only from a page the user chooses to read or process.
-- `tabs`: collect tabs the user explicitly adds to a batch and open temporary background tabs for that batch.
-- `<all_urls>`: support user-initiated capture across sites and communicate with the loopback companion service.
+- `scripting`: extract content only from an HTTP(S) page the user chooses to read or process.
+- `http://*/*` and `https://*/*`: read the URL, title, and content of user-selected web pages, process HTTP(S) batch URLs in temporary tabs, and communicate with the loopback Companion. These permissions do not include file or other URL schemes and are not used for passive browsing-history collection.
 - `downloads`: export a file requested by the user.
 - `storage`: retain settings and recoverable local queues.
 - `contextMenus` and `sidePanel`: provide the selected-text and side-panel workflows.

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
@@ -15,6 +15,8 @@ process.env.QC_REQUIRE_BROWSER = "1";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUTPUT_DIR = join(ROOT, "store-assets", "screenshots");
+const WEB_STORE_DIR = join(ROOT, "store-assets", "web-store");
+const WEB_STORE_VIEWPORT = { width: 640, height: 400 };
 const PRODUCT_VERSION = JSON.parse(await readFile(join(ROOT, "manifest.json"), "utf8")).version;
 const PYTHON = process.env.QC_TEST_PYTHON
   || (existsSync(join(ROOT, ".venv", "bin", "python")) ? join(ROOT, ".venv", "bin", "python") : "python3");
@@ -150,8 +152,14 @@ async function assertSafePage(page, label, blockedValues) {
   assert.doesNotMatch(rendered, /github\.com\.localhost:\d+/, `${label} contains the fixture port`);
 }
 
-async function captureViewport(page, path, anchor = null, blockedValues = []) {
-  await page.setViewportSize({ width: 480, height: 800 });
+async function captureViewport(
+  page,
+  path,
+  anchor = null,
+  blockedValues = [],
+  viewport = { width: 480, height: 800 }
+) {
+  await page.setViewportSize(viewport);
   await page.addStyleTag({
     content: `
       * { caret-color: transparent !important; }
@@ -178,6 +186,7 @@ async function assertPngDimensions(path, width = 1280, height = 800) {
   assert.deepEqual([...data.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${path} is not a PNG`);
   assert.equal(data.readUInt32BE(16), width, `${path} width`);
   assert.equal(data.readUInt32BE(20), height, `${path} height`);
+  assert.ok([2, 6].includes(data[25]), `${path} must use RGB or RGBA PNG color`);
 }
 
 function escapeHtml(value) {
@@ -270,7 +279,77 @@ async function composeLaunchScreenshot(context, rawPath, outputPath, copy) {
   await page.close();
 }
 
+async function composeWebStorePromoTile(context, outputPath) {
+  const iconSource = await readFile(join(ROOT, "assets", "branding", "icon-source.svg"));
+  const iconUrl = `data:image/svg+xml;base64,${iconSource.toString("base64")}`;
+  const page = await context.newPage();
+  await page.setViewportSize({ width: 440, height: 280 });
+  await page.setContent(`<!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <style>
+          * { box-sizing: border-box; }
+          html, body { width: 440px; height: 280px; margin: 0; overflow: hidden; }
+          body {
+            position: relative;
+            padding: 24px 26px;
+            color: #142538;
+            background:
+              radial-gradient(circle at 92% 3%, rgb(18 103 227 / 18%), transparent 38%),
+              radial-gradient(circle at 72% 110%, rgb(8 122 88 / 20%), transparent 45%),
+              linear-gradient(135deg, #F8FBFE, #EAF6F1);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          }
+          .brand { display: flex; align-items: center; gap: 11px; }
+          .brand img { width: 44px; height: 44px; }
+          .brand strong { display: block; font-size: 14px; letter-spacing: 1.5px; }
+          .brand span { display: block; margin-top: 3px; color: #667A8E; font-size: 11px; }
+          .version { position: absolute; top: 31px; right: 27px; color: #65798C; font-size: 11px; font-weight: 700; }
+          .eyebrow {
+            width: fit-content;
+            margin-top: 27px;
+            padding: 5px 9px;
+            border-radius: 999px;
+            color: #087A58;
+            background: #DDF3EA;
+            font-size: 10px;
+            font-weight: 850;
+            letter-spacing: .8px;
+          }
+          h1 { width: 380px; margin: 10px 0 7px; font-size: 31px; line-height: 1.04; letter-spacing: -.8px; }
+          p { width: 374px; margin: 0; color: #536A7F; font-size: 13px; line-height: 1.38; }
+          .proof { position: absolute; left: 26px; bottom: 20px; display: flex; gap: 8px; }
+          .proof span {
+            padding: 6px 9px;
+            border: 1px solid #B8DCCF;
+            border-radius: 999px;
+            color: #17664F;
+            background: rgb(255 255 255 / 72%);
+            font-size: 10px;
+            font-weight: 800;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="brand">
+          <img src="${iconUrl}" alt="">
+          <div><strong>QC SMART READER</strong><span>Open-source · local-first</span></div>
+        </div>
+        <div class="version">v${escapeHtml(PRODUCT_VERSION)}</div>
+        <div class="eyebrow">QUOTE-BACKED RESEARCH</div>
+        <h1>Evidence you can verify.</h1>
+        <p>Capture the source, keep the exact quote, and accept claims only after human review.</p>
+        <div class="proof"><span>Local Vault</span><span>No API key to try</span><span>Human-reviewed</span></div>
+      </body>
+    </html>`);
+  await page.locator(".brand img").waitFor({ state: "visible" });
+  await page.screenshot({ path: outputPath, animations: "disabled" });
+  await page.close();
+}
+
 async function main() {
+  await mkdir(WEB_STORE_DIR, { recursive: true });
   const dataDir = await mkdtemp(join(tmpdir(), "qc-launch-data-"));
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-launch-chrome-"));
   const rawDir = await mkdtemp(join(tmpdir(), "qc-launch-shots-"));
@@ -398,6 +477,13 @@ async function main() {
     await sidepanel.locator("#tab-chat").click();
     assert.equal(await sidepanel.locator("#quickStartProgress").textContent(), "4 / 5");
 
+    await captureViewport(
+      sidepanel,
+      join(WEB_STORE_DIR, "01-first-evidence-4-of-5.png"),
+      "#quickStartCard",
+      blockedValues,
+      WEB_STORE_VIEWPORT
+    );
     const rawCapture = join(rawDir, "01-capture-raw.png");
     await captureViewport(sidepanel, rawCapture, "#quickStartCard", blockedValues);
     await composeLaunchScreenshot(
@@ -438,6 +524,13 @@ async function main() {
     assert.match(await reopened.locator("#quickStartStatus").textContent(), /已恢复.*人工核对/);
     await reopened.locator("#tab-knowledge").click();
 
+    await captureViewport(
+      reopened,
+      join(WEB_STORE_DIR, "02-reviewed-exact-quote.png"),
+      "#quickStartEvidence",
+      blockedValues,
+      WEB_STORE_VIEWPORT
+    );
     const rawReview = join(rawDir, "02-evidence-review-raw.png");
     await captureViewport(reopened, rawReview, "#quickStartEvidence", blockedValues);
     await composeLaunchScreenshot(
@@ -457,6 +550,13 @@ async function main() {
     await detailButton.click();
     await reopened.locator("#sourceDetail .source-detail-card").waitFor({ state: "visible", timeout: 15_000 });
 
+    await captureViewport(
+      reopened,
+      join(WEB_STORE_DIR, "03-local-vault-detail.png"),
+      "#sourceDetail .source-detail-card",
+      blockedValues,
+      WEB_STORE_VIEWPORT
+    );
     const rawVault = join(rawDir, "03-local-vault-raw.png");
     await captureViewport(reopened, rawVault, "#sourceDetail .source-detail-card", blockedValues);
     await composeLaunchScreenshot(
@@ -471,12 +571,30 @@ async function main() {
       }
     );
 
+    await composeWebStorePromoTile(
+      context,
+      join(WEB_STORE_DIR, "small-promo-tile-440x280.png")
+    );
+
     console.log("Generated launch screenshots:");
     for (const name of ["01-capture.png", "02-evidence-review.png", "03-local-vault.png"]) {
       const outputPath = join(OUTPUT_DIR, name);
       await assertPngDimensions(outputPath);
       console.log(`- ${outputPath} (1280x800)`);
     }
+    console.log("Generated Chrome Web Store assets:");
+    for (const name of [
+      "01-first-evidence-4-of-5.png",
+      "02-reviewed-exact-quote.png",
+      "03-local-vault-detail.png"
+    ]) {
+      const outputPath = join(WEB_STORE_DIR, name);
+      await assertPngDimensions(outputPath, WEB_STORE_VIEWPORT.width, WEB_STORE_VIEWPORT.height);
+      console.log(`- ${outputPath} (${WEB_STORE_VIEWPORT.width}x${WEB_STORE_VIEWPORT.height})`);
+    }
+    const promoPath = join(WEB_STORE_DIR, "small-promo-tile-440x280.png");
+    await assertPngDimensions(promoPath, 440, 280);
+    console.log(`- ${promoPath} (440x280)`);
   } finally {
     if (context) await context.close();
     if (fixture?.server) await new Promise((resolve) => fixture.server.close(resolve));

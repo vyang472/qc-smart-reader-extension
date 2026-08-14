@@ -1,6 +1,6 @@
 # Chrome Web Store listing handoff — QC Smart Reader 0.9.1
 
-**Status:** listing-copy draft; v0.9.1 screenshot refresh and publisher checks are still pending. This is not evidence of submission or approval.
+**Status:** listing copy and v0.9.1 repository assets are ready; publisher-account checks and dashboard submission are still pending. This is not evidence of submission or approval.
 
 This file records the listing copy, permission explanations, data-use answers, assets, and clean-install checks for the publisher account. Re-check the Chrome Web Store dashboard requirements on submission day.
 
@@ -23,7 +23,9 @@ Capture web research, verify claims against exact quotes, and keep a local Markd
 
 ### Detailed description — 简体中文
 
-QC Smart Reader 是一个本地优先的研究阅读器，由 Chrome 侧边栏扩展和运行在本机的 Companion 服务组成。
+QC Smart Reader 是一个本地优先的研究阅读器。使用扩展前，需要先安装同一版本、免费的 macOS Companion；扩展只通过本机回环地址与它通信，不依赖开发者托管的采集或存储服务。
+
+它的单一用途是：把用户主动选择的网页、PDF 和公开视频字幕转成保存在本地、以原文 quote 支撑且等待人工核验的研究 claim。
 
 它帮助你主动采集当前网页、选中文本、URL 批量任务、PDF，以及公开视频字幕；把材料保存到本地 SQLite 与可直接阅读的 Markdown Vault；再将结构化 claim 与原文中的精确 quote 绑定，供你逐条审阅。
 
@@ -47,25 +49,19 @@ QC Smart Reader 不会在后台被动采集浏览历史。只有当你点击读�
 
 ## Single purpose
 
-Help a user intentionally collect research sources, analyze them with a user-selected or deterministic local workflow, verify claims against exact source quotations, and save durable local research artifacts.
+Turn user-selected web pages, PDFs, and public captions into locally stored, quote-backed research claims for human review.
 
 ## Permission justifications
 
-### `activeTab`
-
-Read the active page only after the user chooses **读取当前页** or invokes a selected capture action.
-
 ### `scripting`
 
-Run the maintained page extractor in the page the user intentionally selected. It is not used for passive monitoring.
+Run the maintained page extractor only in an HTTP(S) page the user intentionally selected or added to a batch. It is not used for passive monitoring.
 
-### `tabs`
+### Host access: `http://*/*` and `https://*/*`
 
-Enumerate tabs the user explicitly adds to a batch and manage temporary background tabs used to execute that batch in the user's existing Chrome session.
+Read the URL, title, and content of user-selected HTTP(S) pages and run explicitly requested URL batches in temporary background tabs. HTTP access also covers the Companion at `127.0.0.1:37621` or `localhost:37621`. QC Smart Reader does not request file or other URL schemes and does not passively collect browsing history.
 
-### Host access: `<all_urls>`
-
-Support user-initiated research capture on arbitrary sites. QC Smart Reader does not passively collect browsing history. Host access also allows retrieval of explicitly selected public source URLs; local service communication is separately limited to loopback origins in the manifest.
+The extension intentionally does not request `tabs` or `activeTab`: its `chrome.tabs.query`, `create`, `get`, and `remove` operations do not require the `tabs` permission, and matching HTTP(S) host access supplies the URL and title needed for pages the user chooses to capture.
 
 ### `downloads`
 
@@ -101,9 +97,11 @@ Host the product's capture, review, knowledge, delivery, batch, and settings wor
 The repository images below were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture. Re-run the screenshot script and verify the images again if the release build changes before upload:
 
 - Store icon: `assets/icons/icon-128.png`
-- Screenshot 1: `store-assets/screenshots/01-capture.png`
-- Screenshot 2: `store-assets/screenshots/02-evidence-review.png`
-- Screenshot 3: `store-assets/screenshots/03-local-vault.png`
+- Screenshot 1: `store-assets/web-store/01-first-evidence-4-of-5.png` (640×400, real Quick Start UI)
+- Screenshot 2: `store-assets/web-store/02-reviewed-exact-quote.png` (640×400, real reviewed-evidence UI)
+- Screenshot 3: `store-assets/web-store/03-local-vault-detail.png` (640×400, real Vault-detail UI)
+- Small promo tile: `store-assets/web-store/small-promo-tile-440x280.png` (440×280)
+- Launch-page composites, not store screenshots: `store-assets/screenshots/`
 - Repository social card, not a store screenshot: `store-assets/social-preview.png`
 
 Before upload, confirm each screenshot matches the dashboard's current dimensions and shows no Pairing Token, API key, private URL, private source text, personal path, or browser profile data. Do not add awards, review scores, user counts, or performance claims without verifiable evidence.
@@ -114,7 +112,8 @@ Before upload, confirm each screenshot matches the dashboard's current dimension
 - [ ] Verify the publisher identity and required contact details in the dashboard.
 - [ ] Upload only screenshots captured from the reviewed v0.9.1 build.
 - [ ] Complete privacy, permission, distribution, pricing, and tester declarations truthfully.
-- [ ] Explain why broad host access is necessary for user-selected arbitrary research pages.
+- [ ] Verify the v0.9.1 Companion and checksum links in `WEB_STORE_TEST_INSTRUCTIONS.md`, then paste those instructions into the dashboard.
+- [ ] Explain why HTTP(S) host access is necessary for user-selected arbitrary research pages and requested URL batches.
 - [ ] Confirm there is no remotely hosted executable code and no undisclosed analytics.
 - [ ] Install both release ZIPs on a clean macOS user account.
 - [ ] Pair the extension, capture a public fixture, review an exact quote, restart Chrome, and verify recovery.

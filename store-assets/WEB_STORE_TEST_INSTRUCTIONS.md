@@ -1,0 +1,54 @@
+# Chrome Web Store reviewer test instructions — QC Smart Reader 0.9.1
+
+**Handoff status:** dashboard-ready draft. Paste it only after the public v0.9.1 release links and checksums below have been verified from a signed-out browser session.
+
+## Dashboard-ready instructions
+
+QC Smart Reader 0.9.1 requires macOS, Chrome 116 or later, and the free local Companion from the same release. No account, payment, API key, Codex CLI, or external model is required for the core review flow.
+
+1. Download the Companion and checksum file:
+   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.1/qc-smart-reader-companion-0.9.1.zip`
+   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.1/SHA256SUMS`
+2. In Terminal, verify and install the per-user Companion:
+
+   ```bash
+   cd ~/Downloads
+   grep 'qc-smart-reader-companion-0.9.1.zip' SHA256SUMS | shasum -a 256 -c -
+   mkdir -p qc-smart-reader-companion-0.9.1
+   unzip qc-smart-reader-companion-0.9.1.zip -d qc-smart-reader-companion-0.9.1
+   cd qc-smart-reader-companion-0.9.1
+   bash install.command
+   ```
+
+   Expected: the installer reports a healthy Companion at `http://127.0.0.1:37621`, prints the Pairing Token, and copies the token to the clipboard.
+3. Open the installed QC Smart Reader extension. In **设置**, enter `http://127.0.0.1:37621`, paste the Pairing Token, and choose **测试本地服务**.
+
+   Expected: the status says the local service and Pairing Token are valid, and Quick Start becomes available.
+4. Open the public IANA fixture `https://example.com/` in a normal tab. Return to QC Smart Reader **聊天** and choose **从当前页生成第一条证据**.
+
+   Expected: QC Smart Reader saves the page in the local Vault, labels the run as the local template / Mock mode with no external model call, and shows a draft claim beside an exact quote from the page. The claim remains unreviewed.
+5. Compare the claim with its quote and choose **接受该 claim** only if the quote supports it.
+
+   Expected: the claim changes to `reviewed`, and Quick Start reports 5 / 5 complete.
+6. Close and reopen the side panel.
+
+   Expected: the same claim, exact quote, and human-reviewed state are restored from the local Companion; the Accept button remains disabled for the reviewed claim.
+
+Optional Codex CLI, OpenAI-compatible, and Anthropic features are not needed for this review. Quick Start always uses the deterministic local template and does not send the fixture or Pairing Token to an external model or the developer.
+
+## Cleanup
+
+From the extracted Companion directory, run:
+
+```bash
+bash uninstall.command
+```
+
+Expected: the per-user service is removed. The default uninstall deliberately preserves the local Vault; it does not purge research data without a separate explicit destructive command. Remove the Chrome extension through Chrome after testing if desired.
+
+## Publisher verification before submission
+
+- Confirm both release URLs above return public v0.9.1 assets without authentication.
+- Confirm the checksum command reports `qc-smart-reader-companion-0.9.1.zip: OK`.
+- Repeat the complete flow on a clean macOS user account with the exact extension ZIP submitted to the Web Store.
+- Do not provide the reviewer with a reused Pairing Token, API key, password, private Vault, or private source URL.
