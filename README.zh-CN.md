@@ -21,6 +21,8 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 | --- | --- | --- |
 | ![在 QC Smart Reader 侧边栏采集网页](store-assets/screenshots/01-capture.png) | ![用原文 quote 审阅 claim](store-assets/screenshots/02-evidence-review.png) | ![查看本地 Markdown 与 SQLite Vault](store-assets/screenshots/03-local-vault.png) |
 
+以上截图来自 v0.9.0 的采集、审阅与 Vault 界面，暂未展示 v0.9.1 新增的 First Evidence 卡片。
+
 ## 它和普通 AI 阅读器有什么不同
 
 - **先证据，后结论。** claim 只有在 `source_id + chunk_id + quote` 仍能逐字命中当前原文时，才能进入 `reviewed`。
@@ -28,28 +30,29 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 - **默认本地。** Companion 只监听 loopback，用随机 Pairing Token 鉴权；Vault 在你的 Mac 上。模型是可选项，首次发送材料前必须明确同意。
 - **直接复用你的 Chrome 登录态。** 批量任务由扩展执行，服务端记录每条 URL 的 lease、heartbeat、重试和恢复状态。
 - **交付物可追溯。** 研究报告、PPT 大纲、视频脚本与策略任务书都能沿 claim / evidence 回到来源。
-- **不用 API Key 也能试完整链路。** 本地 deterministic mock 会产出结构化、引用真实且明确标注的结果；已登录的 Codex CLI 也可以作为模型路线。
+- **不用 API Key 也能试完整链路。** 确定性的本地模板会生成一条草稿 claim，exact quote 取自已保存原文。它不是 AI 总结，仍须由你人工核对并接受；Codex CLI 与直连 API 都只是可选路线。
 
-## 安装 v0.9.0
+## 安装 v0.9.1
 
 当前正式支持路径是 **macOS + Chrome 116+ + 简体中文产品界面**。
 
 开始前请确认 Mac 上已有 **Python 3.9+**、Chrome 116+，并能在首次安装 Companion 时联网下载经过 hash 锁定的 Python wheels。Codex CLI、`yt-dlp` 与 Swift 工具链都是可选依赖，只分别影响对应的模型、公开字幕与 OCR 路线。
 
-1. 从 [QC Smart Reader v0.9.0](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0) 下载三个文件：
-   - `qc-smart-reader-companion-0.9.0.zip`
-   - `qc-smart-reader-extension-0.9.0.zip`
+1. 从 [QC Smart Reader v0.9.1](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.1) 下载三个文件：
+   - `qc-smart-reader-companion-0.9.1.zip`
+   - `qc-smart-reader-extension-0.9.1.zip`
    - `SHA256SUMS`
 2. 在下载目录运行 `shasum -a 256 -c SHA256SUMS`，确认两个 ZIP 都显示 `OK`。
 3. 解压 Companion ZIP，双击 `install.command`（也可以运行 `bash install.command`）。安装器会安装当前用户的后台服务、验证可用性，并把 Pairing Token 复制到剪贴板。
 4. 解压 Extension ZIP。打开 `chrome://extensions`，开启**开发者模式**，点击**加载已解压的扩展程序**，选择包含 `manifest.json` 的目录。
-5. 打开 QC Smart Reader 侧边栏，在**设置**中填入 `http://127.0.0.1:37621`，粘贴 Pairing Token，点击**测试本地服务**。
+5. 打开 QC Smart Reader 侧边栏，在**设置**中填入 `http://127.0.0.1:37621`，粘贴 Pairing Token，点击**测试本地服务**。只有 token 通过受保护的 projects API 鉴权后，首次使用流程才会解锁。
+6. 打开一篇普通文章，回到**聊天**，点击**从当前页生成第一条证据**。系统会把当前页保存进 Vault、运行确定性的本地模板抽取，并并排显示一条草稿 claim 与 exact quote。核对引用后，再由你明确接受 claim；关闭并重新打开侧边栏后，已保存证据和审阅状态仍会恢复。
 
-到这里就可以采集，并使用 deterministic mock 跑完整证据链。需要模型时，在**设置 → 模型设置**中选择：
+Quick Start 即使在已配置外部模型时也不会调用它。本地模板只是刻意保持简单的结构化草稿，不是 AI 总结；quote 来自已保存原文，只有你人工接受后 claim 才会进入 `reviewed`。其他抽取或 Agent 操作需要模型时，再到**设置 → 模型设置**选择：
 
 - **Codex CLI：**调用本机已安装、已登录的 `codex`；QC Smart Reader 不再要求单独填写 API Key。
 - **OpenAI-compatible / Anthropic：**使用你填写的 endpoint、模型和 API Key。
-- **不配模型：**结构化抽取留在本机，并明确标记 deterministic mock 结果。
+- **本地模板（Mock）：**零配置默认项，抽取留在本机；需要模型的聊天操作会明确阻止。
 
 源码启动、升级、故障恢复与卸载说明见[《从零到能用》](上手指南.md)。
 
@@ -70,7 +73,7 @@ Chrome 采集 / PDF / 字幕
 
 扩展只向 loopback Companion 发送带鉴权的请求。Companion 在 `~/Documents/QC Smart Reader Vault/` 下维护便于查询的 SQLite，以及可直接阅读、迁移和用 Obsidian 打开的 Markdown Vault。只有当你主动选择模型操作时，相关提示词与材料才会发给你选择的 provider，并受该 provider 的条款约束。
 
-## v0.9.0 能力
+## v0.9.1 能力
 
 | 工作流 | 当前行为 |
 | --- | --- |
@@ -112,7 +115,7 @@ cd qc-smart-reader-extension
 bash scripts/test_all.sh
 ```
 
-完整 gate 会检查 Python、JavaScript 与 shell 语法，运行 Companion 行为测试、启动器测试、macOS 安装 / 升级 / 回滚 / 卸载生命周期测试、站点抽取与侧边栏测试、真实 Chromium 扩展采集与重启恢复，以及临时 Vault 的端到端证据链。v0.9.0 release candidate 在 macOS 上通过了 86 个 Python 测试、91 个 Node / Chromium 测试（浏览器 0 skip）、12 个启动器测试、10 个生命周期测试和端到端 smoke。
+完整 gate 会检查 Python、JavaScript 与 shell 语法，运行 Companion 行为测试、启动器测试、macOS 安装 / 升级 / 回滚 / 卸载生命周期测试、站点抽取与侧边栏测试、真实 Chromium 扩展采集与重启恢复，以及临时 Vault 的端到端证据链。浏览器前置是严格条件：Chromium 缺失或启动失败会让 gate 失败，不会被静默 skip。
 
 发布包来自显式 allowlist，文件顺序、时间戳与权限固定，并生成 SHA-256：
 

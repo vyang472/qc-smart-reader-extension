@@ -6,6 +6,30 @@ All notable changes to QC Smart Reader will be documented here. The project foll
 
 No unreleased changes have been announced.
 
+## [0.9.1] - 2026-08-15
+
+This release removes model setup from the path to a first persisted, reviewable piece of evidence.
+
+### Added
+
+- Pairing-gated Quick Start that captures the active page, saves it to the local Vault, runs deterministic local template extraction, and presents a draft claim beside an exact source quote.
+- Local onboarding milestones that restore the first-evidence and human-review state after the side panel is reopened, without developer analytics or telemetry.
+
+### Changed
+
+- New installations default to the zero-configuration local template route. Codex CLI, OpenAI-compatible, and Anthropic providers are explicit opt-ins and retain their model-data consent boundary.
+- Reading the current page now persists the capture immediately instead of keeping it only in transient side-panel state.
+- Companion v0.9.1 remains compatible with the v0.9.0 extension because the API and database schema stay at version 1.
+
+### Fixed
+
+- Startup and manual pairing now authenticate the stored Pairing Token against a protected API before onboarding is marked ready.
+- External-provider extraction fails closed when configuration or consent is incomplete and never silently substitutes the local template route.
+
+### Trust boundary
+
+- Local template extraction is deterministic draft generation, not an AI summary. Its quote comes from the stored source, but the claim remains unreviewed until the user checks the quote and explicitly accepts it.
+
 ## [0.9.0] - 2026-08-14
 
 First public preview.
@@ -43,5 +67,6 @@ First public preview.
 - Isolated Codex CLI runs in an ephemeral restricted environment and disabled shell, web, plugin, and delegation capabilities for provider calls.
 - Added archive/input validation, dependency integrity checks, cautious installer path handling, and rollback verification.
 
-[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0

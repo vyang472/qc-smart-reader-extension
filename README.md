@@ -21,6 +21,8 @@ QC Smart Reader is a macOS-first Chrome extension and local Python companion. It
 | --- | --- | --- |
 | ![Capture a page in the QC Smart Reader side panel](store-assets/screenshots/01-capture.png) | ![Review a claim against its exact source quotation](store-assets/screenshots/02-evidence-review.png) | ![Inspect the local Markdown and SQLite Vault](store-assets/screenshots/03-local-vault.png) |
 
+These screenshots were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture.
+
 ## Why it is different
 
 - **Evidence before fluency.** A claim cannot become `reviewed` unless its `source_id`, `chunk_id`, and exact quote still match the stored source text.
@@ -28,28 +30,29 @@ QC Smart Reader is a macOS-first Chrome extension and local Python companion. It
 - **Local-first by default.** The companion binds to loopback, uses a pairing token, and stores the research record on your Mac. Model use is optional and requires explicit consent.
 - **Your signed-in browser does the capture.** Batch jobs reuse the Chrome session you already control and retain item-level status, leases, heartbeats, retries, and restart recovery.
 - **Auditable outputs.** Reports, deck outlines, video scripts, and strategy briefs retain their path back through claims and evidence to the source.
-- **No API key required to try it.** Deterministic mock extraction exercises the complete evidence workflow locally. Codex CLI can use an existing signed-in Codex setup; direct API providers remain optional.
+- **No API key required to try it.** Deterministic local template extraction creates a draft claim whose exact quote comes from the captured source. It is not an AI summary and still requires human acceptance. Codex CLI and direct API providers remain optional.
 
-## Install v0.9.0
+## Install v0.9.1
 
 The supported release path currently targets **macOS, Chrome 116+, and a Chinese-language product UI**.
 
 Before starting, make sure the Mac has **Python 3.9+**, Chrome 116+, and internet access for the first Companion install to download its hash-pinned Python wheels. Codex CLI, `yt-dlp`, and the Swift toolchain are optional and only enable their corresponding model, public-caption, and OCR paths.
 
-1. Download these three files from [QC Smart Reader v0.9.0](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0):
-   - `qc-smart-reader-companion-0.9.0.zip`
-   - `qc-smart-reader-extension-0.9.0.zip`
+1. Download these three files from [QC Smart Reader v0.9.1](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.1):
+   - `qc-smart-reader-companion-0.9.1.zip`
+   - `qc-smart-reader-extension-0.9.1.zip`
    - `SHA256SUMS`
 2. In the download directory, run `shasum -a 256 -c SHA256SUMS` and confirm that both ZIPs report `OK`.
 3. Extract the Companion ZIP, then double-click `install.command` (or run `bash install.command`). It installs a per-user background service, verifies readiness, and copies the Pairing Token.
 4. Extract the Extension ZIP. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder containing `manifest.json`.
-5. Open the QC Smart Reader side panel. In **设置**, enter `http://127.0.0.1:37621`, paste the Pairing Token, and click **测试本地服务**.
+5. Open the QC Smart Reader side panel. In **设置**, enter `http://127.0.0.1:37621`, paste the Pairing Token, and click **测试本地服务**. The protected projects API must accept the token before onboarding is unlocked.
+6. Open a normal article, return to **聊天**, and click **从当前页生成第一条证据**. QC Smart Reader saves the page to the Vault, runs deterministic local template extraction, and shows one draft claim beside an exact source quote. Inspect the quote, then explicitly accept the claim; reopening the side panel retains the saved evidence and review state.
 
-That is enough to capture and run deterministic local extraction. To use a model, select one route in **设置 → 模型设置**:
+Quick Start never calls an external model, even when one is configured. Its template draft is deliberately simple and is not an AI summary; the quote is copied from the stored source, and the claim does not become `reviewed` until you accept it. To use a model for other extraction or agent actions, select one route in **设置 → 模型设置**:
 
 - **Codex CLI:** uses the locally installed, signed-in `codex` command; no separate API key is required by QC Smart Reader.
 - **OpenAI-compatible or Anthropic:** uses the endpoint and API key you provide.
-- **No model:** keeps extraction local and clearly labels deterministic mock output.
+- **Local template (Mock):** the zero-configuration default; keeps extraction local and blocks model-only chat actions.
 
 For source checkouts, upgrades, recovery, uninstall, and troubleshooting, see [从零到能用](上手指南.md).
 
@@ -70,7 +73,7 @@ Chrome capture / PDF / captions
 
 The extension sends authenticated requests only to the loopback companion. The companion keeps a queryable SQLite index and a plain Markdown Vault under `~/Documents/QC Smart Reader Vault/`. Optional model calls are made by the companion to the provider the user selected; source material included in that action then leaves the device under that provider's terms.
 
-## What v0.9.0 handles
+## What v0.9.1 handles
 
 | Workflow | Current behavior |
 | --- | --- |
@@ -112,7 +115,7 @@ cd qc-smart-reader-extension
 bash scripts/test_all.sh
 ```
 
-The release gate checks Python, JavaScript, and shell syntax; Python service behavior; launcher and macOS install/upgrade/rollback/uninstall lifecycles; site-profile and side-panel behavior; real Chromium extension capture and restart recovery; and a temporary-Vault end-to-end evidence chain. The v0.9.0 release candidate passed 86 Python tests, 91 Node/Chromium tests with zero browser skips, 12 launcher tests, 10 lifecycle tests, and the end-to-end smoke test on macOS.
+The release gate checks Python, JavaScript, and shell syntax; Python service behavior; launcher and macOS install/upgrade/rollback/uninstall lifecycles; site-profile and side-panel behavior; real Chromium extension capture and restart recovery; and a temporary-Vault end-to-end evidence chain. Browser prerequisites are strict: a missing or failed Chromium run fails the gate instead of being silently skipped.
 
 Release archives are built from an explicit allowlist with stable order, timestamps, permissions, and SHA-256 checksums:
 

@@ -1,6 +1,6 @@
-# Chrome Web Store listing handoff — QC Smart Reader 0.9.0
+# Chrome Web Store listing handoff — QC Smart Reader 0.9.1
 
-**Status:** publisher-ready draft; not evidence of submission or approval.
+**Status:** listing-copy draft; v0.9.1 screenshot refresh and publisher checks are still pending. This is not evidence of submission or approval.
 
 This file records the listing copy, permission explanations, data-use answers, assets, and clean-install checks for the publisher account. Re-check the Chrome Web Store dashboard requirements on submission day.
 
@@ -30,6 +30,7 @@ QC Smart Reader 是一个本地优先的研究阅读器，由 Chrome 侧边栏�
 核心能力：
 
 - 读取当前网页或把选中的文字送入侧边栏
+- 配对后用 Quick Start 把当前页保存到本地 Vault，并在一处核对第一条草稿 claim 与 exact quote
 - 复用当前 Chrome 会话执行可暂停、重试、恢复的 URL 批量采集
 - 按页导入文本型 PDF，并可在 macOS 上对低文本页面尝试 Vision OCR
 - 手动导入字幕，或通过本机已有的 yt-dlp 获取无需登录的公开视频字幕
@@ -40,7 +41,7 @@ QC Smart Reader 是一个本地优先的研究阅读器，由 Chrome 侧边栏�
 
 QC Smart Reader 不会在后台被动采集浏览历史。只有当你点击读取、导入、批量处理或模型操作时，才会处理对应内容。
 
-默认情况下，材料保存在你的 Mac 上。模型功能是可选的：你可以使用本机已登录的 Codex CLI，配置自己的 OpenAI-compatible / Anthropic endpoint，也可以使用明确标注的本地 deterministic mock 验证完整流程。首次把材料发送给模型前，扩展会要求明确同意。
+默认情况下，材料保存在你的 Mac 上。零配置的本地模板会用确定性规则生成结构化草稿，并引用已保存原文中的 exact quote；它不是 AI 总结，claim 必须经用户核对并明确接受。模型功能是可选的：你可以使用本机已登录的 Codex CLI，或配置自己的 OpenAI-compatible / Anthropic endpoint。首次把材料发送给模型前，扩展会要求明确同意。
 
 当前支持路径为 macOS 与 Chrome 116+，产品界面为简体中文。复杂 PDF 排版、私有 YouTube 字幕和音频转写不在当前范围内。
 
@@ -92,12 +93,12 @@ Host the product's capture, review, knowledge, delivery, batch, and settings wor
 | Authentication information | Random loopback Pairing Token stored locally; no website login passwords or cookies are collected |
 | Model credentials | Stored by the local Companion with owner-only permissions, never in Chrome storage or developer infrastructure |
 | Model data sharing | Optional; blocked until affirmative versioned consent; sent only to Codex/OpenAI or the endpoint selected by the user |
-| Developer analytics | None in v0.9.0 |
+| Developer analytics | None in v0.9.1; onboarding milestones stay in local Chrome storage |
 | Sale or advertising use | None |
 
 ## Assets
 
-Use only current v0.9.0 product images:
+The repository images below were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture. Re-run the screenshot script and verify the images again if the release build changes before upload:
 
 - Store icon: `assets/icons/icon-128.png`
 - Screenshot 1: `store-assets/screenshots/01-capture.png`
@@ -109,9 +110,9 @@ Before upload, confirm each screenshot matches the dashboard's current dimension
 
 ## Publisher checklist
 
-- [ ] Publish v0.9.0 and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
+- [ ] Publish v0.9.1 and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
 - [ ] Verify the publisher identity and required contact details in the dashboard.
-- [ ] Upload only screenshots captured from the v0.9.0 build.
+- [ ] Upload only screenshots captured from the reviewed v0.9.1 build.
 - [ ] Complete privacy, permission, distribution, pricing, and tester declarations truthfully.
 - [ ] Explain why broad host access is necessary for user-selected arbitrary research pages.
 - [ ] Confirm there is no remotely hosted executable code and no undisclosed analytics.
