@@ -125,7 +125,8 @@ test("sidepanel wires project brief and capture plan APIs", async () => {
   assert.match(js, /lineageResults/);
   assert.match(js, /\/v1\/projects\/\$\{encodeURIComponent\(currentProjectId\(\)\)\}\/brief/);
   assert.match(js, /\/v1\/capture-plans/);
-  assert.match(js, /分页加入候选池/);
+  assert.match(js, /setLocalizedStatus\("currentPage\.nextPages\.working", \{ count: nextPages\.length \}\)/);
+  assert.match(js, /setLocalizedStatus\("currentPage\.nextPages\.success", \{ count: nextPages\.length \}\)/);
   assert.match(js, /next_pages: extracted\.nextPages \|\| \[\]/);
   assert.match(js, /next_pages: state\.source\.nextPages \|\| \[\]/);
   assert.match(js, /pagination_from_url/);

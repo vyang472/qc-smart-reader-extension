@@ -13,16 +13,25 @@
         <h1>QC Smart Reader</h1>
         <p id="sourceLine">读取网页、帖子、论文片段</p>
       </div>
+      <label class="locale-control" for="uiLocaleSelect">
+        <span data-i18n="locale.label">界面语言</span>
+        <select id="uiLocaleSelect" aria-label="界面语言" data-i18n-aria-label="locale.label">
+          <option value="auto" data-i18n="locale.auto">自动（跟随浏览器）</option>
+          <option value="en" data-i18n="locale.english">English</option>
+          <option value="zh-CN" data-i18n="locale.chinese">简体中文</option>
+        </select>
+      </label>
     </header>
 
-    <nav class="tabs" role="tablist" aria-label="主导航">
-      <button id="tab-chat" class="tab active" role="tab" aria-selected="true" aria-controls="chat" tabindex="0" data-tab="chat">聊天</button>
-      <button id="tab-batch" class="tab" role="tab" aria-selected="false" aria-controls="batch" tabindex="-1" data-tab="batch">批量</button>
-      <button id="tab-agents" class="tab" role="tab" aria-selected="false" aria-controls="agents" tabindex="-1" data-tab="agents">Agent</button>
-      <button id="tab-knowledge" class="tab" role="tab" aria-selected="false" aria-controls="knowledge" tabindex="-1" data-tab="knowledge">知识库</button>
-      <button id="tab-deliverables" class="tab" role="tab" aria-selected="false" aria-controls="deliverables" tabindex="-1" data-tab="deliverables">交付</button>
-      <button id="tab-settings" class="tab" role="tab" aria-selected="false" aria-controls="settings" tabindex="-1" data-tab="settings">设置</button>
+    <nav class="tabs" role="tablist" aria-label="主导航" data-i18n-aria-label="nav.label">
+      <button id="tab-chat" class="tab active" role="tab" aria-selected="true" aria-controls="chat" tabindex="0" data-tab="chat" data-i18n="nav.chat">聊天</button>
+      <button id="tab-batch" class="tab" role="tab" aria-selected="false" aria-controls="batch" tabindex="-1" data-tab="batch" data-i18n="nav.batch">批量</button>
+      <button id="tab-agents" class="tab" role="tab" aria-selected="false" aria-controls="agents" tabindex="-1" data-tab="agents" data-i18n="nav.agents">Agent</button>
+      <button id="tab-knowledge" class="tab" role="tab" aria-selected="false" aria-controls="knowledge" tabindex="-1" data-tab="knowledge" data-i18n="nav.knowledge">知识库</button>
+      <button id="tab-deliverables" class="tab" role="tab" aria-selected="false" aria-controls="deliverables" tabindex="-1" data-tab="deliverables" data-i18n="nav.deliverables">交付</button>
+      <button id="tab-settings" class="tab" role="tab" aria-selected="false" aria-controls="settings" tabindex="-1" data-tab="settings" data-i18n="nav.settings">设置</button>
     </nav>
+    <p id="advancedLanguageNotice" class="advanced-language-notice" data-i18n="advanced.notice" hidden></p>
 
     <main>
       <section id="chat" class="panel active" role="tabpanel" aria-labelledby="tab-chat">
@@ -30,33 +39,31 @@
           <div class="quick-start-heading">
             <div>
               <span class="eyebrow">QUICK START</span>
-              <h2 id="quickStartTitle">用当前页完成第一条可核验证据</h2>
+              <h2 id="quickStartTitle" data-i18n="quickStart.title">用当前页完成第一条可核验证据</h2>
             </div>
-            <span id="quickStartProgress" class="status-pill in-progress">0 / 5</span>
+            <span id="quickStartProgress" class="status-pill in-progress">0 / 3</span>
           </div>
-          <p class="hint">一次完成读取、保存到本地 Vault、本地模板抽取，并打开第一条 claim 与原文 exact quote。全程不调用外部模型。</p>
+          <p class="hint" data-i18n="quickStart.hint">采集当前页，对照一条草稿 claim 与原文 exact quote，再判断是否支持。全部保存在本地，不调用外部模型。</p>
           <ol class="quick-start-steps">
-            <li id="quickStartPairStep">配对本地服务</li>
-            <li id="quickStartCaptureStep">读取并持久化当前页</li>
-            <li id="quickStartExtractStep">本地模板抽取</li>
-            <li id="quickStartEvidenceStep">查看 claim + exact quote</li>
-            <li id="quickStartReviewStep">人工核对并接受 claim</li>
+            <li id="quickStartPairStep" data-i18n="quickStart.step.pair">连接 Companion</li>
+            <li id="quickStartCaptureStep" data-i18n="quickStart.step.capture">采集当前页</li>
+            <li id="quickStartReviewStep" data-i18n="quickStart.step.review">核对并保存</li>
           </ol>
           <div class="toolbar">
             <button id="quickStartBtn" class="primary" type="button">从当前页生成第一条证据</button>
           </div>
           <p id="quickStartStatus" class="status" role="status" aria-live="polite"></p>
-          <p class="local-only-note">进度只保存在 Chrome 本地存储；不发送使用遥测。</p>
+          <p class="local-only-note" data-i18n="quickStart.localOnly">进度只保存在 Chrome 本地存储；不发送使用遥测。</p>
         </section>
 
         <div class="toolbar">
-          <button id="readPageBtn" class="primary">读取当前页</button>
-          <button id="useSelectionBtn">使用选中文本</button>
-          <button id="saveNoteBtn">保存笔记</button>
+          <button id="readPageBtn" class="primary" data-i18n="currentPage.read">读取当前页</button>
+          <button id="useSelectionBtn" data-i18n="currentPage.selection">使用选中文本</button>
+          <button id="saveNoteBtn" data-i18n="currentPage.saveNote">保存笔记</button>
         </div>
         <div class="inline-fields">
-          <input id="manualSelectorInput" type="text" placeholder="正文 CSS 选择器，例如 article 或 #js_content">
-          <button id="readSelectorBtn">读取选择器</button>
+          <input id="manualSelectorInput" type="text" placeholder="正文 CSS 选择器，例如 article 或 #js_content" data-i18n-placeholder="currentPage.selectorPlaceholder">
+          <button id="readSelectorBtn" data-i18n="currentPage.readSelector">读取选择器</button>
         </div>
 
         <article class="source-card">
@@ -71,6 +78,7 @@
           </div>
         </article>
 
+        <p class="advanced-inline-notice" data-i18n="advanced.chatNotice" data-i18n-show-locale="en" hidden></p>
         <label class="field-label" for="questionInput">问题</label>
         <textarea id="questionInput" rows="3">这篇内容的核心要点、关键结论、可执行启发是什么？</textarea>
 
@@ -153,6 +161,21 @@
       </section>
 
       <section id="knowledge" class="panel" role="tabpanel" aria-labelledby="tab-knowledge">
+        <article id="quickStartEvidence" class="first-evidence-card" tabindex="-1" hidden>
+          <span class="eyebrow">FIRST EVIDENCE</span>
+          <h3 data-i18n="firstEvidence.title">第一条可核验 Claim</h3>
+          <p id="quickStartClaimText" class="first-evidence-claim"></p>
+          <h3 data-i18n="firstEvidence.quoteTitle">Exact quote · 原文引用</h3>
+          <blockquote id="quickStartQuoteText"></blockquote>
+          <p class="first-evidence-prompt" data-i18n="firstEvidence.prompt">这段原文是否支持这条 claim？</p>
+          <div class="first-evidence-actions">
+            <button id="quickStartAcceptClaimBtn" type="button" data-i18n="firstEvidence.accept">接受：原文支持</button>
+            <button id="quickStartRejectClaimBtn" type="button" data-i18n="firstEvidence.reject">拒绝：原文不支持</button>
+          </div>
+          <p id="quickStartReviewStatus" class="status" role="status" aria-live="polite">这段原文是否支持这条 claim？请选择与来源一致的判断。</p>
+        </article>
+        <p class="advanced-inline-notice" data-i18n="advanced.knowledgeNotice" data-i18n-show-locale="en" hidden></p>
+
         <div class="toolbar">
           <button id="refreshKbBtn">刷新</button>
           <button id="exportMarkdownBtn">导出 Markdown</button>
@@ -204,18 +227,6 @@
 
         <h2>结构化知识</h2>
         <p class="hint">把当前来源抽成草稿 claims、entities、evidence、risks 和 tasks，写入本地 Vault 的结构化知识层。</p>
-
-        <article id="quickStartEvidence" class="first-evidence-card" tabindex="-1" hidden>
-          <span class="eyebrow">FIRST EVIDENCE</span>
-          <h3>第一条可核验 Claim</h3>
-          <p id="quickStartClaimText" class="first-evidence-claim"></p>
-          <h3>Exact quote · 原文引用</h3>
-          <blockquote id="quickStartQuoteText"></blockquote>
-          <div class="toolbar">
-            <button id="quickStartAcceptClaimBtn" class="primary" type="button">我已核对原文，接受这条 claim</button>
-          </div>
-          <p id="quickStartReviewStatus" class="status" role="status" aria-live="polite">尚未人工接受。</p>
-        </article>
 
         <div class="toolbar">
           <button id="extractKnowledgeBtn" class="primary">抽取结构化知识</button>
@@ -398,24 +409,25 @@
       </section>
 
       <section id="settings" class="panel" role="tabpanel" aria-labelledby="tab-settings">
-        <h2>本地服务</h2>
+        <h2 data-i18n="settings.serviceTitle">本地服务</h2>
         <p id="settingsStatus" class="status settings-status" role="status" aria-live="polite"></p>
+        <p class="trust-disclosure" data-i18n="settings.trust">采集内容保存在本机 Vault。零配置本地模板不调用外部模型；只有你明确同意后，才会把内容发送给已配置的模型。</p>
         <section id="setupGuide" class="setup-guide" aria-labelledby="setupGuideTitle">
-          <h3 id="setupGuideTitle">首次使用 · 3 步完成</h3>
+          <h3 id="setupGuideTitle" data-i18n="settings.setupTitle">首次使用 · 3 步完成</h3>
           <ol>
-            <li>正式版双击 Companion 包里的 <code>install.command</code>；源码开发时才用 <code>start.command</code>。</li>
-            <li>粘贴安装器复制的 Pairing Token，点击“测试本地服务”。</li>
-            <li>配对成功后直接运行 Quick Start；默认本地模板零配置，只有切换外部模型时才需要隐私同意。</li>
+            <li data-i18n="settings.setup.step1">正式版双击 Companion 包里的 install.command；源码开发时才用 start.command。</li>
+            <li data-i18n="settings.setup.step2">粘贴安装器复制的 Pairing Token，点击“测试本地服务”。</li>
+            <li data-i18n="settings.setup.step3">配对成功后直接运行 Quick Start；默认本地模板零配置，只有切换外部模型时才需要隐私同意。</li>
           </ol>
         </section>
-        <label class="field-label" for="serviceUrlInput">Companion URL</label>
+        <label class="field-label" for="serviceUrlInput" data-i18n="settings.serviceUrl">Companion URL</label>
         <input id="serviceUrlInput" type="url" placeholder="http://127.0.0.1:37621">
 
-        <label class="field-label" for="pairingTokenInput">Pairing Token</label>
-        <input id="pairingTokenInput" type="password" placeholder="从本地服务 state/pairing_token.txt 复制">
+        <label class="field-label" for="pairingTokenInput" data-i18n="settings.pairingToken">Pairing Token</label>
+        <input id="pairingTokenInput" type="password" placeholder="从本地服务 state/pairing_token.txt 复制" data-i18n-placeholder="settings.pairingPlaceholder">
 
         <div class="toolbar">
-          <button id="testCompanionBtn">测试本地服务</button>
+          <button id="testCompanionBtn" data-i18n="settings.testCompanion">测试本地服务</button>
           <button id="runVaultDoctorBtn">Vault Doctor</button>
           <button id="rebuildLineageBtn">重建 Lineage</button>
         </div>
@@ -424,6 +436,7 @@
         <p id="lineageStatus" class="status"></p>
         <div id="lineageResults" class="lineage-results"></div>
 
+        <p class="advanced-inline-notice" data-i18n="advanced.settingsNotice" data-i18n-show-locale="en" hidden></p>
         <h2>项目</h2>
         <label class="field-label" for="projectSelect">当前项目</label>
         <select id="projectSelect">
@@ -555,6 +568,7 @@
       </label>
     </template>
 
+    <script src="sidepanel_i18n.js"></script>
     <script src="sidepanel.js" type="module"></script>
   </body>
 </html>

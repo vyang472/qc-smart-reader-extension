@@ -1,4 +1,4 @@
-# QC Smart Reader v0.9.1 launch kit
+# QC Smart Reader v0.9.2 launch kit
 
 **Status:** ready-to-edit drafts. Nothing in this file means a post, submission, endorsement, or store approval has happened.
 
@@ -16,9 +16,9 @@ The launch goal is to find real users who care about verifiable research and lea
 
 ## Launch prerequisites
 
-- [ ] Public repository has v0.9.1 source, passing CI, license, privacy policy, security policy, support guide, and contribution guide.
+- [ ] Public repository has v0.9.2 source, passing CI, license, privacy policy, security policy, support guide, and contribution guide.
 - [ ] GitHub Release contains both ZIPs and `SHA256SUMS`.
-- [x] README and launch images were recaptured from the reviewed v0.9.1 build and passed visual and sensitive-data checks.
+- [x] Final English and Simplified Chinese First Evidence screenshots were captured from the reviewed v0.9.2 build and passed visual, deterministic-hash, and sensitive-data checks.
 - [ ] A clean macOS account completes install → pair → capture → evidence review → restart recovery → uninstall.
 - [ ] Issues and Discussions are enabled and monitored for the first launch week.
 - [ ] Chrome Web Store status is described accurately; do not say “available in the store” before approval.
@@ -39,7 +39,7 @@ Every reviewed claim must still match an exact quote in the stored source chunk.
 
 **Honest qualifier**
 
-The v0.9.1 public preview is macOS-first, loaded through Chrome Developer mode, and has a Simplified Chinese product UI. Complex PDFs and sites still need real-world testing.
+The v0.9.2 public preview is macOS-first and loaded through Chrome Developer mode. Core setup and First Evidence are available in English and Simplified Chinese; advanced workspaces remain in Simplified Chinese. Complex PDFs and sites still need real-world testing.
 
 ## Product Hunt draft
 
@@ -62,21 +62,21 @@ Hi Product Hunt — I built QC Smart Reader because fluent AI summaries made my 
 
 The core rule is deliberately strict: a claim cannot become reviewed unless it points to an exact quote that still exists in the stored source chunk. If a source changes, invalid evidence and dependent outputs become stale.
 
-The product is a Chrome side panel plus a local Python Companion. It captures pages in your live browser session, imports PDFs and public captions, and stores the durable record as SQLite plus readable Markdown. Quick Start can create a first draft claim with an exact stored-source quote through deterministic local template extraction. That draft is not an AI summary and remains unreviewed until the user accepts it. Model use is optional: Codex CLI or an OpenAI-compatible or Anthropic endpoint.
+The product is a Chrome side panel plus a local Python Companion. It captures pages in your live browser session, imports PDFs and public captions, and stores the durable record as SQLite plus readable Markdown. Quick Start can create a first draft claim with an exact stored-source quote through deterministic local template extraction. That draft is not an AI summary and remains unreviewed until the user marks it supported or unsupported. Model use is optional: Codex CLI or an OpenAI-compatible or Anthropic endpoint.
 
-This is a v0.9.1 public preview. It is macOS-first, the UI is Simplified Chinese, and Chrome Developer mode is required until a Chrome Web Store release is approved. I would especially value reports from people who try the zero-configuration First Evidence path, a difficult forum thread, a real paper, or the evidence-review workflow. Which step feels least trustworthy or most cumbersome?
+This is a v0.9.2 public preview. It is macOS-first, Chrome Developer mode is required until a Chrome Web Store release is approved, and advanced workspaces remain in Simplified Chinese. Core setup and First Evidence are available in English and Simplified Chinese. I would especially value reports from people who try the zero-configuration First Evidence path, a difficult forum thread, a real paper, or the evidence-review workflow. Which step feels least trustworthy or most cumbersome?
 
 ### Gallery captions
 
 1. **Capture with context** — read the page you selected or recover a URL batch in the Chrome side panel.
-2. **Review the evidence** — compare every claim with its exact quote and source context before accepting it.
+2. **Review the evidence** — compare every claim with its exact quote and source context before marking it supported or unsupported.
 3. **Keep the record** — retain sources, decisions, lineage, and outputs in a local Markdown + SQLite Vault.
 
 ### Maker Q&A notes
 
 - **Is it fully offline?** Current-page capture and local template extraction can remain local. Web retrieval, public-caption discovery, and optional model providers require network access.
 - **Does Codex CLI mean no API cost?** QC Smart Reader does not require a separate API key for that route, but the user's Codex/OpenAI account terms and limits still apply.
-- **Why `<all_urls>`?** To extract arbitrary pages only after the user chooses them; there is no passive history collection.
+- **Why broad HTTP(S) host access?** To extract arbitrary HTTP(S) pages only after the user chooses them and to reach the loopback Companion over HTTP; file and other URL schemes are not requested, and there is no passive history collection.
 - **Why Developer mode?** The Web Store listing is a separate publisher review step and must not be presented as approved early.
 
 ## Show HN draft
@@ -91,11 +91,11 @@ I built QC Smart Reader, a macOS-first Chrome side panel and local Python servic
 
 The design rule is that a claim cannot become “reviewed” unless it has a source id, chunk id, and exact quote that still matches the stored text. Re-capturing changed material invalidates mismatched evidence and marks dependent topic packages and outputs stale.
 
-It captures the current page or recoverable URL batches using the live Chrome session, imports text PDFs with page citations (plus macOS Vision OCR), and can ingest manual or public YouTube captions. The record stays in local SQLite plus readable Markdown. The zero-configuration local template produces a deliberately simple draft claim with a real stored-source quote and waits for human acceptance; it is not an AI summary. Codex CLI and OpenAI-compatible / Anthropic providers are optional.
+It captures the current page or recoverable URL batches using the live Chrome session, imports text PDFs with page citations (plus macOS Vision OCR), and can ingest manual or public YouTube captions. The record stays in local SQLite plus readable Markdown. The zero-configuration local template produces a deliberately simple draft claim with a real stored-source quote and waits for a human supported/unsupported decision; it is not an AI summary. Codex CLI and OpenAI-compatible / Anthropic providers are optional.
 
-You can try the v0.9.1 release here: https://github.com/vyang472/qc-smart-reader-extension
+You can try the v0.9.2 release here: https://github.com/vyang472/qc-smart-reader-extension
 
-Current limits: macOS-first installer, Simplified Chinese UI, unpacked Chrome extension, and imperfect complex-PDF handling. I would appreciate technical feedback on the evidence invariant, local service boundary, and the roughest part of installation. The repository includes the complete release gate and threat boundaries.
+Current limits: macOS-first installer, unpacked Chrome extension, Simplified Chinese advanced workspaces, and imperfect complex-PDF handling. Core setup and First Evidence are bilingual. I would appreciate technical feedback on the evidence invariant, local service boundary, and the roughest part of installation. The repository includes the complete release gate and threat boundaries.
 
 ## Reddit draft
 
@@ -111,25 +111,25 @@ I am the maker of QC Smart Reader. I wanted the speed of AI-assisted reading wit
 
 The extension captures pages in the Chrome session I already use. A local Python Companion stores the source, chunks, evidence, claims, review decisions, and outputs in SQLite plus Markdown. A claim only reaches reviewed when its exact quote still matches the current source chunk; changed sources make dependent work stale.
 
-v0.9.1 can also import PDFs with page citations, use macOS Vision OCR for low-text pages, ingest public/manual YouTube captions, recover long URL batches, and produce evidence-backed research outputs. Model use is optional; deterministic local template extraction can exercise the evidence workflow without pretending to be an AI summary, and every draft still needs human review.
+v0.9.2 can also import PDFs with page citations, use macOS Vision OCR for low-text pages, ingest public/manual YouTube captions, recover long URL batches, and produce evidence-backed research outputs. Model use is optional; deterministic local template extraction can exercise the evidence workflow without pretending to be an AI summary, and every draft still needs a human supported/unsupported decision.
 
 Repository and release: https://github.com/vyang472/qc-smart-reader-extension
 
-The honest limitations are macOS-first packaging, a Simplified Chinese UI, Developer-mode installation, and incomplete complex-PDF handling. If this matches your workflow, I would value a real test and a blunt report about where trust or usability breaks.
+The honest limitations are macOS-first packaging, Simplified Chinese advanced workspaces, Developer-mode installation, and incomplete complex-PDF handling. Core setup and First Evidence are bilingual. If this matches your workflow, I would value a real test and a blunt report about where trust or usability breaks.
 
 ## X / Mastodon draft
 
-I built QC Smart Reader: an open-source, local-first Chrome reader where a claim cannot become “reviewed” unless its exact quote still exists in the source. Web/PDF/public captions → evidence graph → Markdown + SQLite Vault. macOS-first v0.9.1: https://github.com/vyang472/qc-smart-reader-extension
+I built QC Smart Reader: an open-source, local-first Chrome reader where a claim cannot become “reviewed” unless its exact quote still exists in the source. Web/PDF/public captions → evidence graph → Markdown + SQLite Vault. Bilingual core path, macOS-first v0.9.2: https://github.com/vyang472/qc-smart-reader-extension
 
 ## LinkedIn draft
 
-I have released QC Smart Reader v0.9.1, an open-source Chrome extension and local Companion for research that needs an audit trail.
+I have released QC Smart Reader v0.9.2, an open-source Chrome extension and local Companion for research that needs an audit trail.
 
 Instead of treating an AI summary as the record, QC Smart Reader stores an evidence graph: source → chunk → exact quote → claim → topic package → deliverable. A reviewed claim must still match its source; if the source changes, affected work becomes stale.
 
 The public preview supports a zero-configuration First Evidence path, browser capture, restart-safe URL batches, PDF page citations with macOS OCR, public/manual YouTube captions, local Markdown + SQLite storage, and optional Codex CLI or API providers. Its local template creates only an unreviewed draft with a real quote; it does not impersonate an AI summary.
 
-It is intentionally honest about its current edges: macOS-first, Simplified Chinese UI, Developer-mode Chrome installation, and more work needed on complex PDFs.
+It is intentionally honest about its current edges: macOS-first, Simplified Chinese advanced workspaces, Developer-mode Chrome installation, and more work needed on complex PDFs. Core setup and First Evidence are available in English and Simplified Chinese.
 
 Source, release, tests, and architecture: https://github.com/vyang472/qc-smart-reader-extension
 
@@ -139,16 +139,17 @@ I am looking for feedback from people who need to verify research later: where d
 
 ### Title
 
-QC Smart Reader v0.9.1: zero-config first evidence
+QC Smart Reader v0.9.2: bilingual first evidence
 
 ### Body
 
-The first public preview is ready for real research workflows.
+The v0.9.2 preview is ready for real research workflows.
 
 Highlights:
 
 - exact-quote validation before claims can be reviewed;
-- pairing-gated Quick Start that persists the current page and waits for human acceptance of its local-template draft;
+- pairing-gated Quick Start that persists the current page and waits for a human supported/unsupported decision on its local-template draft;
+- browser-locale-aware English / Simplified Chinese core onboarding with a local language selector;
 - local SQLite + readable Markdown Vault;
 - current-page, selected-text, and restart-safe batch capture;
 - PDF page citations and macOS Vision OCR;
@@ -156,9 +157,9 @@ Highlights:
 - optional Codex CLI or API providers, plus deterministic local template extraction without an external model;
 - verified installer upgrade, rollback, uninstall, and reproducible release ZIPs.
 
-The supported path is currently macOS + Chrome 116+, with a Simplified Chinese UI and Developer-mode installation. Please use public or synthetic fixtures in reports and keep secrets and private Vault content out of issues.
+The supported path is currently macOS + Chrome 116+, with bilingual core onboarding, Simplified Chinese advanced workspaces, and Developer-mode installation. Please use public or synthetic fixtures in reports and keep secrets and private Vault content out of issues.
 
-Start with the release: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.1
+Start with the release: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.2
 
 ## Awesome-list proposal draft
 

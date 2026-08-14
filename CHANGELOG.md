@@ -6,6 +6,32 @@ All notable changes to QC Smart Reader will be documented here. The project foll
 
 No unreleased changes have been announced.
 
+## [0.9.2] - 2026-08-15
+
+This release makes the core path to a first reviewed piece of evidence available in English and Simplified Chinese, and makes the user's support decision explicit.
+
+### Added
+
+- Browser-locale-aware core onboarding with local Auto, English, and Simplified Chinese choices. Changing the interface language is side-effect-free and does not send telemetry or source content anywhere.
+- Final English and Simplified Chinese Web Store screenshots captured from clean browser profiles against the real local Companion and a public deterministic fixture.
+- Equal-weight actions to mark the First Evidence claim supported or unsupported after comparing it with the exact stored-source quote.
+
+### Changed
+
+- First Evidence now presents three user steps: connect the Companion, capture the current page, then review and save. Deterministic local extraction remains an internal operation rather than a separate user task.
+- Core setup, pairing, Quick Start, current-page feedback, First Evidence, and their primary errors are bilingual. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls remain in Simplified Chinese and are identified at that boundary.
+- Companion v0.9.2 keeps the v0.9.0 extension as its minimum compatible version because `API_VERSION` and `SCHEMA_VERSION` remain at 1.
+
+### Fixed
+
+- Restoring First Evidence now checks the server-owned claim status: `reviewed` restores supported, `rejected` restores unsupported, and any mismatch returns the claim to review instead of trusting stale local progress.
+- First Evidence decisions and completion milestones remain isolated by project, while claim and quote text are preserved verbatim across language changes.
+- Current-page, selector, pagination, and Companion setup failures now keep their dynamic context when rendered in either supported language.
+
+### Trust boundary
+
+- QC Smart Reader never decides whether a claim is supported on the user's behalf. Both choices are human decisions persisted by the local Companion; the local template remains deterministic draft generation, not an AI summary.
+
 ## [0.9.1] - 2026-08-15
 
 This release removes model setup from the path to a first persisted, reviewable piece of evidence.
@@ -67,6 +93,7 @@ First public preview.
 - Isolated Codex CLI runs in an ephemeral restricted environment and disabled shell, web, plugin, and delegation capabilities for provider calls.
 - Added archive/input validation, dependency integrity checks, cautious installer path handling, and rollback verification.
 
-[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0

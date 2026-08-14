@@ -30,11 +30,35 @@ body {
 
 .app-header {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   padding: 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+}
+
+.app-header > div:not(.brand-mark) {
+  min-width: 0;
+}
+
+.locale-control {
+  display: grid;
+  gap: 3px;
+  min-width: 124px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.locale-control select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
 }
 
 .brand-mark {
@@ -78,6 +102,27 @@ small {
   padding: 10px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+}
+
+.advanced-language-notice {
+  margin: 10px 12px 0;
+  padding: 9px 11px;
+  border: 1px solid #f0c36a;
+  border-radius: 8px;
+  background: #fff8e7;
+  color: #714d00;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.advanced-inline-notice {
+  margin: 14px 0 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #fff8e7;
+  color: #714d00;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .tab,
@@ -181,6 +226,17 @@ main {
   border: 1px solid #94bef8;
   border-radius: 10px;
   background: var(--blue-soft);
+}
+
+.trust-disclosure {
+  margin: 10px 0;
+  padding: 10px 11px;
+  border-left: 4px solid var(--green);
+  border-radius: 6px;
+  background: var(--green-soft);
+  color: #14543f;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .setup-guide h3 {
@@ -299,6 +355,31 @@ main {
 .first-evidence-claim {
   font-weight: 750;
   line-height: 1.5;
+}
+
+.first-evidence-prompt {
+  margin: 12px 0 8px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.first-evidence-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.first-evidence-actions button {
+  min-height: 44px;
+  border-color: #6f93ad;
+  background: white;
+  font-weight: 700;
+}
+
+@media (max-width: 360px) {
+  .first-evidence-actions {
+    grid-template-columns: 1fr;
+  }
 }
 
 .quick-start-highlight {

@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280" role="img" aria-labelledby="title desc">
+  <title id="title">QC Smart Reader promotional artwork</title>
+  <desc id="desc">The QC blue and green icon beside a connected source, claim, and verified evidence chain.</desc>
+  <defs>
+    <linearGradient id="background" x1="20" y1="18" x2="420" y2="266" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#071426"/>
+      <stop offset="0.56" stop-color="#0B2442"/>
+      <stop offset="1" stop-color="#073B36"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="48" y1="74" x2="171" y2="207" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1267E3"/>
+      <stop offset="1" stop-color="#087A58"/>
+    </linearGradient>
+    <linearGradient id="chain" x1="261" y1="71" x2="348" y2="213" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B8FFF"/>
+      <stop offset="1" stop-color="#22C58B"/>
+    </linearGradient>
+    <radialGradient id="blueGlow" cx="0" cy="0" r="1" gradientTransform="translate(86 85) rotate(50) scale(157 153)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2D84F7" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#2D84F7" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="greenGlow" cx="0" cy="0" r="1" gradientTransform="translate(374 229) rotate(-132) scale(173 153)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0BB07B" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#0BB07B" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="190%">
+      <feDropShadow dx="0" dy="12" stdDeviation="13" flood-color="#020812" flood-opacity="0.4"/>
+    </filter>
+    <filter id="cardShadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#020812" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <rect width="440" height="280" fill="url(#background)"/>
+  <rect width="440" height="280" fill="url(#blueGlow)"/>
+  <rect width="440" height="280" fill="url(#greenGlow)"/>
+  <circle cx="409" cy="18" r="91" fill="none" stroke="#3B8FFF" stroke-opacity="0.09" stroke-width="34"/>
+  <circle cx="29" cy="269" r="77" fill="none" stroke="#22C58B" stroke-opacity="0.07" stroke-width="28"/>
+  <path d="M0 235C73 211 109 261 180 240S293 208 440 246V280H0Z" fill="#FFFFFF" opacity="0.025"/>
+
+  <g filter="url(#shadow)">
+    <rect x="38" y="72" width="136" height="136" rx="34" fill="url(#brand)"/>
+    <rect x="39" y="73" width="134" height="134" rx="33" fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="2"/>
+    <circle cx="102" cy="136" r="36" fill="none" stroke="#FFFFFF" stroke-width="16"/>
+    <path d="M124 158 148 182" fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round"/>
+  </g>
+
+  <g opacity="0.9">
+    <circle cx="72" cy="229" r="4" fill="#3B8FFF"/>
+    <circle cx="88" cy="229" r="4" fill="#2BA1CA"/>
+    <circle cx="104" cy="229" r="4" fill="#22C58B"/>
+    <path d="M116 229H161" stroke="#83A5C4" stroke-opacity="0.42" stroke-width="4" stroke-linecap="round"/>
+  </g>
+
+  <path d="M268 82C306 82 306 118 337 118C369 118 370 154 337 154C306 154 306 198 268 198" fill="none" stroke="#061221" stroke-opacity="0.72" stroke-width="11" stroke-linecap="round"/>
+  <path d="M268 82C306 82 306 118 337 118C369 118 370 154 337 154C306 154 306 198 268 198" fill="none" stroke="url(#chain)" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="304" cy="97" r="5" fill="#5FA5FF" stroke="#102D4C" stroke-width="3"/>
+  <circle cx="355" cy="136" r="5" fill="#39C7A0" stroke="#103B3C" stroke-width="3"/>
+  <circle cx="304" cy="183" r="5" fill="#32C391" stroke="#103B3C" stroke-width="3"/>
+
+  <g transform="translate(218 42)" filter="url(#cardShadow)">
+    <rect width="92" height="80" rx="18" fill="#102B49" stroke="#3974AD" stroke-opacity="0.7"/>
+    <path d="M28 18H54L67 31V62H28Z" fill="#EAF3FF" fill-opacity="0.97"/>
+    <path d="M54 18V31H67" fill="#C7DCF2"/>
+    <rect x="36" y="38" width="23" height="4" rx="2" fill="#3974AD"/>
+    <rect x="36" y="47" width="19" height="4" rx="2" fill="#6F91B5"/>
+    <rect x="36" y="56" width="14" height="4" rx="2" fill="#8EA8C2"/>
+  </g>
+
+  <g transform="translate(310 100)" filter="url(#cardShadow)">
+    <rect width="92" height="80" rx="18" fill="#103347" stroke="#358B82" stroke-opacity="0.72"/>
+    <path d="M25 28 46 20 67 29V53L46 61 25 52Z" fill="#DDF7F0" fill-opacity="0.98"/>
+    <path d="M46 20V61M25 28 46 37 67 29" fill="none" stroke="#358B82" stroke-width="3" stroke-linejoin="round"/>
+    <circle cx="46" cy="37" r="5" fill="#0BB07B"/>
+  </g>
+
+  <g transform="translate(218 158)" filter="url(#cardShadow)">
+    <rect width="92" height="80" rx="18" fill="#103B3B" stroke="#2F9A7C" stroke-opacity="0.78"/>
+    <path d="M25 29H42V44H31L25 50ZM48 29H65V44H54L48 50Z" fill="#E8FFF7"/>
+    <circle cx="68" cy="56" r="13" fill="#0BB07B"/>
+    <path d="M62 56 66 60 75 51" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

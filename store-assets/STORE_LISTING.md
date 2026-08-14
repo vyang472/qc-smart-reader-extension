@@ -1,6 +1,6 @@
-# Chrome Web Store listing handoff — QC Smart Reader 0.9.1
+# Chrome Web Store listing handoff — QC Smart Reader v0.9.2
 
-**Status:** listing copy and v0.9.1 repository assets are ready; publisher-account checks and dashboard submission are still pending. This is not evidence of submission or approval.
+**Status:** v0.9.2 bilingual listing copy, permission explanations, data-use answers, final localized screenshots, and the small promo tile are prepared. Publishing the release assets, publisher-account checks, asset upload, and dashboard submission are still pending. This is not evidence of submission or approval.
 
 This file records the listing copy, permission explanations, data-use answers, assets, and clean-install checks for the publisher account. Re-check the Chrome Web Store dashboard requirements on submission day.
 
@@ -8,20 +8,45 @@ This file records the listing copy, permission explanations, data-use answers, a
 
 - **Name:** QC Smart Reader
 - **Category:** Productivity
-- **Primary language:** Chinese (Simplified)
+- **Primary language:** English
 - **Website:** https://github.com/vyang472/qc-smart-reader-extension
 - **Support:** https://github.com/vyang472/qc-smart-reader-extension/issues
 - **Privacy policy:** https://github.com/vyang472/qc-smart-reader-extension/blob/main/PRIVACY.md
 
-### Short description — 简体中文
-
-采集网页、PDF 与公开视频字幕，用原文引用核验主张，并沉淀到本地 Markdown + SQLite 知识库。
-
-### Short description — English reference
+### Short description — English (primary)
 
 Capture web research, verify claims against exact quotes, and keep a local Markdown + SQLite knowledge Vault.
 
-### Detailed description — 简体中文
+### Short description — 简体中文（localized listing）
+
+采集网页、PDF 与公开视频字幕，用原文引用核验主张，并沉淀到本地 Markdown + SQLite 知识库。
+
+### Detailed description — English (primary)
+
+QC Smart Reader is a local-first research reader. Before using the extension, install the free macOS Companion from the same release. The extension communicates with that Companion only through the loopback interface; it does not depend on developer-hosted capture or storage infrastructure.
+
+Its single purpose is to turn web pages, PDFs, and public captions that the user intentionally selects into locally stored research claims backed by exact source quotes and held for human review.
+
+QC Smart Reader can capture the current page or selected text, run recoverable URL batches in the user's existing Chrome session, import text PDFs, and ingest manually supplied or publicly available captions. It stores source material in SQLite plus a readable Markdown Vault, then links structured claims to exact quotations so each decision can be inspected against the saved source.
+
+Core capabilities:
+
+- Save the current page or selected text to a local research Vault
+- Use Quick Start to create a deterministic, quote-backed draft without an API key or external model
+- Decide whether a claim is supported or unsupported beside its exact quote
+- Pause, retry, and recover requested URL batches in the current Chrome session
+- Import text PDFs, with optional macOS Vision OCR for low-text pages
+- Import manual captions or public captions through an existing local yt-dlp
+- Review claims, evidence, source quality, versions, and lineage
+- Produce evidence-linked topic packages and research deliverables
+
+QC Smart Reader does not passively collect browsing history. It processes content only after the user chooses a read, import, batch, review, export, or model action.
+
+By default, research stays on the user's Mac. The zero-configuration local template creates a clearly labeled deterministic draft and copies an exact quote from the saved source; it is not an AI summary, makes no external model call, and cannot mark a claim reviewed without a human decision. Optional model routes include a locally signed-in Codex CLI or a user-configured OpenAI-compatible or Anthropic endpoint. Sending source material to a model is blocked until the user gives explicit consent.
+
+The supported path is macOS with Chrome 116 or later. Setup, pairing, Quick Start, core current-page feedback, and First Evidence are available in English and Simplified Chinese. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls currently remain in Simplified Chinese and are labeled accordingly. Complex PDF layout, private YouTube captions, and audio transcription remain out of scope.
+
+### Detailed description — 简体中文（localized listing）
 
 QC Smart Reader 是一个本地优先的研究阅读器。使用扩展前，需要先安装同一版本、免费的 macOS Companion；扩展只通过本机回环地址与它通信，不依赖开发者托管的采集或存储服务。
 
@@ -43,9 +68,9 @@ QC Smart Reader 是一个本地优先的研究阅读器。使用扩展前，需�
 
 QC Smart Reader 不会在后台被动采集浏览历史。只有当你点击读取、导入、批量处理或模型操作时，才会处理对应内容。
 
-默认情况下，材料保存在你的 Mac 上。零配置的本地模板会用确定性规则生成结构化草稿，并引用已保存原文中的 exact quote；它不是 AI 总结，claim 必须经用户核对并明确接受。模型功能是可选的：你可以使用本机已登录的 Codex CLI，或配置自己的 OpenAI-compatible / Anthropic endpoint。首次把材料发送给模型前，扩展会要求明确同意。
+默认情况下，材料保存在你的 Mac 上。零配置的本地模板会用确定性规则生成结构化草稿，并引用已保存原文中的 exact quote；它不是 AI 总结，claim 必须经用户核对并明确判断为支持或不支持。模型功能是可选的：你可以使用本机已登录的 Codex CLI，或配置自己的 OpenAI-compatible / Anthropic endpoint。首次把材料发送给模型前，扩展会要求明确同意。
 
-当前支持路径为 macOS 与 Chrome 116+，产品界面为简体中文。复杂 PDF 排版、私有 YouTube 字幕和音频转写不在当前范围内。
+当前支持路径为 macOS 与 Chrome 116+。首次设置、配对、Quick Start、当前页核心反馈与 First Evidence 已支持 English / 简体中文；批量、Agent、大部分知识库、交付以及项目/模型控制仍为中文，并有明确提示。复杂 PDF 排版、私有 YouTube 字幕和音频转写不在当前范围内。
 
 ## Single purpose
 
@@ -89,30 +114,37 @@ Host the product's capture, review, knowledge, delivery, batch, and settings wor
 | Authentication information | Random loopback Pairing Token stored locally; no website login passwords or cookies are collected |
 | Model credentials | Stored by the local Companion with owner-only permissions, never in Chrome storage or developer infrastructure |
 | Model data sharing | Optional; blocked until affirmative versioned consent; sent only to Codex/OpenAI or the endpoint selected by the user |
-| Developer analytics | None in v0.9.1; onboarding milestones stay in local Chrome storage |
+| Developer analytics | None; onboarding milestones and interface-language preference stay in local Chrome storage |
 | Sale or advertising use | None |
 
 ## Assets
 
-The repository images below were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture. Re-run the screenshot script and verify the images again if the release build changes before upload:
+The localized screenshots below were generated from clean browser profiles using the current extension, the real local Companion, and a public deterministic fixture. They show the actual First Evidence interface without fabricated or overlaid UI:
 
 - Store icon: `assets/icons/icon-128.png`
-- Screenshot 1: `store-assets/web-store/01-first-evidence-4-of-5.png` (640×400, real Quick Start UI)
-- Screenshot 2: `store-assets/web-store/02-reviewed-exact-quote.png` (640×400, real reviewed-evidence UI)
-- Screenshot 3: `store-assets/web-store/03-local-vault-detail.png` (640×400, real Vault-detail UI)
-- Small promo tile: `store-assets/web-store/small-promo-tile-440x280.png` (440×280)
+- English screenshot 1: [`store-assets/web-store/en-US/01-first-evidence-pending-review.png`](web-store/en-US/01-first-evidence-pending-review.png) (640×400)
+- English screenshot 2: [`store-assets/web-store/en-US/02-reviewed-exact-quote.png`](web-store/en-US/02-reviewed-exact-quote.png) (640×400)
+- Simplified Chinese screenshot 1: [`store-assets/web-store/zh-CN/01-first-evidence-pending-review.png`](web-store/zh-CN/01-first-evidence-pending-review.png) (640×400)
+- Simplified Chinese screenshot 2: [`store-assets/web-store/zh-CN/02-reviewed-exact-quote.png`](web-store/zh-CN/02-reviewed-exact-quote.png) (640×400)
+- Small promo tile: [`store-assets/web-store/small-promo-tile-440x280.png`](web-store/small-promo-tile-440x280.png) (440×280; ready for v0.9.2; locale- and version-neutral)
+  - Reproducible vector source: [`store-assets/web-store/small-promo-tile-440x280.svg`](web-store/small-promo-tile-440x280.svg)
+  - Deterministic renderer: [`scripts/render_small_promo_tile.mjs`](../scripts/render_small_promo_tile.mjs)
 - Launch-page composites, not store screenshots: `store-assets/screenshots/`
 - Repository social card, not a store screenshot: `store-assets/social-preview.png`
+
+The PNGs currently stored directly under `store-assets/web-store/` are v0.9.1 Chinese-interface reference captures. Do not upload them as evidence of the v0.9.2 English primary listing, and do not use the advanced Vault screenshot in the English listing while that workspace remains Chinese.
 
 Before upload, confirm each screenshot matches the dashboard's current dimensions and shows no Pairing Token, API key, private URL, private source text, personal path, or browser profile data. Do not add awards, review scores, user counts, or performance claims without verifiable evidence.
 
 ## Publisher checklist
 
-- [ ] Publish v0.9.1 and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
+- [ ] Publish v0.9.2, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
+- [x] Render the locale- and version-neutral small promo tile from its tracked SVG source; verify dimensions, visible-text/version scanning, and deterministic hashes.
 - [ ] Verify the publisher identity and required contact details in the dashboard.
-- [ ] Upload only screenshots captured from the reviewed v0.9.1 build.
+- [x] Generate all four localized screenshot paths above from the final reviewed build; verify dimensions, sensitive-data scanning, and deterministic hashes.
+- [ ] Upload the en-US pair to the English primary listing and the zh-CN pair to the Simplified Chinese localized listing.
 - [ ] Complete privacy, permission, distribution, pricing, and tester declarations truthfully.
-- [ ] Verify the v0.9.1 Companion and checksum links in `WEB_STORE_TEST_INSTRUCTIONS.md`, then paste those instructions into the dashboard.
+- [ ] Replace the release placeholders in `WEB_STORE_TEST_INSTRUCTIONS.md`, verify the public Companion and checksum links, then paste those instructions into the dashboard.
 - [ ] Explain why HTTP(S) host access is necessary for user-selected arbitrary research pages and requested URL batches.
 - [ ] Confirm there is no remotely hosted executable code and no undisclosed analytics.
 - [ ] Install both release ZIPs on a clean macOS user account.
