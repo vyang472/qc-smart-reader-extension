@@ -172,6 +172,39 @@ function setLocalizedNodeText(node, key, params = {}, fallback = "") {
   node.textContent = uiText(key, params, fallback);
 }
 
+function companionReleaseLinks(version = EXTENSION_VERSION) {
+  const releaseVersion = encodeURIComponent(String(version || "").trim());
+  const releaseBase = `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v${releaseVersion}`;
+  return {
+    companion: `${releaseBase}/qc-smart-reader-companion-${releaseVersion}.zip`,
+    checksums: `${releaseBase}/SHA256SUMS`
+  };
+}
+
+function configureCompanionReleaseLinks() {
+  const links = companionReleaseLinks();
+  const companionLink = $("companionDownloadLink");
+  const checksumsLink = $("companionChecksumsLink");
+  if (companionLink) {
+    companionLink.href = links.companion;
+    setLocalizedNodeText(
+      companionLink,
+      "settings.setup.downloadCompanion",
+      { version: EXTENSION_VERSION },
+      `下载 Companion v${EXTENSION_VERSION}`
+    );
+  }
+  if (checksumsLink) {
+    checksumsLink.href = links.checksums;
+    setLocalizedNodeText(
+      checksumsLink,
+      "settings.setup.downloadChecksums",
+      {},
+      "校验 SHA256SUMS"
+    );
+  }
+}
+
 function clearLocalizedNodeText(node) {
   if (!node) return;
   if (node.dataset) {
@@ -421,6 +454,7 @@ async function init() {
   let interactionHandlersBound = false;
   let hydrateWorkspaces = false;
   try {
+    configureCompanionReleaseLinks();
     let localeError = null;
     try {
       await initializeUiLocale();

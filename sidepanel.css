@@ -244,6 +244,41 @@ main {
   font-size: 15px;
 }
 
+.setup-download-cta {
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.setup-download-cta p {
+  margin: 0 0 7px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.setup-download-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px 12px;
+}
+
+.setup-download-links a {
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.setup-download-links .setup-download-primary {
+  display: inline-block;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: var(--blue);
+  color: #fff;
+  text-decoration: none;
+}
+
 .setup-guide ol {
   margin: 0;
   padding-left: 22px;
