@@ -26,4 +26,4 @@ Use the v0.9.5 Extension and Companion archives from the same GitHub Release and
 
 The public v0.9.5 GitHub Release and its three checksum-verified assets are available at [GitHub Releases](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5). Chrome Web Store upload, submission, and approval have not occurred.
 
-The locale-specific Web Store screenshots currently in the repository were captured and verified for v0.9.4. They are prior-release references only: they were not recaptured from v0.9.5 and do not show the new context-menu selection flow.
+The locale-specific Web Store screenshots were regenerated twice from independent clean browser profiles using the v0.9.5 extension, the real v0.9.5 Companion, and a public deterministic fixture. Both runs passed the Replay-contract, sensitive-data, layout, 640×400 RGB, and deterministic-hash checks and reproduced the tracked PNGs byte for byte. They show the carried-forward Quick Start pending/reviewed Replay states, not the new context-menu selection flow, and do not prove Chrome Web Store upload, submission, or approval.

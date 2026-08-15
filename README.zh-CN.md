@@ -15,13 +15,17 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 
 > 模型可以总结；证据决定这句话能不能信。
 
+> **用约 15 分钟试一次证据核验——macOS + Chrome，不需要 API Key 或模型。**
+>
+> [先看 First Evidence（v0.9.5 已验收截图）](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png) · [参加 v0.9.5 可用性测试，并按页面中的环境模板回复](https://github.com/vyang472/qc-smart-reader-extension/discussions/4)
+
 ## 实际界面
 
 | 在浏览器里采集 | 对照原文审证据 | 保留可迁移的本地 Vault |
 | --- | --- | --- |
 | ![在 QC Smart Reader 侧边栏采集网页](store-assets/screenshots/01-capture.png) | ![用原文 quote 审阅 claim](store-assets/screenshots/02-evidence-review.png) | ![查看本地 Markdown 与 SQLite Vault](store-assets/screenshots/03-local-vault.png) |
 
-上方三张总览图来自已验收的 v0.9.1 扩展与本地 Companion，使用公开、确定性 fixture 生成，因此保留该版本的简体中文界面。[英文待审](store-assets/web-store/en-US/01-first-evidence-pending-review.png)、[英文已审 Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png)、[简体中文待审](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png)和[简体中文已审 Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png)均在 v0.9.4 已捕获并完成验收。它们是 **上一版本参考图**：未用 v0.9.5 重拍，不展示新的右键选中文本流程，也不能证明 v0.9.5 已上传、提交或通过 Chrome Web Store 审核。
+上方三张总览图来自已验收的 v0.9.1 扩展与本地 Companion，使用公开、确定性 fixture 生成，因此保留该版本的简体中文界面。[英文待审](store-assets/web-store/en-US/01-first-evidence-pending-review.png)、[英文已审 Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png)、[简体中文待审](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png)和[简体中文已审 Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png)均使用 v0.9.5 扩展、真实 v0.9.5 Companion 与公开确定性 fixture，在两个独立干净浏览器 profile 中重新生成。两次运行都逐字节复现了仓库中的 PNG，并通过 Replay 契约、敏感数据、布局、640×400 RGB 与确定性哈希校验。它们展示 Quick Start 的待审/已审 Replay 状态，不展示新的右键选中文本流程，也不能证明 v0.9.5 已上传、提交或通过 Chrome Web Store 审核。
 
 > **v0.9.5 界面覆盖：**首次设置、配对、Quick Start、当前页核心反馈、选中文本保存、First Evidence 与 Source Replay 控件已支持 English / 简体中文；默认跟随浏览器语言，也可选择 Auto、English 或简体中文。批量、Agent、大部分知识库、交付以及项目/模型控制仍保持中文，并在英文界面明确提示。
 

@@ -15,13 +15,17 @@ QC Smart Reader is a macOS-first Chrome extension and local Python companion. It
 
 > The model may summarize. The evidence decides what can be trusted.
 
+> **Try one evidence check in about 15 minutes — macOS + Chrome, no API key or model.**
+>
+> [Preview First Evidence (verified v0.9.5 capture)](store-assets/web-store/en-US/01-first-evidence-pending-review.png) · [Join the v0.9.5 usability test and use its environment reply template](https://github.com/vyang472/qc-smart-reader-extension/discussions/4)
+
 ## See it in action
 
 | Capture in your browser | Review the exact evidence | Keep a durable local Vault |
 | --- | --- | --- |
 | ![Capture a page in the QC Smart Reader side panel](store-assets/screenshots/01-capture.png) | ![Review a claim against its exact source quotation](store-assets/screenshots/02-evidence-review.png) | ![Inspect the local Markdown and SQLite Vault](store-assets/screenshots/03-local-vault.png) |
 
-The three overview screenshots above were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture, so they retain that release's Simplified Chinese interface. The locale-specific [English pending review](store-assets/web-store/en-US/01-first-evidence-pending-review.png), [English reviewed Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png), [Simplified Chinese pending review](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png), and [Simplified Chinese reviewed Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png) images were captured and verified for v0.9.4. They are **prior-release references**: they were not recaptured from v0.9.5, do not show the new context-menu selection flow, and are not evidence that v0.9.5 has been uploaded, submitted, or approved in the Chrome Web Store.
+The three overview screenshots above were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture, so they retain that release's Simplified Chinese interface. The locale-specific [English pending review](store-assets/web-store/en-US/01-first-evidence-pending-review.png), [English reviewed Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png), [Simplified Chinese pending review](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png), and [Simplified Chinese reviewed Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png) images were regenerated twice from independent clean browser profiles using the v0.9.5 extension, the real v0.9.5 Companion, and a public deterministic fixture. Both runs reproduced the tracked PNGs byte for byte and passed the Replay-contract, sensitive-data, layout, 640×400 RGB, and deterministic-hash checks. They show the Quick Start pending/reviewed Replay states, not the new context-menu selection flow, and are not evidence that v0.9.5 has been uploaded, submitted, or approved in the Chrome Web Store.
 
 > **v0.9.5 interface coverage:** setup, pairing, Quick Start, core current-page feedback, selection saving, First Evidence, and Source Replay controls are available in English and Simplified Chinese. The interface follows the browser language by default and also offers Auto, English, and 简体中文 choices. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls remain in Simplified Chinese and are labeled accordingly.
 

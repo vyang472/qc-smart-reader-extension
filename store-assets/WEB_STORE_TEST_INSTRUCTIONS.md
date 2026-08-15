@@ -1,6 +1,6 @@
 # Chrome Web Store reviewer test instructions — QC Smart Reader v0.9.5
 
-**Handoff status:** candidate reviewer instructions for v0.9.5. The public GitHub Release and both reviewer download links have been verified without authentication. The clean-account run, Web Store upload, submission, and approval are still pending. Do not paste these instructions into the dashboard until the publisher has repeated the complete flow with the exact release extension ZIP on a clean macOS account. The screenshots currently in the repository are verified v0.9.4 prior-release references, not v0.9.5 captures or proof of submission.
+**Handoff status:** candidate reviewer instructions for v0.9.5. The public GitHub Release and both reviewer download links have been verified without authentication. The locale-specific screenshots were regenerated twice against the v0.9.5 extension and real v0.9.5 Companion and matched the tracked PNGs byte for byte; they show Quick Start rather than the context-menu selection flow. The clean-account run with the exact release ZIPs, Web Store upload, submission, and approval are still pending. Do not paste these instructions into the dashboard until the publisher has repeated the complete flow with the exact release extension ZIP on a clean macOS account. The screenshots are not proof of submission.
 
 ## Dashboard-ready instructions
 

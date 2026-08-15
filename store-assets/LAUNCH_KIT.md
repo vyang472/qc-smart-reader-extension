@@ -19,7 +19,7 @@ The launch goal is to find real users who care about verifiable research and lea
 - [x] Public repository has merged v0.9.5 source with passing CI, license, privacy policy, security policy, support guide, and contribution guide.
 - [x] The public v0.9.5 GitHub Release contains both ZIPs and `SHA256SUMS`; anonymous downloads match the published digests.
 - [x] The v0.9.5 candidate exposes direct, manifest-matched Companion and `SHA256SUMS` setup links without carrying secrets.
-- [ ] The current English and Simplified Chinese First Evidence screenshots are verified v0.9.4 prior-release references. They were not recaptured from v0.9.5 and do not show the selection context-menu flow; decide whether to recapture them before any store upload.
+- [x] The English and Simplified Chinese First Evidence screenshots were regenerated twice from independent clean profiles using the v0.9.5 extension and real v0.9.5 Companion. Both runs passed Replay-contract, sensitive-data, layout, 640×400 RGB, and deterministic-hash checks and matched the tracked PNGs byte for byte. They cover Quick Start and do not show the selection context-menu flow.
 - [ ] A clean macOS account completes install → pair → capture → evidence review → restart recovery → uninstall.
 - [ ] Issues and Discussions are enabled and monitored for the first launch week.
 - [ ] Chrome Web Store status is described accurately; do not say “available in the store” before approval.
