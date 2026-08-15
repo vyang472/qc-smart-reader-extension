@@ -24,7 +24,7 @@ This release adds a selection-first path for saving one exact quote as pending l
 ### Trust boundary
 
 - Selection saving is an explicit user gesture, stays project/tab/window scoped, preserves the exact selected text, and does not call Codex CLI, any external model provider, or developer telemetry.
-- The existing locale-specific Web Store screenshots are prior-release v0.9.4 references; they were not recaptured as v0.9.5 screenshots. The v0.9.5 GitHub Release is public and its assets were checksum-verified; Chrome Web Store upload, submission, and approval remain pending publisher actions.
+- The locale-specific Web Store screenshots were regenerated twice from independent clean profiles using the v0.9.5 extension and real v0.9.5 Companion. They reproduced the tracked PNGs byte for byte and passed Replay-contract, sensitive-data, layout, 640×400 RGB, and deterministic-hash checks. They cover Quick Start rather than the new context-menu selection flow. The v0.9.5 GitHub Release is public and its assets were checksum-verified; Chrome Web Store upload, submission, and approval remain pending publisher actions.
 
 ## [0.9.4] - 2026-08-15
 

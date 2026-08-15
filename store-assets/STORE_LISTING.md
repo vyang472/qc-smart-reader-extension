@@ -1,6 +1,6 @@
 # Chrome Web Store listing handoff — QC Smart Reader v0.9.5
 
-**Status:** v0.9.5 is a Chrome Web Store candidate. The public GitHub Release and anonymous asset-link verification are complete. The bilingual listing copy, permission explanations, data-use answers, and version-neutral small promo tile are prepared. The locale-specific Replay screenshots are verified v0.9.4 **prior-release references**, not v0.9.5 captures. Publisher-account checks, the clean-account test, screenshot decision or recapture, asset upload, dashboard submission, and approval are still pending. This file is not evidence that any of those remaining steps happened.
+**Status:** v0.9.5 is a Chrome Web Store candidate. The public GitHub Release and anonymous asset-link verification are complete. The bilingual listing copy, permission explanations, data-use answers, version-neutral small promo tile, and locale-specific Replay screenshots are prepared. The screenshots were independently regenerated and verified against the v0.9.5 extension and Companion; they cover Quick Start rather than the new context-menu selection flow. Publisher-account checks, the clean-account test with the exact release ZIPs, asset upload, dashboard submission, and approval are still pending. This file is not evidence that any of those remaining steps happened.
 
 This file records the listing copy, permission explanations, data-use answers, assets, and clean-install checks for the publisher account. Re-check the Chrome Web Store dashboard requirements on submission day.
 
@@ -124,9 +124,9 @@ Host the product's capture, review, knowledge, delivery, batch, and settings wor
 
 ## Assets
 
-The localized screenshots below were regenerated twice from independent clean browser profiles using the v0.9.4 extension, the real v0.9.4 Companion, and a public deterministic fixture. The pending screenshots show an undecided quote-backed claim with equal supported and unsupported actions and a folded Replay control. The reviewed screenshots restore the saved human decision after reopening the side panel, then expand the same service-backed Replay record to show its exact quote in captured context, locator, capture time, and current source version. The capture harness added no labels, overlays, or fabricated state, and the v0.9.4 Replay-contract, sensitive-data, layout, RGB, and deterministic-hash checks passed.
+The localized screenshots below were regenerated twice in independent processes from independent clean browser profiles using the v0.9.5 extension, the real v0.9.5 Companion, and a public deterministic fixture. The pending screenshots show an undecided quote-backed claim with equal supported and unsupported actions and a folded Replay control. The reviewed screenshots restore the saved human decision after reopening the side panel, then expand the same service-backed Replay record to show its exact quote in captured context, locator, capture time, and current source version. The capture harness added no labels, overlays, or fabricated state. Both runs passed the Replay-contract, sensitive-data, layout, and 640×400 RGB checks, produced identical SHA-256 hashes, and matched the tracked PNGs byte for byte.
 
-These files are **prior-release v0.9.4 references only**. They were not recaptured from v0.9.5, do not show the new context-menu selection flow, and must not be described as v0.9.5 screenshots or as evidence of Chrome Web Store upload, submission, or approval.
+The reproduced pixels are unchanged from the files previously verified for v0.9.4. These are valid v0.9.5 captures of the carried-forward Quick Start First Evidence and Replay states, but they do not show the new context-menu selection flow and are not evidence of Chrome Web Store upload, submission, or approval.
 
 - Store icon: `assets/icons/icon-128.png`
 - English screenshot 1: [`store-assets/web-store/en-US/01-first-evidence-pending-review.png`](web-store/en-US/01-first-evidence-pending-review.png) (640×400)
@@ -139,7 +139,7 @@ These files are **prior-release v0.9.4 references only**. They were not recaptur
 - Launch-page composites, not store screenshots: `store-assets/screenshots/`
 - Repository social card, not a store screenshot: `store-assets/social-preview.png`
 
-The PNGs currently stored directly under `store-assets/web-store/` are v0.9.1 Chinese-interface reference captures. Do not upload them as evidence of the English primary listing, and do not use the advanced Vault screenshot there while that workspace remains Chinese. The publisher must either recapture the locale-specific pairs from v0.9.5 or explicitly document the v0.9.4 pair as prior-release references after verifying that the dashboard accepts them; neither action has happened yet.
+The PNGs currently stored directly under `store-assets/web-store/` are v0.9.1 Chinese-interface reference captures. Do not upload them as evidence of the English primary listing, and do not use the advanced Vault screenshot there while that workspace remains Chinese. The locale-specific pairs listed above are the verified v0.9.5 screenshot candidates; dashboard acceptance and upload remain pending publisher actions.
 
 Before upload, confirm each screenshot matches the dashboard's current dimensions and shows no Pairing Token, API key, private URL, private source text, personal path, or browser profile data. Do not add awards, review scores, user counts, or performance claims without verifiable evidence.
 
@@ -148,7 +148,7 @@ Before upload, confirm each screenshot matches the dashboard's current dimension
 - [x] Publish the v0.9.5 GitHub Release, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
 - [x] Render the locale- and version-neutral small promo tile from its tracked SVG source; verify dimensions, visible-text/version scanning, and deterministic hashes.
 - [ ] Verify the publisher identity and required contact details in the dashboard.
-- [ ] Recapture all four localized screenshots from the v0.9.5 build, or record an explicit publisher decision to use the verified v0.9.4 files only as prior-release references; re-run dimension and sensitive-data checks before upload.
+- [x] Regenerate all four localized screenshots twice from the v0.9.5 extension and real v0.9.5 Companion; verify the Replay contract, sensitive-data scan, layout, 640×400 RGB format, deterministic hashes, and byte-for-byte match with the tracked files.
 - [ ] Upload the final approved en-US pair to the English primary listing and the zh-CN pair to the Simplified Chinese localized listing.
 - [ ] Complete privacy, permission, distribution, pricing, and tester declarations truthfully.
 - [x] Verify the v0.9.5 extension derives the direct Companion ZIP and `SHA256SUMS` targets from its manifest version without carrying a Pairing Token or other secret.
