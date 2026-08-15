@@ -6,6 +6,31 @@ All notable changes to QC Smart Reader will be documented here. The project foll
 
 No unreleased changes have been announced.
 
+## [0.9.3] - 2026-08-15
+
+This release adds Source Replay so a saved evidence decision can be inspected against the exact captured record later, without guessing a live-page position or fetching the source again.
+
+### Added
+
+- Source Replay in First Evidence, Knowledge, and claim review, with the saved source title, capture time, version and content hash; a page, floor, timestamp, or chunk locator when available; and the exact quote highlighted in its captured context.
+- Deterministic `resolved`, `stale`, and `unresolved` Replay states. Changed sources show the captured historical snapshot, while missing, mismatched, oversized, or ambiguous quotes fail closed instead of being presented as a precise match.
+- An additive versioned Replay record in evidence API responses and JSON exports, plus an Evidence Replay section in generated Markdown deliverables.
+
+### Changed
+
+- Canonical-source links are explicitly a fallback: they open the saved public HTTP(S) source but do not promise a precise remote scroll position.
+- Companion v0.9.3 keeps the v0.9.0 extension as its minimum compatible version because `API_VERSION` and `SCHEMA_VERSION` remain at 1; using both v0.9.3 archives is recommended.
+
+### Fixed
+
+- Project changes now clear evidence views before new data arrives and discard stale asynchronous responses, preventing Replay details from the previous project from remaining visible.
+- Interface-language changes preserve unsaved claim drafts, selected claims, expanded Replay panels, and their local scroll positions.
+- Markdown Replay output safely represents titles, locators, sites, legal HTTP(S) URLs, exact quotes, and context without letting their content alter document structure.
+
+### Trust boundary
+
+- Replay uses only the locally captured source and chunk. It performs no remote fetch, model call, or telemetry, hides source details on project mismatch, and never treats an ambiguous or missing exact quote as resolved.
+
 ## [0.9.2] - 2026-08-15
 
 This release makes the core path to a first reviewed piece of evidence available in English and Simplified Chinese, and makes the user's support decision explicit.
@@ -94,7 +119,8 @@ First public preview.
 - Isolated Codex CLI runs in an ephemeral restricted environment and disabled shell, web, plugin, and delegation capabilities for provider calls.
 - Added archive/input validation, dependency integrity checks, cautious installer path handling, and rollback verification.
 
-[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.0

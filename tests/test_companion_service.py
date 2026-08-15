@@ -145,8 +145,8 @@ class CompanionServiceCase(unittest.TestCase):
 
     def test_pairing_token_required_and_cors_allowlist(self) -> None:
         health = self.request("/health", token=False)
-        self.assertEqual(health["version"], "0.9.2")
-        self.assertEqual(health["service_version"], "0.9.2")
+        self.assertEqual(health["version"], "0.9.3")
+        self.assertEqual(health["service_version"], "0.9.3")
         self.assertEqual(health["api_version"], 1)
         self.assertEqual(health["schema_version"], 1)
         self.assertEqual(health["min_extension_version"], "0.9.0")

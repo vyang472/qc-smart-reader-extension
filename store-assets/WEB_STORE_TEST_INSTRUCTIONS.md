@@ -1,4 +1,4 @@
-# Chrome Web Store reviewer test instructions — QC Smart Reader v0.9.2
+# Chrome Web Store reviewer test instructions — QC Smart Reader v0.9.3
 
 **Handoff status:** pre-release draft. Do not paste it into the dashboard until every `<PUBLISHED_VERSION>` sentinel has been replaced with the published version and both public links and checksums have been verified from a signed-out browser session.
 
@@ -30,14 +30,14 @@ QC Smart Reader requires macOS, Chrome 116 or later, and the free local Companio
    Expected: QC Smart Reader saves the page in the local Vault, labels the run as the local template / Mock mode with no external model call, and shows a draft claim beside an exact quote from the page. The claim remains unreviewed.
 5. Compare the claim with its exact quote. Confirm that both supported and unsupported decisions are available, then choose supported for this fixture.
 
-   Expected: the claim remains pending until the human decision, then changes to `reviewed` and Quick Start reports completion. Choosing unsupported instead would persist a `rejected` decision.
+   Expected: the claim remains pending until the human decision, then changes to `reviewed` and Quick Start reports completion. Choosing unsupported instead would persist a `rejected` decision. Choose **Replay** and confirm it reports **Captured snapshot verified**, highlights the exact quote inside **Captured context**, and identifies the current captured source version.
 6. Close and reopen the side panel.
 
-   Expected: the same claim, exact quote, and human decision are restored from the local Companion; both decision buttons remain disabled for the decided claim.
+   Expected: the same claim, exact quote, Replay target, and human decision are restored from the local Companion; both decision buttons remain disabled for the decided claim. The canonical-source action is labeled as a fallback and does not claim a precise remote position.
 
 Optional Codex CLI, OpenAI-compatible, and Anthropic features are not needed for this review. Quick Start always uses the deterministic local template and does not send the fixture or Pairing Token to an external model or the developer.
 
-The English interface intentionally covers setup, pairing, Quick Start, core current-page feedback, and First Evidence. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls currently remain in Simplified Chinese and show an English notice where that boundary begins. This listing does not claim a fully English advanced workspace.
+The English interface intentionally covers setup, pairing, Quick Start, core current-page feedback, First Evidence, and Replay controls. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls currently remain in Simplified Chinese and show an English notice where that boundary begins. This listing does not claim a fully English advanced workspace.
 
 ## Cleanup
 
