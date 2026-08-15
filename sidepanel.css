@@ -376,6 +376,135 @@ main {
   font-weight: 700;
 }
 
+.replay-container {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.replay-action {
+  width: fit-content;
+  min-height: 36px;
+  border-color: #557d97;
+  background: #f7fbff;
+  color: #174866;
+  font-weight: 750;
+}
+
+.replay-action::after {
+  display: inline-block;
+  margin-left: 7px;
+  content: "▾";
+  transition: transform 120ms ease;
+}
+
+.replay-action[aria-expanded="true"]::after {
+  transform: rotate(180deg);
+}
+
+.replay-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #bfd1df;
+  border-radius: 8px;
+  background: #f7fafc;
+  overflow-wrap: anywhere;
+}
+
+.replay-panel[hidden] {
+  display: none;
+}
+
+.replay-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.replay-status {
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.replay-status.resolved {
+  background: #dff5ea;
+  color: #176444;
+}
+
+.replay-status.stale {
+  background: #fff0c7;
+  color: #7a4d00;
+}
+
+.replay-status.unresolved {
+  background: #fde4e4;
+  color: #8a2929;
+}
+
+.replay-locator,
+.replay-source-meta,
+.replay-provenance {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.replay-source-title {
+  line-height: 1.45;
+}
+
+.replay-snapshot-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.replay-context,
+.replay-stored-quote {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  padding: 9px;
+  border-radius: 6px;
+  background: white;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.replay-context mark {
+  padding: 1px 2px;
+  border-radius: 3px;
+  background: #ffe78b;
+  color: #382d00;
+  font-weight: 750;
+}
+
+.replay-stored-quote {
+  border-left: 3px solid #ad6a6a;
+}
+
+.replay-reason,
+.replay-source-fallback {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.replay-source-link {
+  width: fit-content;
+  color: #135f89;
+  font-size: 12px;
+  font-weight: 750;
+}
+
 @media (max-width: 360px) {
   .first-evidence-actions {
     grid-template-columns: 1fr;

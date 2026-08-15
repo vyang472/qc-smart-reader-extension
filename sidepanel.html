@@ -167,6 +167,26 @@
           <p id="quickStartClaimText" class="first-evidence-claim"></p>
           <h3 data-i18n="firstEvidence.quoteTitle">Exact quote · 原文引用</h3>
           <blockquote id="quickStartQuoteText"></blockquote>
+          <div id="quickStartReplayContainer" class="replay-container" hidden>
+            <button
+              id="quickStartReplayBtn"
+              class="replay-action"
+              type="button"
+              aria-expanded="false"
+              aria-controls="quickStartReplayPanel"
+              aria-label="Replay"
+              data-i18n="replay.action"
+              data-i18n-aria-label="replay.action"
+            >Replay</button>
+            <section
+              id="quickStartReplayPanel"
+              class="replay-panel"
+              data-replay-panel=""
+              aria-label="证据回放快照"
+              data-i18n-aria-label="replay.panelLabel"
+              hidden
+            ></section>
+          </div>
           <p class="first-evidence-prompt" data-i18n="firstEvidence.prompt">这段原文是否支持这条 claim？</p>
           <div class="first-evidence-actions">
             <button id="quickStartAcceptClaimBtn" type="button" data-i18n="firstEvidence.accept">接受：原文支持</button>

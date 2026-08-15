@@ -52,6 +52,11 @@ function createMockNode(id = "") {
     appendChild(child) {
       this.children.push(child);
     },
+    replaceChildren(...children) {
+      this.children = [...children];
+      this.innerHTML = "";
+      this.textContent = "";
+    },
     focus() {
       this.focused = true;
     },
@@ -280,6 +285,530 @@ async function createSidepanelHarness({
     }
   };
 }
+
+function replayFixture({
+  replayId = "rpl-web",
+  evidenceId = "evidence-replay",
+  claimId = "claim-replay",
+  sourceId = "source-replay",
+  source = {},
+  locator = {},
+  quoteText = "Exact <quote> & source text.",
+  contextText = "Before. Exact <quote> & source text. After.",
+  status = "resolved",
+  reason = "exact_quote_match"
+} = {}) {
+  const quoteStart = contextText.indexOf(quoteText);
+  return {
+    version: 1,
+    replay_id: replayId,
+    evidence_id: evidenceId,
+    claim_id: claimId,
+    source_id: sourceId,
+    source: {
+      open_url: "https://example.com/canonical",
+      url: "https://example.com/raw",
+      canonical_url: "https://example.com/canonical",
+      title: "Captured Source",
+      kind: "page",
+      site: "example",
+      content_hash: "sha256:captured",
+      captured_at: "2026-08-15T08:00:00Z",
+      version_index: 2,
+      is_current: true,
+      current_source_id: sourceId,
+      ...source
+    },
+    locator: {
+      type: "chunk",
+      label: "chunk 7",
+      chunk_id: "chunk-7",
+      chunk_index: 7,
+      start_offset: 100,
+      end_offset: 180,
+      provenance: "captured_chunk",
+      ...locator
+    },
+    quote: {
+      text: quoteText,
+      sha256: "sha256:quote"
+    },
+    context: {
+      text: contextText,
+      chunk_start_offset: 0,
+      chunk_end_offset: contextText.length,
+      quote_start_offset: quoteStart,
+      quote_end_offset: quoteStart < 0 ? -1 : quoteStart + quoteText.length
+    },
+    status,
+    reason
+  };
+}
+
+test("Source Replay v1 renders resolved Web, PDF, forum, and YouTube locators", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  harness.setState({ settings: { projectId: "project-replay" } });
+  const fixtures = [
+    {
+      replay: replayFixture(),
+      expected: [/Captured snapshot verified/i, /Web/i, /Chunk 8/i]
+    },
+    {
+      replay: replayFixture({
+        replayId: "rpl-pdf",
+        source: { kind: "pdf", title: "Paper.pdf" },
+        locator: { type: "page", label: "page 4", page: 4, page_start: 4, page_end: 4 }
+      }),
+      expected: [/PDF/i, /Page 4/i]
+    },
+    {
+      replay: replayFixture({
+        replayId: "rpl-forum",
+        source: { kind: "thread", site: "discussion" },
+        locator: { type: "floor", label: "floor 12", floor: 12 }
+      }),
+      expected: [/Forum/i, /Floor 12/i]
+    },
+    {
+      replay: replayFixture({
+        replayId: "rpl-youtube",
+        source: { kind: "video", site: "youtube" },
+        locator: { type: "timestamp", label: "01:05-01:12", timestamp_start: 65, timestamp_end: 72 }
+      }),
+      expected: [/YouTube/i, /01:05–01:12/i]
+    }
+  ];
+
+  for (const { replay, expected } of fixtures) {
+    const html = harness.context.renderEvidenceReplayControls({
+      id: replay.evidence_id,
+      claim_id: replay.claim_id,
+      source_id: replay.source_id,
+      replay
+    }, {
+      claimId: replay.claim_id,
+      projectId: "project-replay"
+    });
+    assert.match(html, /data-evidence-replay-id=/);
+    assert.match(html, /data-replay-panel=/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.match(html, /data-replay-panel="[^"]+"[^>]*hidden/);
+    assert.match(html, /<mark[^>]*data-replay-exact-quote/);
+    assert.match(html, /<pre[^>]*data-replay-context[^>]*tabindex="0"[^>]*aria-label="Captured context"/);
+    assert.match(html, /target="_blank"/);
+    assert.match(html, /rel="noopener noreferrer"/);
+    for (const pattern of expected) assert.match(html, pattern);
+  }
+});
+
+test("Source Replay renders stale and unresolved states without fuzzy substitution", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  harness.setState({ settings: { projectId: "project-replay" } });
+  const stale = replayFixture({
+    status: "stale",
+    reason: "source_superseded",
+    source: { is_current: false, current_source_id: "source-current" }
+  });
+  const staleHtml = harness.context.renderReplayPanelMarkup(stale);
+  assert.match(staleHtml, /Source changed; showing the captured snapshot/i);
+  assert.match(staleHtml, /Superseded by source-current/i);
+  assert.match(staleHtml, /Exact &lt;quote&gt; &amp; source text\./);
+
+  const unresolved = replayFixture({
+    replayId: "rpl-unresolved",
+    status: "unresolved",
+    reason: "quote_mismatch",
+    quoteText: "Exact quote that is absent.",
+    contextText: "A similar quote must not be highlighted."
+  });
+  const unresolvedHtml = harness.context.renderReplayPanelMarkup(unresolved);
+  assert.match(unresolvedHtml, /Exact locator unresolved/i);
+  assert.match(unresolvedHtml, /exact quote does not match/i);
+  assert.doesNotMatch(unresolvedHtml, /<mark/);
+  assert.match(unresolvedHtml, /<pre[^>]*data-replay-context[^>]*tabindex="0"[^>]*aria-label="Captured context"/);
+  assert.match(unresolvedHtml, /class="replay-stored-quote"[^>]*tabindex="0"[^>]*aria-label="Stored exact quote"/);
+  assert.match(unresolvedHtml, /class="replay-stored-quote"[^>]*>Exact quote that is absent\.<\/div>/);
+
+  const ambiguous = replayFixture({
+    replayId: "rpl-ambiguous",
+    status: "unresolved",
+    reason: "ambiguous_quote"
+  });
+  const ambiguousHtml = harness.context.renderReplayPanelMarkup(ambiguous);
+  assert.match(ambiguousHtml, /appears more than once/i);
+  assert.doesNotMatch(ambiguousHtml, /<mark/);
+
+  const oversizedQuote = "Q".repeat(801);
+  const tooLong = replayFixture({
+    replayId: "rpl-too-long",
+    status: "unresolved",
+    reason: "quote_too_long",
+    quoteText: oversizedQuote,
+    contextText: "Q".repeat(800)
+  });
+  const tooLongHtml = harness.context.renderReplayPanelMarkup(tooLong);
+  assert.match(tooLongHtml, /exceeds the replay matching limit/i);
+  assert.doesNotMatch(tooLongHtml, /<mark/);
+  assert.match(tooLongHtml, new RegExp(`class="replay-stored-quote"[^>]*>${oversizedQuote}<\\/div>`));
+});
+
+test("Source Replay suppresses unsafe links and preserves exact quote and context text", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  const quote = "  原文 <tag> & punctuation\n第二行。  ";
+  const context = `\n前文保留\n${quote}\n后文也保留\n`;
+  const replay = replayFixture({
+    source: {
+      open_url: "https://user:pass@example.com/private",
+      canonical_url: "https://example.com/must-not-be-used",
+      url: "https://example.com/must-not-be-used-either"
+    },
+    quoteText: quote,
+    contextText: context
+  });
+  const html = harness.context.renderReplayPanelMarkup(replay);
+  assert.doesNotMatch(html, /href=/);
+  assert.match(html, /\n前文保留\n/);
+  assert.match(html, /  原文 &lt;tag&gt; &amp; punctuation\n第二行。  /);
+  assert.match(html, /\n后文也保留\n/);
+
+  for (const openUrl of ["https://example.com/line\nbreak", "https://example.com/tab\tpath", "https://example.com/nul\0path"]) {
+    const controlCharacterHtml = harness.context.renderReplayPanelMarkup(replayFixture({
+      source: { open_url: openUrl }
+    }));
+    assert.doesNotMatch(controlCharacterHtml, /href=/);
+  }
+});
+
+test("Source Replay project mismatch is explicit and does not expose source or context", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  const replay = replayFixture({
+    status: "unresolved",
+    reason: "project_mismatch",
+    source: {
+      open_url: "",
+      url: "",
+      canonical_url: "",
+      title: "",
+      site: "",
+      content_hash: "",
+      captured_at: "",
+      version_index: null,
+      is_current: null,
+      current_source_id: ""
+    },
+    quoteText: "",
+    contextText: ""
+  });
+  const html = harness.context.renderReplayPanelMarkup(replay);
+  assert.match(html, /another project.*details are hidden/i);
+  assert.doesNotMatch(html, /href=/);
+  assert.doesNotMatch(html, /class="replay-context"/);
+  assert.doesNotMatch(html, /class="replay-stored-quote"/);
+});
+
+test("each First Evidence and advanced evidence entry renders exactly one folded Replay action", async () => {
+  const html = await projectFile("sidepanel.html");
+  assert.equal((html.match(/id="quickStartReplayBtn"/g) || []).length, 1);
+  assert.equal((html.match(/id="quickStartReplayPanel"/g) || []).length, 1);
+  assert.match(html, /id="quickStartReplayPanel"[\s\S]*?hidden/);
+
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  harness.setState({ settings: { projectId: "project-replay" } });
+  const replay = replayFixture();
+  const evidence = {
+    id: replay.evidence_id,
+    claim_id: replay.claim_id,
+    source_id: replay.source_id,
+    quote: replay.quote.text,
+    replay
+  };
+  const claimCard = harness.context.renderClaimEvidenceReviewCard(evidence, {
+    claimId: replay.claim_id,
+    projectId: "project-replay"
+  });
+  const knowledgeCard = harness.context.renderEvidenceRecord(evidence);
+  for (const card of [claimCard, knowledgeCard]) {
+    assert.equal((card.match(/data-evidence-replay-id=/g) || []).length, 1);
+    assert.equal((card.match(/data-replay-panel=/g) || []).length, 1);
+    assert.match(card, /aria-expanded="false"/);
+    assert.match(card, /data-replay-panel="[^"]+"[^>]*hidden/);
+    assert.match(card, /aria-label="Replay evidence from Captured Source at Web · Chunk 8"/);
+  }
+  const claimPanelId = claimCard.match(/aria-controls="([^"]+)"/)?.[1];
+  const knowledgePanelId = knowledgeCard.match(/aria-controls="([^"]+)"/)?.[1];
+  assert.ok(claimPanelId && knowledgePanelId);
+  assert.notEqual(claimPanelId, knowledgePanelId, "the same evidence produced duplicate panel ids across scopes");
+  assert.match(claimCard, new RegExp(`id="${claimPanelId}"`));
+  assert.match(knowledgeCard, new RegExp(`id="${knowledgePanelId}"`));
+
+  const advancedButton = createMockNode("advancedReplayBtn");
+  const advancedPanel = createMockNode("advancedReplayPanel");
+  advancedButton.dataset.evidenceReplayId = replay.replay_id;
+  advancedButton.setAttribute("aria-expanded", "false");
+  advancedPanel.dataset.replayPanel = replay.replay_id;
+  advancedPanel.hidden = true;
+  let advancedClickHandler = null;
+  advancedButton.addEventListener = (type, handler) => {
+    if (type === "click") advancedClickHandler = handler;
+  };
+  const advancedRoot = {
+    querySelectorAll(selector) {
+      if (selector === "[data-evidence-replay-id]") return [advancedButton];
+      if (selector === "[data-replay-panel]") return [advancedPanel];
+      return [];
+    }
+  };
+  harness.context.bindReplayActions(advancedRoot);
+  assert.equal(typeof advancedClickHandler, "function");
+  advancedClickHandler();
+  assert.equal(advancedPanel.hidden, false);
+  assert.equal(advancedButton["aria-expanded"], "true");
+});
+
+test("Source Replay stays project-isolated and locale switching changes chrome only", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "zh-CN" });
+  harness.setState({ settings: { projectId: "project-a" } });
+  const replay = replayFixture();
+  const evidence = {
+    id: replay.evidence_id,
+    claim_id: replay.claim_id,
+    source_id: replay.source_id,
+    quote: replay.quote.text,
+    replay
+  };
+  harness.context.revealQuickStartEvidence(
+    { id: replay.claim_id, project_id: "project-a", status: "extracted", text: "Claim text" },
+    evidence,
+    { focus: false, projectId: "project-a" }
+  );
+  assert.equal(harness.nodes.get("quickStartReplayContainer").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReplayPanel").hidden, true);
+  assert.equal(harness.nodes.get("quickStartReplayBtn")["aria-expanded"], "false");
+  assert.equal(harness.nodes.get("quickStartReplayPanel").dataset.replayStatus, "resolved");
+  assert.match(harness.nodes.get("quickStartReplayPanel").innerHTML, /已核验捕获快照/);
+  assert.match(harness.nodes.get("quickStartReplayPanel").innerHTML, /Exact &lt;quote&gt; &amp; source text\./);
+
+  harness.context.toggleReplayPanel(
+    harness.nodes.get("quickStartReplayBtn"),
+    harness.nodes.get("quickStartReplayPanel")
+  );
+  assert.equal(harness.nodes.get("quickStartReplayPanel").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReplayBtn")["aria-expanded"], "true");
+
+  const before = JSON.stringify(replay);
+  await harness.context.setUiLocale("en");
+  assert.equal(JSON.stringify(replay), before);
+  assert.match(harness.nodes.get("quickStartReplayPanel").innerHTML, /Captured snapshot verified/);
+  assert.match(harness.nodes.get("quickStartReplayPanel").innerHTML, /Exact &lt;quote&gt; &amp; source text\./);
+
+  harness.setState({ settings: { projectId: "project-b" } });
+  harness.context.renderQuickStartEvidenceChrome();
+  assert.equal(harness.nodes.get("quickStartReplayContainer").hidden, true);
+  assert.equal(harness.nodes.get("quickStartReplayPanel").innerHTML, "");
+  assert.equal(harness.nodes.get("quickStartReplayPanel").dataset.replayStatus, "");
+  assert.equal(
+    harness.context.renderEvidenceReplayControls(evidence, {
+      claimId: replay.claim_id,
+      projectId: "project-a"
+    }),
+    ""
+  );
+});
+
+test("locale switching redraws cached advanced Replay chrome without a network request", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "zh-CN" });
+  harness.setState({ settings: { projectId: "project-replay" } });
+  const replay = replayFixture();
+  const evidence = {
+    id: replay.evidence_id,
+    claim_id: replay.claim_id,
+    source_id: replay.source_id,
+    quote: replay.quote.text,
+    replay
+  };
+  const records = { claims: [], evidence: [evidence] };
+  const queue = [{
+    id: replay.claim_id,
+    project_id: "project-replay",
+    source_id: replay.source_id,
+    text: "Claim text",
+    status: "extracted",
+    evidence_count: 1,
+    valid_evidence_count: 1,
+    evidence: [evidence]
+  }];
+  harness.context.renderKnowledgeRecords(records);
+  harness.context.renderClaimReviewQueue(queue);
+  const knowledgeList = harness.nodes.get("knowledgeRecordList");
+  const reviewList = harness.nodes.get("claimReviewList");
+  assert.match(knowledgeList.children.at(-1).innerHTML, /已核验捕获快照/);
+  assert.match(reviewList.children.at(-1).innerHTML, /已核验捕获快照/);
+  const replayBefore = JSON.stringify(replay);
+  const fetchCount = harness.fetchCalls.length;
+
+  const beforeDraft = { dataset: { claimEditText: replay.claim_id }, value: "Unsaved edited claim" };
+  const afterDraft = { dataset: { claimEditText: replay.claim_id }, value: "Claim text" };
+  const beforeKnowledgeSelection = { value: replay.claim_id, checked: true };
+  const afterKnowledgeSelection = { value: replay.claim_id, checked: false };
+  const beforeWorkbenchSelection = { value: replay.claim_id, checked: true };
+  const afterWorkbenchSelection = { value: replay.claim_id, checked: false };
+  const beforeReplayButton = createMockNode("before-replay-button");
+  beforeReplayButton.dataset.evidenceReplayId = replay.replay_id;
+  beforeReplayButton.dataset.replayScope = "claim-review";
+  beforeReplayButton["aria-expanded"] = "true";
+  beforeReplayButton["aria-controls"] = "locale-replay-panel";
+  const afterReplayButton = createMockNode("after-replay-button");
+  afterReplayButton.dataset.evidenceReplayId = replay.replay_id;
+  afterReplayButton.dataset.replayScope = "claim-review";
+  afterReplayButton["aria-expanded"] = "false";
+  afterReplayButton["aria-controls"] = "locale-replay-panel";
+  const replayPanel = createMockNode("locale-replay-panel");
+  const beforeReplayContext = { scrollTop: 42 };
+  const afterReplayContext = { scrollTop: 0 };
+  const beforeStoredQuote = { scrollTop: 17 };
+  const afterStoredQuote = { scrollTop: 0 };
+  let replayRendered = false;
+  replayPanel.hidden = false;
+  replayPanel.querySelector = (selector) => {
+    if (selector === "[data-replay-context]") {
+      return replayRendered ? afterReplayContext : beforeReplayContext;
+    }
+    if (selector === "[data-replay-stored-quote]") {
+      return replayRendered ? afterStoredQuote : beforeStoredQuote;
+    }
+    return null;
+  };
+  harness.nodes.set("locale-replay-panel", replayPanel);
+  const selectorCalls = new Map();
+  harness.context.document.querySelectorAll = (selector) => {
+    const call = Number(selectorCalls.get(selector) || 0);
+    selectorCalls.set(selector, call + 1);
+    if (selector === "[data-claim-edit-text]") return [call === 0 ? beforeDraft : afterDraft];
+    if (selector === "[data-claim-select]") return [call === 0 ? beforeKnowledgeSelection : afterKnowledgeSelection];
+    if (selector === "[data-claim-workbench-select]") return [call === 0 ? beforeWorkbenchSelection : afterWorkbenchSelection];
+    if (selector === "[data-evidence-replay-id]") {
+      if (call > 0) {
+        replayPanel.hidden = true;
+        replayRendered = true;
+      }
+      return [call === 0 ? beforeReplayButton : afterReplayButton];
+    }
+    return [];
+  };
+
+  await harness.context.setUiLocale("en");
+
+  assert.equal(harness.fetchCalls.length, fetchCount);
+  assert.equal(JSON.stringify(replay), replayBefore);
+  assert.match(knowledgeList.children.at(-1).innerHTML, /Captured snapshot verified/);
+  assert.match(reviewList.children.at(-1).innerHTML, /Captured snapshot verified/);
+  assert.match(reviewList.children.at(-1).innerHTML, /aria-label="Replay evidence from Captured Source at Web · Chunk 8"/);
+  assert.equal(afterDraft.value, "Unsaved edited claim");
+  assert.equal(afterKnowledgeSelection.checked, true);
+  assert.equal(afterWorkbenchSelection.checked, true);
+  assert.equal(afterReplayButton["aria-expanded"], "true");
+  assert.equal(replayPanel.hidden, false);
+  assert.equal(afterReplayContext.scrollTop, 42);
+  assert.equal(afterStoredQuote.scrollTop, 17);
+});
+
+test("project switching clears Replay views synchronously and discards late project responses", async () => {
+  let resolveKnowledge;
+  let resolveReview;
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/knowledge/records") {
+        return new Promise((resolve) => { resolveKnowledge = resolve; });
+      }
+      if (call.path === "/v1/claims/review-queue") {
+        return new Promise((resolve) => { resolveReview = resolve; });
+      }
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "project-a"
+    }
+  });
+  const oldReplay = replayFixture();
+  const oldEvidence = {
+    id: oldReplay.evidence_id,
+    claim_id: oldReplay.claim_id,
+    source_id: oldReplay.source_id,
+    quote: oldReplay.quote.text,
+    replay: oldReplay
+  };
+  const oldRecords = { claims: [], evidence: [oldEvidence] };
+  const oldClaims = [{
+    id: oldReplay.claim_id,
+    project_id: "project-a",
+    text: "Project A claim",
+    status: "extracted",
+    evidence_count: 1,
+    valid_evidence_count: 1,
+    evidence: [oldEvidence]
+  }];
+  harness.context.renderKnowledgeRecords(oldRecords);
+  harness.context.renderClaimReviewQueue(oldClaims);
+  assert.ok(harness.nodes.get("knowledgeRecordList").children.length > 0);
+  assert.ok(harness.nodes.get("claimReviewList").children.length > 0);
+
+  const pendingKnowledge = harness.context.loadKnowledgeRecords();
+  const pendingReview = harness.context.loadClaimReviewQueue();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof resolveKnowledge, "function");
+  assert.equal(typeof resolveReview, "function");
+
+  harness.context.resetCurrentSourceAfterProjectChange("project-a", "project-b");
+  harness.setState({ settings: { projectId: "project-b" } });
+  assert.equal(harness.nodes.get("knowledgeRecordList").children.length, 0);
+  assert.equal(harness.nodes.get("claimReviewList").children.length, 0);
+  assert.equal(harness.run("state.claimReviewQueue.length"), 0);
+  assert.equal(harness.run("Object.keys(state.knowledgeRecords).length"), 0);
+
+  resolveKnowledge({ ok: true, ...oldRecords });
+  resolveReview({ ok: true, claims: oldClaims });
+  await Promise.all([pendingKnowledge, pendingReview]);
+
+  assert.equal(harness.nodes.get("knowledgeRecordList").children.length, 0);
+  assert.equal(harness.nodes.get("claimReviewList").children.length, 0);
+  assert.equal(harness.run("state.claimReviewQueue.length"), 0);
+  assert.equal(harness.run("Object.keys(state.knowledgeRecords).length"), 0);
+});
+
+test("changeProject clears project-bound knowledge before its first awaited persistence step", async () => {
+  const harness = await createSidepanelHarness();
+  harness.setState({ settings: { projectId: "project-a" } });
+  const replay = replayFixture();
+  const evidence = {
+    id: replay.evidence_id,
+    claim_id: replay.claim_id,
+    source_id: replay.source_id,
+    quote: replay.quote.text,
+    replay
+  };
+  harness.context.renderKnowledgeRecords({ evidence: [evidence] });
+  harness.context.renderClaimReviewQueue([{
+    id: replay.claim_id,
+    project_id: "project-a",
+    text: "Project A claim",
+    evidence_count: 1,
+    evidence: [evidence]
+  }]);
+  harness.context.document.getElementById("projectSelect").value = "project-b";
+  harness.run(`
+    saveBatchQueue = async () => new Promise(() => {});
+    globalThis.pendingProjectSwitch = changeProject();
+  `);
+
+  assert.equal(harness.nodes.get("knowledgeRecordList").children.length, 0);
+  assert.equal(harness.nodes.get("claimReviewList").children.length, 0);
+  assert.equal(harness.run("state.claimReviewQueue.length"), 0);
+  assert.equal(harness.run("Object.keys(state.knowledgeRecords).length"), 0);
+});
 
 test("sidepanel wires service-owned batch dispatch and heartbeat controls", async () => {
   const html = await projectFile("sidepanel.html");
@@ -1169,7 +1698,16 @@ test("Quick Start creates a real quote-backed first evidence chain and restores 
     evidence: [{
       id: "evidence-first",
       claim_id: "claim-first",
-      quote: "This fixture page has enough body text to be saved by the companion service."
+      source_id: "source-first",
+      quote: "This fixture page has enough body text to be saved by the companion service.",
+      replay: replayFixture({
+        replayId: "rpl-first",
+        evidenceId: "evidence-first",
+        claimId: "claim-first",
+        sourceId: "source-first",
+        quoteText: "This fixture page has enough body text to be saved by the companion service.",
+        contextText: "Before. This fixture page has enough body text to be saved by the companion service. After."
+      })
     }]
   };
   const harness = await createSidepanelHarness({
@@ -1224,6 +1762,8 @@ test("Quick Start creates a real quote-backed first evidence chain and restores 
   assert.equal(harness.nodes.get("quickStartClaimText").textContent, records.claims[0].text);
   assert.equal(harness.nodes.get("quickStartQuoteText").textContent, records.evidence[0].quote);
   assert.equal(harness.nodes.get("quickStartEvidence").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReplayContainer").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReplayPanel").hidden, true);
   assert.match(harness.storageState.onboardingMilestones.claimReadyAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(harness.storageState.onboardingMilestones.firstClaimId, "claim-first");
   assert.equal(harness.storageState.onboardingMilestones.firstEvidenceId, "evidence-first");
@@ -1249,6 +1789,9 @@ test("Quick Start creates a real quote-backed first evidence chain and restores 
   assert.equal(harness.nodes.get("quickStartProgress").classList.contains("done"), true);
   assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, true);
   assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, true);
+  assert.equal(harness.nodes.get("quickStartReplayContainer").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReplayPanel").dataset.replayStatus, "resolved");
+  assert.match(harness.nodes.get("quickStartReplayPanel").innerHTML, /This fixture page has enough body text/);
 
   const restored = await createSidepanelHarness();
   restored.storageState.onboardingMilestones = structuredClone(harness.storageState.onboardingMilestones);
@@ -1433,6 +1976,14 @@ test("Quick Start restore requires the server claim to remain reviewed", async (
 });
 
 test("First Evidence persists and restores a rejected decision without treating it as failure", async () => {
+  const rejectedReplay = replayFixture({
+    replayId: "rpl-reject",
+    evidenceId: "evidence-reject",
+    claimId: "claim-reject",
+    sourceId: "source-reject",
+    quoteText: "A quote about something else.",
+    contextText: "Before. A quote about something else. After."
+  });
   const harness = await createSidepanelHarness({
     uiLanguage: "en-US",
     fetchHandler: async (call) => {
@@ -1459,13 +2010,22 @@ test("First Evidence persists and restores a rejected decision without treating 
   });
   harness.context.revealQuickStartEvidence(
     { id: "claim-reject", project_id: "default", status: "pending_validation", text: "Unsupported claim" },
-    { id: "evidence-reject", claim_id: "claim-reject", quote: "A quote about something else." },
+    {
+      id: "evidence-reject",
+      claim_id: "claim-reject",
+      source_id: "source-reject",
+      quote: "A quote about something else.",
+      replay: rejectedReplay
+    },
     { focus: false }
   );
 
   harness.context.setBusy(true);
   assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, true);
   assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, true);
+  assert.equal(harness.nodes.get("quickStartReplayContainer").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReplayPanel").dataset.replayStatus, "resolved");
+  assert.match(harness.nodes.get("quickStartReplayPanel").innerHTML, /A quote about something else\./);
   harness.context.setBusy(false);
   assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, false);
   assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, false);
@@ -1484,6 +2044,8 @@ test("First Evidence persists and restores a rejected decision without treating 
   assert.match(harness.nodes.get("quickStartReviewStatus").textContent, /marked unsupported/i);
   assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, true);
   assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, true);
+  assert.equal(harness.nodes.get("quickStartReplayContainer").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReplayPanel").dataset.replayStatus, "resolved");
 
   const restored = await createSidepanelHarness({ uiLanguage: "en-US" });
   restored.setState({
@@ -1492,12 +2054,19 @@ test("First Evidence persists and restores a rejected decision without treating 
   });
   const didRestore = restored.context.restoreQuickStartEvidenceFromRecords({
     claims: [{ id: "claim-reject", project_id: "default", status: "rejected", text: "Unsupported claim" }],
-    evidence: [{ id: "evidence-reject", claim_id: "claim-reject", quote: "A quote about something else." }]
+    evidence: [{
+      id: "evidence-reject",
+      claim_id: "claim-reject",
+      source_id: "source-reject",
+      quote: "A quote about something else.",
+      replay: rejectedReplay
+    }]
   });
   assert.equal(didRestore, true);
   assert.equal(restored.nodes.get("quickStartProgress").textContent, "3 / 3");
   assert.match(restored.nodes.get("quickStartStatus").textContent, /claim was marked unsupported/i);
   assert.match(restored.nodes.get("quickStartReviewStatus").textContent, /marked unsupported/i);
+  assert.equal(restored.nodes.get("quickStartReplayContainer").hidden, false);
 });
 
 test("a rejected First Evidence decision becomes pending again when server status no longer matches", async () => {
