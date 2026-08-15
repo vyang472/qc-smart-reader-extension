@@ -20,6 +20,7 @@ The launch goal is to find real users who care about verifiable research and lea
 - [x] The public v0.9.5 GitHub Release contains both ZIPs and `SHA256SUMS`; anonymous downloads match the published digests.
 - [x] The v0.9.5 candidate exposes direct, manifest-matched Companion and `SHA256SUMS` setup links without carrying secrets.
 - [x] The English and Simplified Chinese First Evidence screenshots were regenerated twice from independent clean profiles using the v0.9.5 extension and real v0.9.5 Companion. Both runs passed Replay-contract, sensitive-data, layout, 640×400 RGB, and deterministic-hash checks and matched the tracked PNGs byte for byte. They cover Quick Start and do not show the selection context-menu flow.
+- [x] The README selection demo was generated twice from clean profiles using the real v0.9.5 extension and Companion. Its five states show a public exact selection, pending First Evidence, resolved Replay, an explicit human decision, and restoration after reopening; both runs and the final 960×540 GIF matched byte for byte, invoked zero model/agent runs, and passed the sensitive-value scan. The opening caption names the native context-menu action because Playwright cannot render that Chrome-owned menu.
 - [ ] A clean macOS account completes install → pair → capture → evidence review → restart recovery → uninstall.
 - [ ] Issues and Discussions are enabled and monitored for the first launch week.
 - [ ] Chrome Web Store status is described accurately; do not say “available in the store” before approval.
@@ -52,6 +53,7 @@ The v0.9.5 candidate is macOS-first. Chrome Developer mode remains necessary unt
 - **Website:** https://github.com/vyang472/qc-smart-reader-extension
 - **Thumbnail:** `store-assets/product-hunt-thumbnail.png`
 - **Gallery:** `store-assets/screenshots/01-capture.png`, `02-evidence-review.png`, `03-local-vault.png`
+- **README workflow demo:** `store-assets/demo/selection-first-evidence.gif` (not a Chrome Web Store screenshot)
 
 ### Short description
 

@@ -16,6 +16,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "demo:capture": "node scripts/capture_selection_demo.mjs",
     "test": "bash scripts/test_all.sh",
     "test:node": "node --test --test-reporter=tap tests/test_*.mjs",
     "release:check": "python3 scripts/release.py --check",
