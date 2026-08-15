@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_SCRIPT = ROOT / "scripts" / "release.py"
-EXPECTED_VERSION = "0.9.2"
+EXPECTED_VERSION = "0.9.3"
 EXPECTED_MIN_EXTENSION_VERSION = "0.9.0"
 EXPECTED_EXTENSION_FILES = {
     "LICENSE",
@@ -277,8 +277,8 @@ class ReleaseArtifactTests(unittest.TestCase):
             server_path = source / "companion_service" / "server.py"
             server_path.write_text(
                 server_path.read_text(encoding="utf-8").replace(
-                    'SERVICE_VERSION = "0.9.2"',
                     'SERVICE_VERSION = "0.9.3"',
+                    'SERVICE_VERSION = "0.9.4"',
                     1,
                 ),
                 encoding="utf-8",
@@ -293,7 +293,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             server_path.write_text(
                 server_path.read_text(encoding="utf-8").replace(
                     'MIN_EXTENSION_VERSION = "0.9.0"',
-                    'MIN_EXTENSION_VERSION = "0.9.3"',
+                    'MIN_EXTENSION_VERSION = "0.9.4"',
                     1,
                 ),
                 encoding="utf-8",
@@ -303,7 +303,7 @@ class ReleaseArtifactTests(unittest.TestCase):
 
     def test_release_rejects_installer_contract_drift(self) -> None:
         for original, replacement, message in (
-            ('REQUIRED_SERVICE_VERSION="0.9.2"', 'REQUIRED_SERVICE_VERSION="0.9.3"', "installer service version"),
+            ('REQUIRED_SERVICE_VERSION="0.9.3"', 'REQUIRED_SERVICE_VERSION="0.9.4"', "installer service version"),
             ('REQUIRED_API_VERSION="1"', 'REQUIRED_API_VERSION="2"', "installer API version"),
         ):
             with self.subTest(replacement=replacement), tempfile.TemporaryDirectory(
@@ -320,8 +320,8 @@ class ReleaseArtifactTests(unittest.TestCase):
 
     def test_release_rejects_package_metadata_version_drift(self) -> None:
         for relative, old, new in (
-            ("package.json", '"version": "0.9.2"', '"version": "0.9.3"'),
-            ("package-lock.json", '"version": "0.9.2"', '"version": "0.9.3"'),
+            ("package.json", '"version": "0.9.3"', '"version": "0.9.4"'),
+            ("package-lock.json", '"version": "0.9.3"', '"version": "0.9.4"'),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory(
                 prefix="qc-release-package-version-drift-"

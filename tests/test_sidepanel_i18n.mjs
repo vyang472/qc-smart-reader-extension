@@ -207,13 +207,13 @@ test("reviewed and pending-verification messages are localized without translati
       error: {
         i18nKey: "companion.error.apiMismatch",
         params: {
-          extensionVersion: "0.9.2",
+          extensionVersion: "0.9.3",
           requiredApi: 1,
           actualApi: { i18nKey: "companion.value.legacyUnknown" }
         }
       }
     }),
-    "The local Companion is unavailable: Extension 0.9.2 requires Companion API 1; the current API is legacy or unknown. Update and restart the Companion."
+    "The local Companion is unavailable: Extension 0.9.3 requires Companion API 1; the current API is legacy or unknown. Update and restart the Companion."
   );
 });
 
