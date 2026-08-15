@@ -81,10 +81,11 @@ start_health_fixture() {
   expected_token="$6"
   auth_status="${7:-200}"
   api_version="${8:-1}"
+  capabilities="${9:-selection_first_evidence_v1}"
   QC_FIXTURE_PORT="$port" QC_FIXTURE_APP="$app" QC_FIXTURE_TOKEN_PATH="$token_path" \
     QC_FIXTURE_DATA_DIR="$data_dir" QC_FIXTURE_VAULT_DIR="$vault_dir" \
     QC_FIXTURE_EXPECTED_TOKEN="$expected_token" QC_FIXTURE_AUTH_STATUS="$auth_status" \
-    QC_FIXTURE_API_VERSION="$api_version" \
+    QC_FIXTURE_API_VERSION="$api_version" QC_FIXTURE_CAPABILITIES="$capabilities" \
     "$PYTHON" -c '
 import json
 import os
@@ -102,6 +103,9 @@ payload = {
 api_version = os.environ["QC_FIXTURE_API_VERSION"]
 if api_version != "legacy":
     payload["api_version"] = int(api_version)
+capabilities = os.environ["QC_FIXTURE_CAPABILITIES"]
+if capabilities != "missing":
+    payload["capabilities"] = [item for item in capabilities.split(",") if item]
 expected_token = os.environ["QC_FIXTURE_EXPECTED_TOKEN"]
 auth_status = int(os.environ["QC_FIXTURE_AUTH_STATUS"])
 
@@ -165,7 +169,7 @@ run_start() {
   set -e
 }
 
-printf '[1/12] Reuses only a strictly valid service and copies its authenticated token\n'
+printf '[1/13] Reuses only a strictly valid service and copies its authenticated token\n'
 make_layout reuse "$VALID_TOKEN" 600
 reuse_data="$LAYOUT_DATA"
 reuse_vault="$LAYOUT_VAULT"
@@ -197,7 +201,28 @@ assert_contains "$reuse_output" "Pairing Token copied to clipboard"
 [ "$(cat "$clipboard_output")" = "$VALID_TOKEN" ] || fail_test "pbcopy fixture received the wrong token"
 kill -0 "$reuse_pid" 2>/dev/null || fail_test "Reusing the service must not terminate it"
 
-printf '[2/12] Rejects an existing QC service with a different explicit data dir\n'
+printf '[2/13] Rejects API v1 services missing Selection First Evidence before reading or copying the token\n'
+make_layout missing-capability "$VALID_TOKEN" 600
+missing_capability_port="$(free_port)"
+start_health_fixture \
+  "$missing_capability_port" "QC Smart Reader" "$LAYOUT_DATA" "$LAYOUT_TOKEN" \
+  "$LAYOUT_VAULT" "$VALID_TOKEN" 200 1 missing
+missing_capability_pid="$FIXTURE_PID"
+missing_capability_output="$TEST_DIR/missing-capability.out"
+missing_capability_clipboard="$TEST_DIR/missing-capability-clipboard.txt"
+run_start "$missing_capability_output" \
+  QC_START_PORT="$missing_capability_port" \
+  QC_START_PBCOPY="$fake_pbcopy" \
+  QC_CLIPBOARD_OUTPUT="$missing_capability_clipboard"
+[ "$START_EXIT" -ne 0 ] || fail_test "A Companion without Selection First Evidence must not be reused"
+assert_contains "$missing_capability_output" "missing required capability 'selection_first_evidence_v1'"
+assert_contains "$missing_capability_output" "Update Companion from the same release"
+assert_not_contains "$missing_capability_output" "$VALID_TOKEN"
+[ ! -e "$missing_capability_clipboard" ] || fail_test "An incompatible Companion token must not reach pbcopy"
+kill -0 "$missing_capability_pid" 2>/dev/null || fail_test "Rejected old Companion must not be terminated"
+stop_fixture "$missing_capability_pid"
+
+printf '[3/13] Rejects an existing QC service with a different explicit data dir\n'
 mismatch_output="$TEST_DIR/data-dir-mismatch.out"
 set +e
 env \
@@ -213,7 +238,7 @@ assert_contains "$mismatch_output" "not requested"
 kill -0 "$reuse_pid" 2>/dev/null || fail_test "A data-dir mismatch must not terminate the existing service"
 stop_fixture "$reuse_pid"
 
-printf '[3/12] Never reads or copies a lookalike health endpoint external file\n'
+printf '[4/13] Never reads or copies a lookalike health endpoint external file\n'
 make_layout external "$VALID_TOKEN" 600
 external_port="$(free_port)"
 start_health_fixture "$external_port" "QC Smart Reader" "$LAYOUT_DATA" "$ROOT/requirements.txt" "$LAYOUT_VAULT" "$VALID_TOKEN"
@@ -231,7 +256,7 @@ assert_not_contains "$external_output" "pypdf"
 kill -0 "$external_pid" 2>/dev/null || fail_test "Rejected lookalike listener must not be terminated"
 stop_fixture "$external_pid"
 
-printf '[4/12] Rejects malformed, over-permissive, and symlink token files\n'
+printf '[5/13] Rejects malformed, over-permissive, and symlink token files\n'
 for variant in malformed permissive symlink; do
   case "$variant" in
     malformed)
@@ -263,7 +288,7 @@ for variant in malformed permissive symlink; do
   stop_fixture "$variant_pid"
 done
 
-printf '[5/12] Rejects a valid-looking listener when the authenticated probe returns 403\n'
+printf '[6/13] Rejects a valid-looking listener when the authenticated probe returns 403\n'
 make_layout auth403 "$VALID_TOKEN" 600
 auth_port="$(free_port)"
 start_health_fixture "$auth_port" "QC Smart Reader" "$LAYOUT_DATA" "$LAYOUT_TOKEN" "$LAYOUT_VAULT" "$VALID_TOKEN" 403
@@ -281,7 +306,7 @@ assert_not_contains "$auth_output" "$VALID_TOKEN"
 kill -0 "$auth_pid" 2>/dev/null || fail_test "Auth-rejected listener must not be terminated"
 stop_fixture "$auth_pid"
 
-printf '[6/12] Rejects a foreign application without terminating it\n'
+printf '[7/13] Rejects a foreign application without terminating it\n'
 make_layout foreign "$VALID_TOKEN" 600
 foreign_port="$(free_port)"
 start_health_fixture "$foreign_port" "Not QC Smart Reader" "$LAYOUT_DATA" "$LAYOUT_TOKEN" "$LAYOUT_VAULT" "$VALID_TOKEN"
@@ -293,7 +318,7 @@ assert_contains "$foreign_output" "identity"
 kill -0 "$foreign_pid" 2>/dev/null || fail_test "Foreign listener must not be terminated"
 stop_fixture "$foreign_pid"
 
-printf '[7/12] Rejects legacy or incompatible API services without reading their token\n'
+printf '[8/13] Rejects legacy or incompatible API services without reading their token\n'
 for fixture_api in legacy 2; do
   make_layout "api-$fixture_api" "$VALID_TOKEN" 600
   incompatible_port="$(free_port)"
@@ -315,7 +340,7 @@ for fixture_api in legacy 2; do
   stop_fixture "$incompatible_pid"
 done
 
-printf '[8/12] Cleans up the process it launched after a health timeout\n'
+printf '[9/13] Cleans up the process it launched after a health timeout\n'
 stalled_port="$(free_port)"
 stalled_pid_path="$TEST_DIR/stalled.pid"
 stalled_server="$TEST_DIR/stalled_service.py"
@@ -346,7 +371,7 @@ if kill -0 "$stalled_pid" 2>/dev/null; then
   fail_test "Failed startup left process $stalled_pid running"
 fi
 
-printf '[9/12] Finder-style PATH exposes an explicit local tool directory to the server\n'
+printf '[10/13] Finder-style PATH exposes an explicit local tool directory to the server\n'
 tool_bin="$TEST_DIR/tool-bin"
 mkdir -p "$tool_bin"
 for tool_name in codex yt-dlp; do
@@ -394,6 +419,7 @@ health = {
     "api_version": 1,
     "schema_version": 1,
     "min_extension_version": "0.9.0",
+    "capabilities": ["selection_first_evidence_v1"],
     "data_dir": str(data_dir),
     "vault_dir": str(vault_dir),
     "pairing_token_path": str(token_path),
@@ -446,12 +472,12 @@ assert_contains "$tool_path_record" "PATH=$tool_bin:"
 assert_not_contains "$tool_path_record" "relative-path"
 assert_contains "$tool_output" "Service is up."
 
-printf '[10/12] Duplicate user PATH entries are not added twice\n'
+printf '[11/13] Duplicate user PATH entries are not added twice\n'
 path_line="$(grep '^PATH=' "$tool_path_record")"
 tool_occurrences="$(printf '%s' "$path_line" | awk -F"$tool_bin" '{print NF-1}')"
 [ "$tool_occurrences" -eq 1 ] || fail_test "QC_START_TOOL_PATH was duplicated in PATH"
 
-printf '[11/12] A same-version forged package with a self-consistent RECORD is rejected before startup\n'
+printf '[12/13] A same-version forged package with a self-consistent RECORD is rejected before startup\n'
 tampered_venv="$TEST_DIR/tampered-venv"
 "$PYTHON" -m venv "$tampered_venv"
 tampered_site="$("$tampered_venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
@@ -505,7 +531,7 @@ set -e
 assert_contains "$tampered_output" "Installing exact locked requirements"
 [ ! -e "$never_started_marker" ] || fail_test "The service started with a modified locked dependency"
 
-printf '[12/12] Non-interactive failures never pause for input\n'
+printf '[13/13] Non-interactive failures never pause for input\n'
 assert_contains "$stalled_output" "[x]"
 
-printf 'start.command tests passed (12 cases).\n'
+printf 'start.command tests passed (13 cases).\n'

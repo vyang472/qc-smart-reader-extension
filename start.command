@@ -59,6 +59,7 @@ RUNTIME_MANIFEST="$REPO_DIR/companion_service/runtime_manifest.json"
 HOST="${QC_START_HOST:-127.0.0.1}"
 PORT="${QC_START_PORT:-37621}"
 REQUIRED_API_VERSION=1
+REQUIRED_SERVICE_CAPABILITY="selection_first_evidence_v1"
 REQUESTED_DATA_DIR=""
 HEALTH_ATTEMPTS="${QC_START_HEALTH_ATTEMPTS:-40}"
 HEALTH_INTERVAL="${QC_START_HEALTH_INTERVAL:-0.5}"
@@ -140,7 +141,7 @@ fetch_health() {
   esac
 }
 
-is_qc_health() {
+is_qc_api_health() {
   printf '%s' "$1" | "$PYTHON" -c '
 import json
 import sys
@@ -157,6 +158,27 @@ valid = (
 )
 raise SystemExit(0 if valid else 1)
 ' "$REQUIRED_API_VERSION" >/dev/null 2>&1
+}
+
+has_required_service_capability() {
+  printf '%s' "$1" | "$PYTHON" -c '
+import json
+import sys
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+capabilities = payload.get("capabilities")
+valid = (
+    isinstance(capabilities, list)
+    and sys.argv[1] in capabilities
+)
+raise SystemExit(0 if valid else 1)
+' "$REQUIRED_SERVICE_CAPABILITY" >/dev/null 2>&1
+}
+
+is_qc_health() {
+  is_qc_api_health "$1" && has_required_service_capability "$1"
 }
 
 health_field() {
@@ -339,8 +361,9 @@ print_pairing_info() {
 }
 
 # Reuse only a listener that proves it is this application, speaks the exact
-# compatible API contract, and accepts its protected local credential. A
-# foreign or legacy process must never be reused, read from, or terminated.
+# compatible API contract and required capability, and accepts its protected
+# local credential. A foreign or legacy process must never be reused, read
+# from, or terminated.
 EXISTING_HEALTH="$(fetch_health)"
 PORT_IN_USE=0
 if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -359,6 +382,10 @@ if [ "$PORT_IN_USE" -eq 1 ] || [ -n "$EXISTING_HEALTH" ]; then
     [ "$result" -eq 0 ] || fail "The existing QC service returned malformed pairing information."
     pause_if_interactive
     exit 0
+  fi
+  if is_qc_api_health "$EXISTING_HEALTH" \
+    && ! has_required_service_capability "$EXISTING_HEALTH"; then
+    fail "QC Smart Reader on port $PORT is missing required capability '$REQUIRED_SERVICE_CAPABILITY'. Update Companion from the same release, stop the old service, then rerun start.command (or choose another --port)."
   fi
   fail "Port $PORT is already in use, but its identity, secure pairing metadata, or authenticated API check is invalid. Stop that process or choose another --port."
 fi

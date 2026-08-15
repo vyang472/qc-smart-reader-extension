@@ -145,11 +145,12 @@ class CompanionServiceCase(unittest.TestCase):
 
     def test_pairing_token_required_and_cors_allowlist(self) -> None:
         health = self.request("/health", token=False)
-        self.assertEqual(health["version"], "0.9.4")
-        self.assertEqual(health["service_version"], "0.9.4")
+        self.assertEqual(health["version"], "0.9.5")
+        self.assertEqual(health["service_version"], "0.9.5")
         self.assertEqual(health["api_version"], 1)
         self.assertEqual(health["schema_version"], 1)
         self.assertEqual(health["min_extension_version"], "0.9.0")
+        self.assertIn("selection_first_evidence_v1", health["capabilities"])
         self.assertTrue(health["pairing_required"])
         self.assertTrue(Path(health["pairing_token_path"]).exists())
         self.assertEqual(self.db_rows("PRAGMA user_version")[0][0], 1)
@@ -6732,6 +6733,778 @@ class CompanionServiceCase(unittest.TestCase):
         finally:
             db.close()
         self.assertEqual(after_count, before_count, "Replay serialization must not mutate legacy source versions")
+
+    def test_selection_first_evidence_is_pending_exact_idempotent_and_zero_model(self) -> None:
+        quote = "A selected passage becomes\nreviewable  ```evidence``` without calling a model."
+        context = (
+            "The reader keeps a bounded snapshot before the selected passage. "
+            f"{quote} "
+            "The captured context remains available for later human verification."
+        )
+        capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/research#selection",
+                    "canonical_url": "https://example.com/research",
+                    "title": "Selection First Evidence",
+                    "site": "example.com",
+                },
+                "content": {"text": context, "markdown": context},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        payload = {
+            "project_id": "default",
+            "quote": quote,
+        }
+
+        first = self.request(
+            f"/v1/sources/{source_id}/first-evidence",
+            payload,
+            method="POST",
+        )
+        second = self.request(
+            f"/v1/sources/{source_id}/first-evidence",
+            payload,
+            method="POST",
+        )
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["source"]["id"], source_id)
+        claim = first["claim"]
+        evidence = first["evidence"]
+        self.assertEqual(claim["text"], quote)
+        self.assertEqual(claim["status"], "pending_validation")
+        self.assertEqual(evidence["quote"], quote)
+        self.assertEqual(evidence["status"], "pending_validation")
+        self.assertTrue(evidence["citation_valid"])
+        self.assertEqual(evidence["replay"]["status"], "resolved")
+        self.assertEqual(evidence["replay"]["reason"], "exact_quote_match")
+        replay_context = evidence["replay"]["context"]
+        self.assertEqual(
+            replay_context["text"][
+                replay_context["quote_start_offset"] : replay_context["quote_end_offset"]
+            ],
+            quote,
+        )
+        self.assertEqual(second["claim"]["id"], claim["id"])
+        self.assertEqual(second["evidence"]["id"], evidence["id"])
+        self.assertTrue(second["reused"]["claim"])
+        self.assertTrue(second["reused"]["evidence"])
+        self.assertEqual(len(self.db_rows("SELECT id FROM claims WHERE source_id = ?", (source_id,))), 1)
+        self.assertEqual(len(self.db_rows("SELECT id FROM evidence WHERE source_id = ?", (source_id,))), 1)
+        self.assertEqual(len(self.db_rows("SELECT id FROM agent_runs WHERE source_id = ?", (source_id,))), 0)
+
+    def test_selection_first_evidence_long_unicode_quote_offsets_are_exact(self) -> None:
+        quote = "🙂" + ("x" * 799)
+        context = f"prefix before the quote 🙂\n{quote}\nsuffix after the quote"
+        capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/long-unicode-selection",
+                    "title": "Long Unicode Selection",
+                },
+                "content": {"text": context, "markdown": context},
+                "browser": {},
+            },
+            method="POST",
+        )
+
+        result = self.request(
+            f"/v1/sources/{capture['source']['id']}/first-evidence",
+            {"project_id": "default", "quote": quote},
+            method="POST",
+        )
+        replay = result["evidence"]["replay"]
+        replay_context = replay["context"]
+
+        self.assertEqual(len(quote), 800)
+        self.assertEqual(replay["status"], "resolved")
+        self.assertEqual(replay["reason"], "exact_quote_match")
+        self.assertLessEqual(len(replay_context["text"]), 800)
+        self.assertGreaterEqual(replay_context["quote_start_offset"], 0)
+        self.assertLessEqual(replay_context["quote_end_offset"], len(replay_context["text"]))
+        self.assertEqual(
+            replay_context["text"][
+                replay_context["quote_start_offset"] : replay_context["quote_end_offset"]
+            ],
+            quote,
+        )
+
+    def test_selection_first_evidence_fails_closed_without_creating_records(self) -> None:
+        repeated_quote = "duplicate exact quote"
+        context = f"Before {repeated_quote}; between; {repeated_quote}; after."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/repeated-selection",
+                    "canonical_url": "https://example.com/repeated-selection",
+                    "title": "Ambiguous Selection",
+                    "site": "example.com",
+                },
+                "content": {"text": context, "markdown": context},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+
+        rejected_payloads = [
+            ("missing-project", {"quote": repeated_quote}, "missing_project_id"),
+            ("empty", {"project_id": "default", "quote": ""}, "missing_quote"),
+            ("ambiguous", {"project_id": "default", "quote": repeated_quote}, "ambiguous"),
+            ("missing", {"project_id": "default", "quote": "not in the snapshot"}, "exact"),
+            ("too-long", {"project_id": "default", "quote": "x" * 801}, "800"),
+        ]
+        for case_name, payload, message in rejected_payloads:
+            with self.subTest(case=case_name):
+                with self.assertRaisesRegex(AssertionError, rf"(?s)HTTP 400:.*{message}"):
+                    self.request(
+                        f"/v1/sources/{source_id}/first-evidence",
+                        payload,
+                        method="POST",
+                    )
+
+        other_project = self.request("/v1/projects", {"name": "Other Project"}, method="POST")["project"]
+        with self.assertRaisesRegex(AssertionError, "(?s)HTTP 400:.*project"):
+            self.request(
+                f"/v1/sources/{source_id}/first-evidence",
+                {
+                    "project_id": other_project["id"],
+                    "quote": repeated_quote,
+                },
+                method="POST",
+            )
+
+        self.assertEqual(len(self.db_rows("SELECT id FROM claims WHERE source_id = ?", (source_id,))), 0)
+        self.assertEqual(len(self.db_rows("SELECT id FROM evidence WHERE source_id = ?", (source_id,))), 0)
+
+        cross_chunk_quote = "the quote appears in both captured chunks"
+        cross_chunk = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/cross-chunk-selection",
+                    "title": "Cross Chunk Selection",
+                },
+                "content": {
+                    "text": f"Page one {cross_chunk_quote}. Page two {cross_chunk_quote}.",
+                    "markdown": f"Page one {cross_chunk_quote}. Page two {cross_chunk_quote}.",
+                    "pages": [
+                        {"page": 1, "text": f"Page one {cross_chunk_quote}."},
+                        {"page": 2, "text": f"Page two {cross_chunk_quote}."},
+                    ],
+                },
+                "browser": {},
+            },
+            method="POST",
+        )
+        cross_chunk_source_id = cross_chunk["source"]["id"]
+        with self.assertRaisesRegex(AssertionError, "(?s)HTTP 400:.*ambiguous_quote"):
+            self.request(
+                f"/v1/sources/{cross_chunk_source_id}/first-evidence",
+                {"project_id": "default", "quote": cross_chunk_quote},
+                method="POST",
+            )
+        self.assertEqual(
+            len(self.db_rows("SELECT id FROM claims WHERE source_id = ?", (cross_chunk_source_id,))),
+            0,
+        )
+
+        overlap = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/overlap-selection",
+                    "title": "Overlapping Selection",
+                },
+                "content": {"text": "aaaa", "markdown": "aaaa"},
+                "browser": {},
+            },
+            method="POST",
+        )
+        with self.assertRaisesRegex(AssertionError, "(?s)HTTP 400:.*ambiguous_quote"):
+            self.request(
+                f"/v1/sources/{overlap['source']['id']}/first-evidence",
+                {"project_id": "default", "quote": "aaa"},
+                method="POST",
+            )
+
+    def test_selection_first_evidence_downgrades_machine_state_and_reports_post_commit_warnings(self) -> None:
+        quote = "A user selection must return to pending even if a machine draft already exists."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/selection-machine-collision",
+                    "title": "Selection Machine Collision",
+                },
+                "content": {"text": quote, "markdown": quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        chunk_id = capture["chunks"][0]["id"]
+        machine_records = self.request(
+            "/v1/knowledge/records",
+            {
+                "project_id": "default",
+                "source_id": source_id,
+                "claims": [
+                    {
+                        "text": quote,
+                        "evidence": [
+                            {
+                                "source_id": source_id,
+                                "chunk_id": chunk_id,
+                                "quote": quote,
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        self.assertEqual(machine_records["claims"][0]["status"], "extracted")
+
+        with mock.patch.object(
+            self.store,
+            "write_knowledge_wiki_pages",
+            side_effect=OSError("disk unavailable"),
+        ):
+            with mock.patch.object(self.store, "append_log", side_effect=OSError("log unavailable")):
+                with mock.patch.object(self.store, "rebuild_index", side_effect=OSError("index unavailable")):
+                    result = self.store.create_first_evidence_for_source(
+                        source_id,
+                        {"project_id": "default", "quote": quote},
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["claim"]["id"], machine_records["claims"][0]["id"])
+        self.assertEqual(result["claim"]["status"], "pending_validation")
+        self.assertEqual(result["evidence"]["status"], "pending_validation")
+        self.assertEqual(
+            {warning["code"] for warning in result["warnings"]},
+            {
+                "first_evidence_wiki_write_failed",
+                "first_evidence_activity_log_failed",
+                "first_evidence_index_rebuild_failed",
+            },
+        )
+        self.assertTrue(all(warning["retry_selection"] is False for warning in result["warnings"]))
+        self.assertEqual(len(self.db_rows("SELECT id FROM claims WHERE source_id = ?", (source_id,))), 1)
+        self.assertEqual(len(self.db_rows("SELECT id FROM evidence WHERE source_id = ?", (source_id,))), 1)
+
+    def test_selection_first_evidence_does_not_reuse_nonexact_claim_text(self) -> None:
+        quote = "Alpha  Beta remains an exact user-selected claim."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/exact-claim-identity",
+                    "title": "Exact Claim Identity",
+                },
+                "content": {"text": quote, "markdown": quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        prior = self.request(
+            "/v1/knowledge/records",
+            {
+                "project_id": "default",
+                "source_id": source_id,
+                "claims": [
+                    {
+                        "text": "alpha beta remains an exact user-selected claim.",
+                        "evidence": [
+                            {
+                                "source_id": source_id,
+                                "chunk_id": capture["chunks"][0]["id"],
+                                "quote": quote,
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+
+        result = self.request(
+            f"/v1/sources/{source_id}/first-evidence",
+            {"project_id": "default", "quote": quote},
+            method="POST",
+        )
+
+        self.assertNotEqual(result["claim"]["id"], prior["claims"][0]["id"])
+        self.assertEqual(result["claim"]["text"], quote)
+        self.assertEqual(result["claim"]["status"], "pending_validation")
+        self.assertEqual(result["evidence"]["quote"], quote)
+        self.assertEqual(len(self.db_rows("SELECT id FROM claims WHERE source_id = ?", (source_id,))), 2)
+        self.assertEqual(len(self.db_rows("SELECT id FROM evidence WHERE source_id = ?", (source_id,))), 2)
+
+    def test_selection_sources_on_the_same_page_do_not_supersede_each_other(self) -> None:
+        page_url = "https://example.com/research-with-two-selections"
+        first_quote = "The first selected passage remains independently reviewable."
+        first_capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": page_url,
+                    "canonical_url": page_url,
+                    "title": "First Page Selection",
+                },
+                "content": {"text": first_quote, "markdown": first_quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        first = self.request(
+            f"/v1/sources/{first_capture['source']['id']}/first-evidence",
+            {"project_id": "default", "quote": first_quote},
+            method="POST",
+        )
+        self.assertEqual(first["evidence"]["replay"]["source"]["version_index"], 1)
+        self.assertTrue(first["evidence"]["replay"]["source"]["is_current"])
+
+        second_quote = "The second selected passage is a separate immutable snapshot."
+        second_capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": page_url,
+                    "canonical_url": page_url,
+                    "title": "Second Page Selection",
+                },
+                "content": {"text": second_quote, "markdown": second_quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        second = self.request(
+            f"/v1/sources/{second_capture['source']['id']}/first-evidence",
+            {"project_id": "default", "quote": second_quote},
+            method="POST",
+        )
+
+        self.assertNotEqual(first_capture["source"]["id"], second_capture["source"]["id"])
+        first_after = self.request(f"/v1/evidence/{first['evidence']['id']}")["evidence"]
+        self.assertEqual(first_after["status"], "pending_validation")
+        self.assertEqual(first_after["replay"]["status"], "resolved")
+        self.assertTrue(first_after["replay"]["source"]["is_current"])
+        self.assertEqual(second["evidence"]["replay"]["status"], "resolved")
+
+        identical_quote = "The same selected context can appear on more than one page."
+        selection_sources = []
+        selection_evidence = []
+        routed_urls = (
+            "https://app.example/#/docs/one",
+            "https://app.example/#/docs/two",
+        )
+        for index, routed_url in enumerate(routed_urls, start=1):
+            capture = self.request(
+                "/v1/captures",
+                {
+                    "project_id": "default",
+                    "source": {
+                        "kind": "selection",
+                        "url": routed_url,
+                        "title": f"Selection {index}",
+                    },
+                    "content": {"text": identical_quote, "markdown": identical_quote},
+                    "browser": {},
+                },
+                method="POST",
+            )
+            selection_sources.append(capture["source"])
+            selection_evidence.append(
+                self.request(
+                    f"/v1/sources/{capture['source']['id']}/first-evidence",
+                    {"project_id": "default", "quote": identical_quote},
+                    method="POST",
+                )["evidence"]
+            )
+        self.assertNotEqual(selection_sources[0]["id"], selection_sources[1]["id"])
+        self.assertNotEqual(selection_sources[0]["content_hash"], selection_sources[1]["content_hash"])
+        self.assertEqual(
+            selection_evidence[0]["replay"]["source"]["open_url"],
+            routed_urls[0],
+        )
+        self.assertEqual(
+            selection_evidence[1]["replay"]["source"]["open_url"],
+            routed_urls[1],
+        )
+        self.restart_service()
+        for evidence, routed_url in zip(selection_evidence, routed_urls):
+            restored = self.request(f"/v1/evidence/{evidence['id']}")["evidence"]
+            self.assertEqual(restored["replay"]["source"]["open_url"], routed_url)
+            self.assertEqual(restored["replay"]["source"]["canonical_url"], "")
+
+        page_capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "page",
+                    "url": routed_urls[0],
+                    "title": "Whole Page With Identical Text",
+                },
+                "content": {"text": identical_quote, "markdown": identical_quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        self.assertNotEqual(page_capture["source"]["id"], selection_sources[0]["id"])
+        self.assertEqual(page_capture["source"]["kind"], "page")
+
+        legacy_text = "A legacy selection used the pre-domain text-only identity hash."
+        legacy_selection = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://legacy.example/selection",
+                    "title": "Pre-domain Selection",
+                },
+                "content": {"text": legacy_text, "markdown": legacy_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        legacy_text_hash = hashlib.sha256(legacy_text.encode("utf-8")).hexdigest()
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE sources SET content_hash = ? WHERE id = ?",
+                (legacy_text_hash, legacy_selection["source"]["id"]),
+            )
+            db.commit()
+
+        page_payload = {
+            "project_id": "default",
+            "source": {
+                "kind": "page",
+                "url": "https://legacy.example/full-page",
+                "title": "Whole Page Matching Legacy Selection Text",
+            },
+            "content": {"text": legacy_text, "markdown": legacy_text},
+            "browser": {},
+        }
+        legacy_collision_page = self.request("/v1/captures", page_payload, method="POST")
+        legacy_collision_retry = self.request("/v1/captures", page_payload, method="POST")
+        self.assertNotEqual(
+            legacy_collision_page["source"]["id"],
+            legacy_selection["source"]["id"],
+        )
+        self.assertEqual(legacy_collision_page["source"]["kind"], "page")
+        self.assertEqual(legacy_collision_page["source"]["url"], page_payload["source"]["url"])
+        self.assertTrue(legacy_collision_retry["duplicate"])
+        self.assertEqual(
+            legacy_collision_retry["source"]["id"],
+            legacy_collision_page["source"]["id"],
+        )
+
+    def test_legacy_selection_same_url_retry_reuses_source_and_human_decision(self) -> None:
+        url = "https://legacy.example/article#selection"
+        quote = "A same-URL retry must preserve legacy selection review state."
+        legacy = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    # A pre-domain selection used the ordinary text-only
+                    # source identity that pages still use today.
+                    "kind": "page",
+                    "url": url,
+                    "title": "Legacy Selection",
+                },
+                "content": {"text": quote, "markdown": quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        legacy_source_id = legacy["source"]["id"]
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE sources SET kind = 'selection', canonical_url = '' WHERE id = ?",
+                (legacy_source_id,),
+            )
+            db.commit()
+
+        first = self.request(
+            f"/v1/sources/{legacy_source_id}/first-evidence",
+            {"project_id": "default", "quote": quote},
+            method="POST",
+        )
+        self.request(
+            f"/v1/evidence/{first['evidence']['id']}/review",
+            {"status": "reviewed", "reviewer": "legacy-retry-test"},
+            method="POST",
+        )
+        self.request(
+            f"/v1/claims/{first['claim']['id']}/review",
+            {"status": "reviewed", "reviewer": "legacy-retry-test"},
+            method="POST",
+        )
+
+        selection_payload = {
+            "project_id": "default",
+            "source": {
+                "kind": "selection",
+                "url": url,
+                "title": "Legacy Selection Retried",
+            },
+            "content": {"text": quote, "markdown": quote},
+            "browser": {},
+        }
+        retry = self.request("/v1/captures", selection_payload, method="POST")
+        retry_first_evidence = self.request(
+            f"/v1/sources/{retry['source']['id']}/first-evidence",
+            {"project_id": "default", "quote": quote},
+            method="POST",
+        )
+
+        self.assertTrue(retry["duplicate"])
+        self.assertEqual(retry["source"]["id"], legacy_source_id)
+        self.assertEqual(retry_first_evidence["claim"]["id"], first["claim"]["id"])
+        self.assertEqual(retry_first_evidence["claim"]["status"], "reviewed")
+        self.assertEqual(retry_first_evidence["evidence"]["id"], first["evidence"]["id"])
+        self.assertEqual(retry_first_evidence["evidence"]["status"], "reviewed")
+
+        different_url = self.request(
+            "/v1/captures",
+            {
+                **selection_payload,
+                "source": {
+                    **selection_payload["source"],
+                    "url": "https://legacy.example/other-article#selection",
+                },
+            },
+            method="POST",
+        )
+        self.assertFalse(different_url["duplicate"])
+        self.assertNotEqual(different_url["source"]["id"], legacy_source_id)
+
+    def test_legacy_selection_canonical_url_remains_immutable(self) -> None:
+        canonical_url = "https://example.com/legacy-selection"
+        quote = "A pre-upgrade selection remains independently reviewable."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": canonical_url,
+                    "title": "Legacy Selection",
+                },
+                "content": {"text": quote, "markdown": quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        first = self.request(
+            f"/v1/sources/{source_id}/first-evidence",
+            {"project_id": "default", "quote": quote},
+            method="POST",
+        )
+        self.request(
+            f"/v1/evidence/{first['evidence']['id']}/review",
+            {"status": "reviewed", "reviewer": "legacy-selection-test"},
+            method="POST",
+        )
+        self.request(
+            f"/v1/claims/{first['claim']['id']}/review",
+            {"status": "reviewed", "reviewer": "legacy-selection-test"},
+            method="POST",
+        )
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE sources SET canonical_url = ? WHERE id = ?",
+                (canonical_url, source_id),
+            )
+            source = db.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+            self.store.record_source_version(
+                db,
+                project_id="default",
+                source_id=source_id,
+                canonical_url=canonical_url,
+                content_hash=source["content_hash"],
+                captured_at=source["captured_at"],
+            )
+            db.commit()
+
+        self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "page",
+                    "url": canonical_url,
+                    "canonical_url": canonical_url,
+                    "title": "Later Whole Page Capture",
+                },
+                "content": {
+                    "text": "A later whole-page capture must not supersede an immutable selection.",
+                    "markdown": "A later whole-page capture must not supersede an immutable selection.",
+                },
+                "browser": {},
+            },
+            method="POST",
+        )
+
+        evidence_after = self.request(f"/v1/evidence/{first['evidence']['id']}")["evidence"]
+        claim_after = self.request(f"/v1/claims/{first['claim']['id']}")["claim"]
+        self.assertEqual(evidence_after["status"], "reviewed")
+        self.assertEqual(claim_after["status"], "reviewed")
+        self.assertEqual(evidence_after["replay"]["status"], "resolved")
+        self.assertTrue(evidence_after["replay"]["source"]["is_current"])
+
+    def test_selection_first_evidence_concurrent_retries_preserve_human_decisions(self) -> None:
+        quote = "Concurrent retries must reuse the same exact pending evidence."
+        context = f"Captured before. {quote} Captured after."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "selection",
+                    "url": "https://example.com/concurrent-selection",
+                    "title": "Concurrent Selection",
+                },
+                "content": {"text": context, "markdown": context},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        payload = {"project_id": "default", "quote": quote}
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(
+                executor.map(
+                    lambda _index: self.store.create_first_evidence_for_source(source_id, payload),
+                    range(4),
+                )
+            )
+        claim_ids = {result["claim"]["id"] for result in results}
+        evidence_ids = {result["evidence"]["id"] for result in results}
+        self.assertEqual(len(claim_ids), 1)
+        self.assertEqual(len(evidence_ids), 1)
+        self.assertEqual(len(self.db_rows("SELECT id FROM claims WHERE source_id = ?", (source_id,))), 1)
+        self.assertEqual(len(self.db_rows("SELECT id FROM evidence WHERE source_id = ?", (source_id,))), 1)
+
+        claim_id = next(iter(claim_ids))
+        evidence_id = next(iter(evidence_ids))
+        self.request(
+            f"/v1/evidence/{evidence_id}/review",
+            {"status": "reviewed", "reviewer": "selection-test"},
+            method="POST",
+        )
+        self.request(
+            f"/v1/claims/{claim_id}/review",
+            {"status": "reviewed", "reviewer": "selection-test"},
+            method="POST",
+        )
+        reviewed_retry = self.store.create_first_evidence_for_source(source_id, payload)
+        self.assertEqual(reviewed_retry["claim"]["status"], "reviewed")
+        self.assertEqual(reviewed_retry["evidence"]["status"], "reviewed")
+
+        self.request(
+            f"/v1/evidence/{evidence_id}/review",
+            {"status": "rejected", "reviewer": "selection-test"},
+            method="POST",
+        )
+        self.request(
+            f"/v1/claims/{claim_id}/review",
+            {"status": "rejected", "reviewer": "selection-test"},
+            method="POST",
+        )
+        rejected_retry = self.store.create_first_evidence_for_source(source_id, payload)
+        self.assertEqual(rejected_retry["claim"]["status"], "rejected")
+        self.assertEqual(rejected_retry["evidence"]["status"], "rejected")
+        self.assertEqual(rejected_retry["claim"]["id"], claim_id)
+        self.assertEqual(rejected_retry["evidence"]["id"], evidence_id)
+
+    def test_selection_first_evidence_rejects_missing_and_superseded_sources(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "(?s)HTTP 404:.*src_missing"):
+            self.request(
+                "/v1/sources/src_missing/first-evidence",
+                {"project_id": "default", "quote": "missing"},
+                method="POST",
+            )
+
+        canonical_url = "https://example.com/versioned-selection"
+        quote = "The original selected quote belongs only to version one."
+        original = self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "page",
+                    "url": canonical_url,
+                    "canonical_url": canonical_url,
+                    "title": "Selection Version One",
+                },
+                "content": {"text": quote, "markdown": quote},
+                "browser": {},
+            },
+            method="POST",
+        )
+        self.request(
+            "/v1/captures",
+            {
+                "project_id": "default",
+                "source": {
+                    "kind": "page",
+                    "url": canonical_url,
+                    "canonical_url": canonical_url,
+                    "title": "Selection Version Two",
+                },
+                "content": {
+                    "text": "A newer captured selection replaces the canonical source snapshot.",
+                    "markdown": "A newer captured selection replaces the canonical source snapshot.",
+                },
+                "browser": {},
+            },
+            method="POST",
+        )
+        original_source_id = original["source"]["id"]
+        with self.assertRaisesRegex(AssertionError, "(?s)HTTP 400:.*source_superseded"):
+            self.request(
+                f"/v1/sources/{original_source_id}/first-evidence",
+                {"project_id": "default", "quote": quote},
+                method="POST",
+            )
+        self.assertEqual(
+            len(self.db_rows("SELECT id FROM claims WHERE source_id = ?", (original_source_id,))),
+            0,
+        )
 
 
 if __name__ == "__main__":

@@ -47,10 +47,13 @@ const DEFAULT_BATCH_HEARTBEAT_INTERVAL_MS = 30000;
 const MIN_BATCH_HEARTBEAT_INTERVAL_MS = 100;
 const SELECTION_QUEUED_MESSAGE = "qc-smart-reader-selection-queued";
 const CLAIM_SELECTION_MESSAGE = "qc-smart-reader-claim-selection";
+const ACK_SELECTION_MESSAGE = "qc-smart-reader-ack-selection";
+const RELEASE_SELECTION_MESSAGE = "qc-smart-reader-release-selection";
 const FALLBACK_LEGACY_PROJECT_ID = "default";
 const PENDING_NOTE_SYNC_TAG_PREFIX = "qc-local-note:";
-const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.4";
+const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.5";
 const REQUIRED_COMPANION_API_VERSION = 1;
+const SELECTION_FIRST_EVIDENCE_CAPABILITY = "selection_first_evidence_v1";
 const MODEL_DATA_CONSENT_VERSION = "2026-08-14-v1";
 const ONBOARDING_MILESTONES_KEY = "onboardingMilestones";
 const BATCH_RETRYABLE_FAILURE_LIMITS = {
@@ -150,11 +153,19 @@ const state = {
   projectViewGeneration: 0,
   onboardingMilestones: {},
   onboardingDecisionVerified: false,
-  quickStartReplay: null
+  quickStartReplay: null,
+  companionAuthenticated: false,
+  companionCapabilities: [],
+  companionServiceVersion: ""
 };
 
 let pendingSelectionConsumption = Promise.resolve();
 let pendingSelectionMessagesBound = false;
+let settingsStorageChangesBound = false;
+let externalProjectSync = Promise.resolve();
+let selectionDrainRequested = false;
+const selectionDrainExcludedIds = new Set();
+let selectionDrainStickyNotice = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -400,6 +411,12 @@ function assertCurrentSourceProject() {
 
 function resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId) {
   if (previousProjectId === nextProjectId) return false;
+  resetCompanionBoundWorkspace();
+  setStatus(`已切换到项目 ${nextProjectId}；请重新读取该项目的来源。`);
+  return true;
+}
+
+function resetCompanionBoundWorkspace() {
   clearProjectBoundKnowledgeViews();
   if (state.source) {
     state.source = null;
@@ -414,8 +431,13 @@ function resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId) 
   hideQuickStartEvidence();
   state.onboardingDecisionVerified = false;
   renderQuickStart();
-  setStatus(`已切换到项目 ${nextProjectId}；请重新读取该项目的来源。`);
-  return true;
+}
+
+function resetCompanionAuthentication() {
+  state.companionAuthenticated = false;
+  state.companionCapabilities = [];
+  state.companionServiceVersion = "";
+  selectionDrainRequested = true;
 }
 
 function clearProjectBoundKnowledgeViews() {
@@ -463,13 +485,13 @@ async function init() {
     }
     bindTabs();
     bindEvents();
+    bindSettingsStorageChanges();
     interactionHandlersBound = true;
     renderAgents();
     if (localeError) throw localeError;
     await loadOnboardingMilestones();
     await loadSettings();
     bindPendingSelectionMessages();
-    await queuePendingSelectionHydration({ automatic: true });
     if (!state.settings?.pairingToken) {
       showTab("settings");
       setLocalizedSettingsStatus(
@@ -485,6 +507,7 @@ async function init() {
     if (!startup) {
       return;
     }
+    await queuePendingSelectionHydration({ automatic: true });
     hydrateWorkspaces = true;
   } catch (error) {
     if (!interactionHandlersBound) throw error;
@@ -523,16 +546,24 @@ async function hydrateStartupWorkspaces() {
 }
 
 async function authenticateCompanionForStartup() {
+  state.companionAuthenticated = false;
+  state.companionCapabilities = [];
+  state.companionServiceVersion = "";
   try {
     const health = await companionRequest("/health", { method: "GET" });
     assertCompatibleCompanion(health);
+    rememberCompanionHealth(health);
     const projectsResponse = await companionRequest("/v1/projects", { method: "GET" });
+    state.companionAuthenticated = true;
     state.projects = projectsResponse.projects || [];
     renderProjectSelect();
     await markOnboardingMilestone("pairedAt");
     renderQuickStart({ restored: true });
     return { health, projects: state.projects };
   } catch (error) {
+    state.companionAuthenticated = false;
+    state.companionCapabilities = [];
+    state.companionServiceVersion = "";
     const card = $("quickStartCard");
     if (card) card.hidden = true;
     showTab("settings");
@@ -705,6 +736,26 @@ function bindPendingSelectionMessages() {
   pendingSelectionMessagesBound = true;
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type !== SELECTION_QUEUED_MESSAGE) return false;
+    selectionDrainRequested = true;
+    if (!state.companionAuthenticated) {
+      currentSidePanelTarget().then((target) => {
+        if (!notificationTargetsCurrentPanel({
+          expectedTabId: message.tabId,
+          expectedWindowId: message.windowId
+        }, target)) return;
+        if (message.reason === "selection_too_long") {
+          setLocalizedStatus("selectionSave.tooLong", {
+            length: Number(message.length || 0),
+            max: Number(message.max || 800)
+          });
+        } else {
+          setLocalizedStatus("selectionSave.pending");
+        }
+      }).catch((error) => {
+        console.warn("Pending selection target check failed.", error);
+      });
+      return false;
+    }
     queuePendingSelectionHydration({
       automatic: true,
       selectionId: message.selectionId || "",
@@ -715,6 +766,68 @@ function bindPendingSelectionMessages() {
       console.warn("Pending selection live delivery failed.", error);
     });
     return false;
+  });
+}
+
+function bindSettingsStorageChanges() {
+  if (settingsStorageChangesBound || !chrome.storage?.onChanged?.addListener) return;
+  settingsStorageChangesBound = true;
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local" || !changes?.settings?.newValue || !state.settings) return;
+    const nextSettings = changes.settings.newValue;
+    const nextProjectId = String(nextSettings.projectId || "default").trim() || "default";
+    const previousProjectId = currentProjectId();
+    const previousServiceUrl = String(state.settings.serviceUrl || "").trim();
+    const previousPairingToken = String(state.settings.pairingToken || "").trim();
+    const nextServiceUrl = String(nextSettings.serviceUrl || "http://127.0.0.1:37621").trim();
+    const nextPairingToken = String(nextSettings.pairingToken || "").trim();
+    const projectChanged = nextProjectId !== previousProjectId;
+    const serviceChanged = nextServiceUrl !== previousServiceUrl;
+    const authenticationChanged = serviceChanged || nextPairingToken !== previousPairingToken;
+    if (!projectChanged && !authenticationChanged) return;
+
+    state.settings = { ...state.settings, ...nextSettings, projectId: nextProjectId };
+    $("serviceUrlInput").value = nextServiceUrl;
+    $("pairingTokenInput").value = nextPairingToken;
+    const projectSelect = $("projectSelect");
+    if (projectSelect) projectSelect.value = nextProjectId;
+    if (authenticationChanged) resetCompanionAuthentication();
+    if (serviceChanged) {
+      state.onboardingMilestones = {};
+      resetCompanionBoundWorkspace();
+    } else if (projectChanged) {
+      resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId);
+    }
+    selectionDrainExcludedIds.clear();
+    selectionDrainStickyNotice = null;
+
+    const synchronize = async () => {
+      try {
+        if (serviceChanged) await chrome.storage.local.remove(ONBOARDING_MILESTONES_KEY);
+        if (projectChanged) await saveBatchQueue(previousProjectId);
+        if (authenticationChanged) {
+          if (!nextPairingToken) {
+            showTab("settings");
+            setLocalizedSettingsStatus("settings.status.notPaired");
+            return;
+          }
+          const startup = await authenticateCompanionForStartup();
+          if (!startup) return;
+        }
+        if (projectChanged || serviceChanged) {
+          await loadBatchQueue();
+          await hydrateStartupWorkspaces();
+        }
+      } catch (error) {
+        console.warn("External project synchronization failed.", error);
+      } finally {
+        if (state.companionAuthenticated) {
+          selectionDrainRequested = true;
+          schedulePendingSelectionDrain();
+        }
+      }
+    };
+    externalProjectSync = externalProjectSync.then(synchronize, synchronize);
   });
 }
 
@@ -755,25 +868,52 @@ async function currentSidePanelTarget() {
 function notificationTargetsCurrentPanel(options, target) {
   const expectedTabId = integerChromeId(options.expectedTabId);
   const expectedWindowId = integerChromeId(options.expectedWindowId);
+  if (
+    expectedWindowId !== null
+      && target.windowId !== null
+      && expectedWindowId !== target.windowId
+  ) return false;
   if (expectedTabId !== null && target.tabId !== null && expectedTabId === target.tabId) return true;
   if (expectedWindowId !== null && target.windowId !== null && expectedWindowId === target.windowId) return true;
   return expectedTabId === null && expectedWindowId === null;
 }
 
+function showSelectionDrainStickyNotice({ key, params }) {
+  setLocalizedStatus(key, params);
+}
+
+function restoreSelectionDrainStickyNotice() {
+  if (!selectionDrainStickyNotice) return false;
+  const notice = selectionDrainStickyNotice;
+  selectionDrainStickyNotice = null;
+  showSelectionDrainStickyNotice(notice);
+  return true;
+}
+
 async function hydratePendingSelection(options = {}) {
   await ensureSettingsLoaded();
+  if (!state.companionAuthenticated) {
+    selectionDrainRequested = true;
+    return false;
+  }
+  if (!companionSupportsSelectionFirstEvidence()) {
+    selectionDrainRequested = true;
+    setLocalizedStatus("selectionSave.updateCompanion", {
+      extensionVersion: EXTENSION_VERSION,
+      serviceVersion: state.companionServiceVersion || { i18nKey: "companion.value.legacyUnknown" }
+    });
+    return false;
+  }
+  if (options.automatic && state.busy) {
+    selectionDrainRequested = true;
+    return false;
+  }
   if (state.busy && !options.automatic) {
     setLocalizedStatus("currentPage.pending.busy");
     return false;
   }
   const target = await currentSidePanelTarget();
   const targetsThisPanel = notificationTargetsCurrentPanel(options, target);
-  if (options.automatic && state.source) {
-    if (targetsThisPanel) {
-      setLocalizedStatus("currentPage.pending.deferred");
-    }
-    return false;
-  }
   if (options.automatic && !targetsThisPanel) return false;
 
   let response;
@@ -782,6 +922,7 @@ async function hydratePendingSelection(options = {}) {
       type: CLAIM_SELECTION_MESSAGE,
       selectionId: options.selectionId || "",
       noticeId: options.noticeId || "",
+      excludeSelectionIds: options.selectionId ? [] : [...selectionDrainExcludedIds],
       tabId: target.tabId,
       windowId: target.windowId,
       projectId: currentProjectId()
@@ -803,14 +944,45 @@ async function hydratePendingSelection(options = {}) {
   }
   if (!response.selection) {
     if (response.reason === "queue_full") {
-      setLocalizedStatus("currentPage.pending.queueFull", {
+      const notice = {
+        key: "currentPage.pending.queueFull",
+        params: {
         count: Number(response.pendingCount || 20)
-      });
+        }
+      };
+      selectionDrainStickyNotice = notice;
+      showSelectionDrainStickyNotice(notice);
     }
     if (response.reason === "project_mismatch") {
       setLocalizedStatus("currentPage.pending.projectMismatch", {
         projectId: response.selectionProjectId || { i18nKey: "status.unknown" }
       });
+    }
+    if (response.reason === "selection_too_long") {
+      const notice = {
+        key: "selectionSave.tooLong",
+        params: {
+          length: Number(response.length || 0),
+          max: Number(response.max || 800)
+        }
+      };
+      selectionDrainStickyNotice = notice;
+      showSelectionDrainStickyNotice(notice);
+    }
+    const consumedNotice = response.reason === "queue_full" || response.reason === "selection_too_long";
+    const continueAfterNotice = consumedNotice
+      && Number(response.pendingCount || 0) > 0
+      && !options.afterNotice;
+    selectionDrainRequested = false;
+    if (continueAfterNotice) {
+      Promise.resolve().then(() => queuePendingSelectionHydration({
+        automatic: true,
+        afterNotice: true
+      })).catch((error) => {
+        console.warn("Pending selection drain after notice failed.", error);
+      });
+    } else if (!consumedNotice) {
+      restoreSelectionDrainStickyNotice();
     }
     return false;
   }
@@ -822,30 +994,334 @@ async function hydratePendingSelection(options = {}) {
       selectionProjectId: pendingProjectId,
       currentProjectId: currentProjectId()
     });
+    await releasePendingSelectionLease(pending, response.leaseId, target, pendingProjectId);
     return false;
   }
-  const fallbackTitleKey = "currentPage.selection.defaultTitle";
-  state.source = {
-    title: pending.title || uiText(fallbackTitleKey, {}, "选中文本"),
-    titleI18nKey: pending.title ? "" : fallbackTitleKey,
-    projectId: pendingProjectId,
-    url: pending.url || "",
-    text: pending.text,
+  return savePendingSelectionAsFirstEvidence(pending, response.leaseId, target);
+}
+
+function normalizePendingSelectionText(value) {
+  return String(value || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+}
+
+function unicodeCharacterCount(value) {
+  return Array.from(String(value || "")).length;
+}
+
+function unicodeCharacterSlice(value, start, end) {
+  return Array.from(String(value || "")).slice(start, end).join("");
+}
+
+function pendingSelectionOccurrenceCount(text, quote) {
+  if (!quote) return 0;
+  let count = 0;
+  let offset = 0;
+  while (offset <= text.length - quote.length) {
+    const found = text.indexOf(quote, offset);
+    if (found < 0) break;
+    count += 1;
+    if (count > 1) return count;
+    offset = found + 1;
+  }
+  return count;
+}
+
+function pendingSelectionSource(pending, projectId) {
+  const quote = normalizePendingSelectionText(pending?.text);
+  if (!quote) {
+    const error = new Error("pending selection has no exact quote");
+    error.reason = "missing_quote";
+    throw error;
+  }
+  if (unicodeCharacterCount(quote) > 800) {
+    const error = new Error("pending selection exact quote exceeds 800 characters");
+    error.reason = "quote_too_long";
+    throw error;
+  }
+  const suppliedContext = normalizePendingSelectionText(pending?.contextText);
+  const contextText = pendingSelectionOccurrenceCount(suppliedContext, quote) === 1
+    ? suppliedContext
+    : quote;
+  return {
+    title: String(pending?.title || uiText("currentPage.selection.defaultTitle", {}, "选中文本")),
+    projectId,
+    url: String(pending?.url || ""),
+    text: contextText,
+    markdown: contextText,
     kind: "selection",
-    site: inferSiteFromUrl(pending.url || ""),
-    stats: { profile: "selection", textChars: countCjkAwareChars(pending.text), quality: 30 },
-    capturedAt: pending.capturedAt || new Date().toISOString()
+    site: inferSiteFromUrl(pending?.url || ""),
+    stats: {
+      profile: "selection",
+      textChars: countCjkAwareChars(contextText),
+      quality: 30,
+      contextMode: String(pending?.contextMode || "quote-only")
+    },
+    capturedAt: String(pending?.capturedAt || new Date().toISOString()),
+    exactQuote: quote
   };
-  markCurrentSourceFingerprint();
-  renderSource();
-  setLocalizedStatus("currentPage.pending.loaded");
-  return true;
+}
+
+function pendingSelectionLeaseRequest(type, pending, leaseId, target, projectId) {
+  return {
+    type,
+    selectionId: String(pending?.id || ""),
+    leaseId: String(leaseId || pending?.leaseId || ""),
+    tabId: target?.tabId,
+    windowId: target?.windowId,
+    projectId
+  };
+}
+
+async function acknowledgePendingSelectionLease(pending, leaseId, target, projectId) {
+  if (!leaseId) return { ok: true, acknowledged: false, reason: "legacy_claim" };
+  return chrome.runtime.sendMessage(
+    pendingSelectionLeaseRequest(ACK_SELECTION_MESSAGE, pending, leaseId, target, projectId)
+  );
+}
+
+async function releasePendingSelectionLease(pending, leaseId, target, projectId) {
+  if (!leaseId) return { ok: true, released: false, reason: "missing_lease" };
+  try {
+    return await chrome.runtime.sendMessage(
+      pendingSelectionLeaseRequest(RELEASE_SELECTION_MESSAGE, pending, leaseId, target, projectId)
+    );
+  } catch (error) {
+    console.warn("Pending selection lease release failed.", error);
+    return { ok: false, released: false, error: error?.message || String(error) };
+  }
+}
+
+function selectionPersistenceError(reason, fallback) {
+  const error = new Error(fallback);
+  error.reason = reason;
+  return error;
+}
+
+function assertSelectionProjectStillActive(projectId) {
+  if (projectId !== currentProjectId()) {
+    throw selectionPersistenceError(
+      "project_mismatch",
+      `selection project changed from ${projectId} to ${currentProjectId()}`
+    );
+  }
+  if (!state.companionAuthenticated) {
+    throw selectionPersistenceError("authentication_lost", "Companion authentication was lost");
+  }
+}
+
+function validateSelectionFirstEvidence(result, expected) {
+  const source = result?.source;
+  const claim = result?.claim;
+  const evidence = result?.evidence;
+  const replay = evidence?.replay;
+  const context = replay?.context;
+  const quoteStart = Number(context?.quote_start_offset);
+  const quoteEnd = Number(context?.quote_end_offset);
+  const replayContext = String(context?.text || "");
+  const relationshipsMatch = Boolean(
+    result?.ok !== false
+      && source?.id === expected.sourceId
+      && source?.project_id === expected.projectId
+      && claim?.id
+      && claim?.source_id === expected.sourceId
+      && claim?.project_id === expected.projectId
+      && evidence?.id
+      && evidence?.claim_id === claim.id
+      && evidence?.source_id === expected.sourceId
+      && (!evidence?.project_id || evidence.project_id === expected.projectId)
+      && evidence?.quote === expected.quote
+      && evidence?.citation_valid === true
+      && Number(replay?.version) === 1
+      && replay?.evidence_id === evidence.id
+      && replay?.claim_id === claim.id
+      && replay?.source_id === expected.sourceId
+      && replay?.status === "resolved"
+      && replay?.reason === "exact_quote_match"
+      && Number.isInteger(quoteStart)
+      && Number.isInteger(quoteEnd)
+      && quoteStart >= 0
+      && quoteEnd >= quoteStart
+      && unicodeCharacterSlice(replayContext, quoteStart, quoteEnd) === expected.quote
+  );
+  if (!relationshipsMatch) {
+    throw selectionPersistenceError(
+      "invalid_first_evidence_response",
+      "Companion returned an invalid First Evidence relationship or Replay"
+    );
+  }
+  return { source, claim, evidence };
+}
+
+function selectionFailureStatusKey(reason) {
+  const stableReason = String(reason || "").trim();
+  const supported = new Set([
+    "ambiguous_quote",
+    "quote_mismatch",
+    "quote_too_long",
+    "project_mismatch",
+    "source_superseded",
+    "missing_chunk",
+    "authentication_lost",
+    "invalid_first_evidence_response"
+  ]);
+  return supported.has(stableReason)
+    ? `selectionSave.failed.${stableReason}`
+    : "selectionSave.notSaved";
+}
+
+function schedulePendingSelectionDrain() {
+  if (!selectionDrainRequested || !state.companionAuthenticated || state.busy) return;
+  selectionDrainRequested = false;
+  Promise.resolve().then(() => queuePendingSelectionHydration({ automatic: true })).catch((error) => {
+    console.warn("Pending selection drain failed.", error);
+  });
+}
+
+async function persistSelectionFirstEvidenceMilestones(metadata) {
+  const previous = state.onboardingMilestones && typeof state.onboardingMilestones === "object"
+    ? state.onboardingMilestones
+    : {};
+  const timestamp = new Date().toISOString();
+  const next = { ...previous };
+  const decisionStatus = ["reviewed", "rejected"].includes(String(metadata.decisionStatus || ""))
+    ? String(metadata.decisionStatus)
+    : "";
+  for (const key of [
+    "extractedAt",
+    "firstDecisionAt",
+    "firstDecisionStatus",
+    "firstReviewedAt",
+    "decisionInvalidatedAt",
+    "decisionInvalidatedFromAt",
+    "decisionInvalidatedFromStatus",
+    "decisionInvalidatedStatus",
+    "reviewInvalidatedAt",
+    "reviewInvalidatedFromReviewedAt",
+    "reviewInvalidatedStatus"
+  ]) delete next[key];
+  Object.assign(next, {
+    projectId: metadata.projectId,
+    lastSourceId: metadata.lastSourceId,
+    firstSelectionId: metadata.firstSelectionId,
+    firstClaimId: metadata.firstClaimId,
+    firstEvidenceId: metadata.firstEvidenceId,
+    capturedAt: timestamp,
+    claimReadyAt: timestamp
+  });
+  if (decisionStatus) {
+    next.firstDecisionAt = previous.firstClaimId === metadata.firstClaimId
+      && previous.firstDecisionAt
+      ? previous.firstDecisionAt
+      : timestamp;
+    next.firstDecisionStatus = decisionStatus;
+    if (decisionStatus === "reviewed") {
+      next.firstReviewedAt = previous.firstClaimId === metadata.firstClaimId
+        && previous.firstReviewedAt
+        ? previous.firstReviewedAt
+        : next.firstDecisionAt;
+    }
+  }
+  await chrome.storage.local.set({ [ONBOARDING_MILESTONES_KEY]: next });
+  assertSelectionProjectStillActive(metadata.projectId);
+  state.onboardingMilestones = next;
+  state.onboardingDecisionVerified = Boolean(decisionStatus);
+  renderQuickStart();
+  return next;
+}
+
+async function savePendingSelectionAsFirstEvidence(pending, leaseId, target) {
+  const projectId = String(pending?.projectId || currentProjectId()).trim() || currentProjectId();
+  let source;
+  let persisted = false;
+  setBusy(true);
+  setLocalizedStatus("selectionSave.saving");
+  try {
+    source = pendingSelectionSource(pending, projectId);
+    assertSelectionProjectStillActive(projectId);
+    const capture = await companionRequest("/v1/captures", {
+      method: "POST",
+      body: sourceCapturePayload(source, projectId)
+    });
+    const sourceId = String(capture?.source?.id || "");
+    if (!sourceId || capture?.source?.project_id !== projectId) {
+      throw selectionPersistenceError(
+        "invalid_first_evidence_response",
+        "Companion did not return a project-bound source id"
+      );
+    }
+    assertSelectionProjectStillActive(projectId);
+    const result = await companionRequest(
+      `/v1/sources/${encodeURIComponent(sourceId)}/first-evidence`,
+      {
+        method: "POST",
+        body: { project_id: projectId, quote: source.exactQuote }
+      }
+    );
+    const firstEvidence = validateSelectionFirstEvidence(result, {
+      sourceId,
+      projectId,
+      quote: source.exactQuote
+    });
+    persisted = true;
+    assertSelectionProjectStillActive(projectId);
+    await persistSelectionFirstEvidenceMilestones({
+      projectId,
+      lastSourceId: sourceId,
+      firstSelectionId: String(pending?.id || ""),
+      firstClaimId: firstEvidence.claim.id,
+      firstEvidenceId: firstEvidence.evidence.id,
+      decisionStatus: firstEvidence.claim.status
+    });
+    revealQuickStartEvidence(firstEvidence.claim, firstEvidence.evidence, {
+      projectId,
+      focus: false
+    });
+    setLocalizedNodeText($("quickStartStatus"), "quickStart.status.evidenceReady");
+    showTab("knowledge");
+    revealQuickStartEvidence(firstEvidence.claim, firstEvidence.evidence, {
+      projectId,
+      focus: true
+    });
+
+    const acknowledgement = await acknowledgePendingSelectionLease(
+      pending,
+      leaseId,
+      target,
+      projectId
+    );
+    if (!acknowledgement?.ok || acknowledgement.acknowledged !== true) {
+      throw selectionPersistenceError(
+        "queue_ack_failed",
+        acknowledgement?.error || acknowledgement?.reason || "selection queue acknowledgement failed"
+      );
+    }
+    selectionDrainRequested = Number(acknowledgement.pendingCount || 0) > 0;
+    setLocalizedStatus("selectionSave.saved");
+    if (!selectionDrainRequested) restoreSelectionDrainStickyNotice();
+    return true;
+  } catch (error) {
+    if (pending?.id) selectionDrainExcludedIds.add(String(pending.id));
+    const release = await releasePendingSelectionLease(pending, leaseId, target, projectId);
+    selectionDrainRequested = Number(release?.pendingCount || 0) > 0;
+    const key = persisted
+      ? "selectionSave.savedPendingAck"
+      : selectionFailureStatusKey(error?.reason);
+    if (projectId === currentProjectId()) {
+      setLocalizedStatus(key, { error: errorI18nParam(error) });
+      if (!selectionDrainRequested) restoreSelectionDrainStickyNotice();
+    }
+    return false;
+  } finally {
+    setBusy(false);
+    schedulePendingSelectionDrain();
+  }
 }
 
 async function readSelectedTextFromPage() {
-  const loadedFromMenu = await hydratePendingSelection();
-  if (loadedFromMenu) return;
-
   setBusy(true);
   setLocalizedStatus("currentPage.selection.loading");
   try {
@@ -990,6 +1466,7 @@ async function markOnboardingMilestone(field, metadata = {}) {
           "firstDecisionAt",
           "firstDecisionStatus",
           "firstReviewedAt",
+          "firstSelectionId",
           "firstClaimId",
           "firstEvidenceId",
           "decisionInvalidatedAt",
@@ -1005,6 +1482,7 @@ async function markOnboardingMilestone(field, metadata = {}) {
           "firstDecisionAt",
           "firstDecisionStatus",
           "firstReviewedAt",
+          "firstSelectionId",
           "firstClaimId",
           "firstEvidenceId",
           "decisionInvalidatedAt",
@@ -1227,12 +1705,20 @@ function replayExactQuoteRange(replay) {
       || !Number.isInteger(end)
       || start < 0
       || end < start
-      || end > context.length
-      || context.slice(start, end) !== quote
+      || end > unicodeCharacterCount(context)
+      || unicodeCharacterSlice(context, start, end) !== quote
   ) {
     return null;
   }
-  return { context, quote, start, end };
+  return {
+    context,
+    quote,
+    start,
+    end,
+    before: unicodeCharacterSlice(context, 0, start),
+    exact: unicodeCharacterSlice(context, start, end),
+    after: unicodeCharacterSlice(context, end)
+  };
 }
 
 function replayPresentation(replay) {
@@ -1290,10 +1776,10 @@ function renderReplayPanelMarkup(replay) {
     : uiText("replay.locator.provenance", { value: locator.provenance });
   let snapshotMarkup = "";
   if (presentation.exactRange && presentation.status !== "unresolved") {
-    const { start, end } = presentation.exactRange;
+    const { before, exact, after } = presentation.exactRange;
     snapshotMarkup = `
       <div class="replay-snapshot-label">${escapeHtml(uiText("replay.snapshotTitle"))}</div>
-      <pre class="replay-context" data-replay-context tabindex="0" aria-label="${escapeHtml(uiText("replay.snapshotTitle"))}">${escapeHtml(context.slice(0, start))}<mark data-replay-exact-quote>${escapeHtml(context.slice(start, end))}</mark>${escapeHtml(context.slice(end))}</pre>
+      <pre class="replay-context" data-replay-context tabindex="0" aria-label="${escapeHtml(uiText("replay.snapshotTitle"))}">${escapeHtml(before)}<mark data-replay-exact-quote>${escapeHtml(exact)}</mark>${escapeHtml(after)}</pre>
     `;
   } else if (context || quote) {
     snapshotMarkup = `
@@ -1601,6 +2087,61 @@ function restoreQuickStartEvidenceFromRecords(records) {
   });
   revealQuickStartEvidence(claim, evidence, { focus: false, projectId: milestones.projectId });
   return true;
+}
+
+async function restoreQuickStartEvidenceFromMilestoneIds(options = {}) {
+  const milestones = state.onboardingMilestones || {};
+  const requestedProjectId = String(options.projectId || currentProjectId());
+  const requestedGeneration = Number.isInteger(options.generation)
+    ? options.generation
+    : state.projectViewGeneration;
+  const claimId = String(milestones.firstClaimId || "");
+  const evidenceId = String(milestones.firstEvidenceId || "");
+  const sourceId = String(milestones.lastSourceId || "");
+  if (
+    milestones.projectId !== requestedProjectId
+      || !milestones.claimReadyAt
+      || !claimId
+      || !evidenceId
+      || !sourceId
+  ) return false;
+  const projectStillActive = () => (
+    requestedGeneration === state.projectViewGeneration
+      && requestedProjectId === currentProjectId()
+  );
+  try {
+    const claimResponse = await companionRequest(`/v1/claims/${encodeURIComponent(claimId)}`, {
+      method: "GET"
+    });
+    if (!projectStillActive()) return false;
+    const evidenceResponse = await companionRequest(`/v1/evidence/${encodeURIComponent(evidenceId)}`, {
+      method: "GET"
+    });
+    if (!projectStillActive()) return false;
+    const claim = claimResponse?.claim;
+    const evidence = evidenceResponse?.evidence;
+    const matchesMilestone = Boolean(
+      claim?.id === claimId
+        && claim?.project_id === requestedProjectId
+        && claim?.source_id === sourceId
+        && evidence?.id === evidenceId
+        && evidence?.project_id === requestedProjectId
+        && evidence?.claim_id === claimId
+        && evidence?.source_id === sourceId
+        && String(evidence?.quote || "").trim()
+        && replayMatchesEvidence(evidence?.replay, evidence, {
+          projectId: requestedProjectId,
+          claimId,
+          sourceId,
+          evidenceId
+        })
+    );
+    if (!matchesMilestone) return false;
+    return restoreQuickStartEvidenceFromRecords({ claims: [claim], evidence: [evidence] });
+  } catch (error) {
+    console.warn("Direct First Evidence restore failed; falling back to the records list.", error);
+    return false;
+  }
 }
 
 function invalidateQuickStartDecisionMilestone(serverStatus) {
@@ -5862,6 +6403,14 @@ async function loadKnowledgeRecords() {
   const requestedProjectId = currentProjectId();
   const requestedGeneration = state.projectViewGeneration;
   try {
+    const directlyRestored = await restoreQuickStartEvidenceFromMilestoneIds({
+      projectId: requestedProjectId,
+      generation: requestedGeneration
+    });
+    if (
+      requestedGeneration !== state.projectViewGeneration
+        || requestedProjectId !== currentProjectId()
+    ) return null;
     const query = new URLSearchParams({ limit: "50", project_id: requestedProjectId });
     const data = await companionRequest(`/v1/knowledge/records?${query.toString()}`, { method: "GET" });
     if (
@@ -5869,7 +6418,7 @@ async function loadKnowledgeRecords() {
         || requestedProjectId !== currentProjectId()
     ) return null;
     renderKnowledgeRecords(data);
-    restoreQuickStartEvidenceFromRecords(data);
+    if (!directlyRestored) restoreQuickStartEvidenceFromRecords(data);
     setKnowledgeRecordStatus("");
     return data;
   } catch (error) {
@@ -6652,27 +7201,31 @@ async function ensureCurrentSourceCaptured() {
 }
 
 function currentSourceCapturePayload() {
+  return sourceCapturePayload(state.source, currentProjectId());
+}
+
+function sourceCapturePayload(source, projectId) {
   return {
-    project_id: currentProjectId(),
+    project_id: projectId,
     source: {
-      project_id: currentProjectId(),
-      kind: state.source.kind || "page",
-      url: state.source.url || "",
-      title: state.source.title || "未命名来源",
-      site: state.source.site || inferSiteFromUrl(state.source.url || ""),
-      author: state.source.author || "",
-      published_at: state.source.publishedAt || "",
-      captured_at: state.source.capturedAt || new Date().toISOString()
+      project_id: projectId,
+      kind: source?.kind || "page",
+      url: source?.url || "",
+      title: source?.title || "未命名来源",
+      site: source?.site || inferSiteFromUrl(source?.url || ""),
+      author: source?.author || "",
+      published_at: source?.publishedAt || "",
+      captured_at: source?.capturedAt || new Date().toISOString()
     },
     content: {
-      text: state.source.text || "",
-      markdown: state.source.markdown || state.source.text || "",
-      blocks: state.source.blocks || [],
-      images: state.source.images || [],
-      attachments: state.source.attachments || [],
-      links: state.source.links || [],
-      next_pages: state.source.nextPages || [],
-      stats: state.source.stats || {}
+      text: source?.text || "",
+      markdown: source?.markdown || source?.text || "",
+      blocks: source?.blocks || [],
+      images: source?.images || [],
+      attachments: source?.attachments || [],
+      links: source?.links || [],
+      next_pages: source?.nextPages || [],
+      stats: source?.stats || {}
     },
     browser: {}
   };
@@ -7015,7 +7568,9 @@ async function loadSettings() {
 async function saveSettings(options = {}) {
   try {
     const consent = modelDataConsentFields(Boolean($("modelDataConsentInput").checked));
-    state.settings = {
+    const previousServiceUrl = String(state.settings?.serviceUrl || "").trim();
+    const previousPairingToken = String(state.settings?.pairingToken || "").trim();
+    const nextSettings = {
       ...state.settings,
       serviceUrl: $("serviceUrlInput").value.trim() || "http://127.0.0.1:37621",
       pairingToken: $("pairingTokenInput").value.trim(),
@@ -7028,6 +7583,15 @@ async function saveSettings(options = {}) {
       ...consent,
       projectId: $("projectSelect").value || state.settings?.projectId || "default"
     };
+    const serviceChanged = nextSettings.serviceUrl !== previousServiceUrl;
+    const authenticationChanged = serviceChanged || nextSettings.pairingToken !== previousPairingToken;
+    state.settings = nextSettings;
+    if (authenticationChanged) resetCompanionAuthentication();
+    if (serviceChanged) {
+      state.onboardingMilestones = {};
+      resetCompanionBoundWorkspace();
+      await chrome.storage.local.remove(ONBOARDING_MILESTONES_KEY);
+    }
     await chrome.storage.local.set({ settings: state.settings });
     let modelSaved = false;
     if (options?.saveModel !== false) {
@@ -7218,6 +7782,10 @@ async function changeProject() {
   await loadStrategyWorkspace();
   await loadProjectDashboard();
   setProjectStatus(`当前项目：${$("projectSelect").selectedOptions[0]?.textContent || currentProjectId()}`);
+  selectionDrainExcludedIds.clear();
+  selectionDrainStickyNotice = null;
+  selectionDrainRequested = true;
+  schedulePendingSelectionDrain();
 }
 
 async function createProject() {
@@ -8027,6 +8595,9 @@ function renderLineage(lineage) {
 }
 
 async function testCompanion() {
+  state.companionAuthenticated = false;
+  state.companionCapabilities = [];
+  state.companionServiceVersion = "";
   setBusy(true);
   setLocalizedSettingsStatus("settings.status.testing");
   try {
@@ -8034,6 +8605,7 @@ async function testCompanion() {
     setLocalizedSettingsStatus("settings.status.testing");
     const health = await companionRequest("/health", { method: "GET" });
     assertCompatibleCompanion(health);
+    rememberCompanionHealth(health);
     if (health.pairing_required && !state.settings?.pairingToken) {
       setLocalizedSettingsStatus("settings.status.needToken", {
         path: health.pairing_token_path || "state/pairing_token.txt"
@@ -8041,6 +8613,9 @@ async function testCompanion() {
       return;
     }
     const projectsResponse = await companionRequest("/v1/projects", { method: "GET" });
+    state.companionAuthenticated = true;
+    selectionDrainExcludedIds.clear();
+    selectionDrainRequested = true;
     state.projects = projectsResponse.projects || [];
     renderProjectSelect();
     await loadModelSettings();
@@ -8055,6 +8630,9 @@ async function testCompanion() {
     showTab("chat");
     $("quickStartBtn")?.focus?.();
   } catch (error) {
+    state.companionAuthenticated = false;
+    state.companionCapabilities = [];
+    state.companionServiceVersion = "";
     const invalidToken = /missing x-qc-pairing-token|invalid pairing token|HTTP 401|HTTP 403/i.test(error.message);
     setLocalizedSettingsStatus(
       invalidToken ? "settings.status.invalidToken" : "settings.status.unavailable",
@@ -8062,6 +8640,7 @@ async function testCompanion() {
     );
   } finally {
     setBusy(false);
+    schedulePendingSelectionDrain();
   }
 }
 
@@ -8149,6 +8728,17 @@ function assertCompatibleCompanion(health) {
   }
 }
 
+function rememberCompanionHealth(health) {
+  state.companionCapabilities = Array.isArray(health?.capabilities)
+    ? health.capabilities.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  state.companionServiceVersion = String(health?.service_version || health?.version || "").trim();
+}
+
+function companionSupportsSelectionFirstEvidence() {
+  return state.companionCapabilities.includes(SELECTION_FIRST_EVIDENCE_CAPABILITY);
+}
+
 function compareProductVersions(left, right) {
   const parse = (value) => String(value || "")
     .split(".")
@@ -8191,6 +8781,7 @@ function showTab(tabId) {
 }
 
 function setBusy(isBusy) {
+  const wasBusy = Boolean(state.busy);
   state.busyDepth = Math.max(0, Number(state.busyDepth || 0) + (isBusy ? 1 : -1));
   state.busy = state.busyDepth > 0;
   const ids = [
@@ -8336,6 +8927,7 @@ function setBusy(isBusy) {
     node.disabled = state.busy;
   });
   syncProviderControls();
+  if (wasBusy && !state.busy) schedulePendingSelectionDrain();
 }
 
 function setStatus(message) {
@@ -8484,6 +9076,7 @@ async function companionRequest(path, options = {}) {
     const error = new Error(data.error || `HTTP ${response.status}`);
     error.status = response.status;
     error.code = data.code || "companion_error";
+    error.reason = data.reason || "";
     throw error;
   }
   return data;
