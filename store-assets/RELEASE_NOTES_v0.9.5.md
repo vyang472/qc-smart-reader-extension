@@ -24,6 +24,6 @@ Use the v0.9.5 Extension and Companion archives from the same GitHub Release and
 
 ## Honest release status
 
-This file is candidate release copy. It does not prove that the v0.9.5 GitHub Release exists or that Chrome Web Store upload, submission, or approval has occurred.
+The public v0.9.5 GitHub Release and its three checksum-verified assets are available at [GitHub Releases](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5). Chrome Web Store upload, submission, and approval have not occurred.
 
 The locale-specific Web Store screenshots currently in the repository were captured and verified for v0.9.4. They are prior-release references only: they were not recaptured from v0.9.5 and do not show the new context-menu selection flow.

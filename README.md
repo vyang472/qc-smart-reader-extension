@@ -42,7 +42,7 @@ The supported release path currently targets **macOS and Chrome 116+**. Core set
 
 Before starting, make sure the Mac has **Python 3.9+**, Chrome 116+, and internet access for the first Companion install to download its hash-pinned Python wheels. Codex CLI, `yt-dlp`, and the Swift toolchain are optional and only enable their corresponding model, public-caption, and OCR paths.
 
-1. After the v0.9.5 GitHub Release is published, download these three files from [QC Smart Reader v0.9.5](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5):
+1. Download these three files from the public [QC Smart Reader v0.9.5 release](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5):
    - `qc-smart-reader-companion-0.9.5.zip`
    - `qc-smart-reader-extension-0.9.5.zip`
    - `SHA256SUMS`

@@ -42,7 +42,7 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 
 开始前请确认 Mac 上已有 **Python 3.9+**、Chrome 116+，并能在首次安装 Companion 时联网下载经过 hash 锁定的 Python wheels。Codex CLI、`yt-dlp` 与 Swift 工具链都是可选依赖，只分别影响对应的模型、公开字幕与 OCR 路线。
 
-1. v0.9.5 GitHub Release 发布后，从 [QC Smart Reader v0.9.5](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5) 下载三个文件：
+1. 从已公开的 [QC Smart Reader v0.9.5 Release](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5) 下载三个文件：
    - `qc-smart-reader-companion-0.9.5.zip`
    - `qc-smart-reader-extension-0.9.5.zip`
    - `SHA256SUMS`
