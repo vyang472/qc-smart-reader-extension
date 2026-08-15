@@ -295,6 +295,28 @@ def canonicalize_url(value: str) -> str:
     return urlunparse((scheme, netloc, path, "", urlencode(query_items, doseq=True), ""))
 
 
+def safe_replay_open_url(*values: str) -> str:
+    """Return the first browser-safe captured URL without resolving or fetching it."""
+
+    for raw_value in values:
+        value = str(raw_value or "")
+        if not value or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in value):
+            continue
+        try:
+            parsed = urlparse(value)
+            scheme = parsed.scheme.lower()
+            host = parsed.hostname or ""
+            _ = parsed.port
+        except ValueError:
+            continue
+        if scheme not in {"http", "https"} or not parsed.netloc or not host:
+            continue
+        if parsed.username is not None or parsed.password is not None:
+            continue
+        return value
+    return ""
+
+
 def path_is_within(candidate: Path, root: Path) -> bool:
     try:
         candidate.relative_to(root)
@@ -420,6 +442,18 @@ def infer_site(url: str) -> str:
 
 def markdown_escape(value: str) -> str:
     return (value or "").replace("\n", " ").strip()
+
+
+def markdown_verbatim_block(value: str) -> str:
+    text = str(value or "")
+    longest_run = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest_run + 1)
+    return f"{fence}\n{text}\n{fence}"
+
+
+def replay_markdown_safe_inline(value: str) -> str:
+    text = str(value or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
+    return re.sub(r"([\\`*_\[\]()<>!])", r"\\\1", text)
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict | list) -> None:
@@ -6049,6 +6083,289 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
             "strength": row.get("strength") or "",
         }
 
+    def source_replay_locator(self, evidence: dict, chunk: dict | None) -> dict:
+        chunk = chunk or {}
+        locator = {
+            "type": "chunk",
+            "label": "Unresolved",
+            "provenance": "chunk.index" if chunk else "none",
+            "chunk_id": normalize_text(evidence.get("chunk_id") or ""),
+            "chunk_index": chunk.get("chunk_index"),
+            "start_offset": chunk.get("start_offset"),
+            "end_offset": chunk.get("end_offset"),
+        }
+        page = evidence.get("page")
+        page_start = chunk.get("page_start")
+        page_end = chunk.get("page_end")
+        floor = evidence.get("floor")
+        timestamp = evidence.get("timestamp")
+        timestamp_start = chunk.get("timestamp_start")
+        timestamp_end = chunk.get("timestamp_end")
+        if page_start is not None or page_end is not None:
+            locator.update({"type": "page", "provenance": "chunk.page"})
+            if page_start == page_end or page_end is None:
+                locator["label"] = f"Page {page_start}"
+            else:
+                locator["label"] = f"Pages {page_start}–{page_end}"
+            if page_start is not None:
+                locator["page_start"] = page_start
+            if page_end is not None:
+                locator["page_end"] = page_end
+            return locator
+        if timestamp_start is not None or timestamp_end is not None:
+            locator.update({"type": "timestamp", "provenance": "chunk.timestamp"})
+            if timestamp_start == timestamp_end or timestamp_end is None:
+                locator["label"] = f"Time {self.timestamp_label(timestamp_start)}"
+            else:
+                locator["label"] = (
+                    f"Time {self.timestamp_label(timestamp_start)}–{self.timestamp_label(timestamp_end)}"
+                )
+            if timestamp_start is not None:
+                locator["timestamp_start"] = timestamp_start
+            if timestamp_end is not None:
+                locator["timestamp_end"] = timestamp_end
+            return locator
+        if page not in {None, ""}:
+            locator.update(
+                {"type": "page", "label": f"Page {page}", "provenance": "evidence.page", "page": page}
+            )
+            return locator
+        if floor not in {None, ""}:
+            locator.update(
+                {
+                    "type": "floor",
+                    "label": f"Floor {floor}",
+                    "provenance": "evidence.floor",
+                    "floor": floor,
+                }
+            )
+            return locator
+        if timestamp not in {None, ""}:
+            locator.update(
+                {
+                    "type": "timestamp",
+                    "label": f"Time {timestamp}",
+                    "provenance": "evidence.timestamp",
+                    "timestamp": timestamp,
+                }
+            )
+            return locator
+        chunk_index = chunk.get("chunk_index")
+        if chunk_index is not None:
+            locator["label"] = f"Chunk {int(chunk_index) + 1}"
+        elif locator["chunk_id"]:
+            locator["label"] = f"Chunk {locator['chunk_id']}"
+        return locator
+
+    def source_replay_context(self, chunk_text: str, quote: str, *, limit: int = 800) -> dict:
+        text = str(chunk_text or "")
+        quote_index = text.find(quote) if text and quote else -1
+        second_quote_index = text.find(quote, quote_index + 1) if quote_index >= 0 else -1
+        if not text:
+            return {
+                "text": "",
+                "chunk_start_offset": None,
+                "chunk_end_offset": None,
+                "quote_start_offset": None,
+                "quote_end_offset": None,
+            }
+        if quote_index < 0 or second_quote_index >= 0:
+            context_text = text[:limit]
+            return {
+                "text": context_text,
+                "chunk_start_offset": 0,
+                "chunk_end_offset": len(context_text),
+                "quote_start_offset": None,
+                "quote_end_offset": None,
+            }
+        if len(quote) > limit:
+            context_text = text[quote_index : quote_index + limit]
+            return {
+                "text": context_text,
+                "chunk_start_offset": quote_index,
+                "chunk_end_offset": quote_index + len(context_text),
+                "quote_start_offset": None,
+                "quote_end_offset": None,
+            }
+
+        quote_end = quote_index + len(quote)
+        context_start = max(0, quote_index - 240)
+        context_end = min(len(text), max(quote_end + 240, context_start + limit))
+        if context_end - context_start > limit:
+            context_end = context_start + limit
+        if quote_end > context_end:
+            context_end = min(len(text), quote_end + 120)
+            context_start = max(0, context_end - limit)
+        context_text = text[context_start:context_end]
+        relative_quote_start = quote_index - context_start
+        relative_quote_end = relative_quote_start + len(quote)
+        return {
+            "text": context_text,
+            "chunk_start_offset": context_start,
+            "chunk_end_offset": context_end,
+            "quote_start_offset": relative_quote_start,
+            "quote_end_offset": relative_quote_end,
+        }
+
+    def source_replay_version_state(self, db: sqlite3.Connection, source: dict) -> dict:
+        canonical_url = canonicalize_url(source.get("canonical_url") or source.get("url") or "")
+        if not canonical_url:
+            return {
+                "version_index": None,
+                "is_current": None,
+                "current_source_id": None,
+            }
+        rows = db.execute(
+            """
+            SELECT source_id, version_index
+            FROM source_versions
+            WHERE project_id = ? AND canonical_url = ?
+            ORDER BY version_index DESC, captured_at DESC, source_id DESC
+            """,
+            (source.get("project_id") or "", canonical_url),
+        ).fetchall()
+        if not rows:
+            return {
+                "version_index": None,
+                "is_current": None,
+                "current_source_id": None,
+            }
+        current_source_id = rows[0]["source_id"] or ""
+        source_version = next(
+            (int(row["version_index"]) for row in rows if row["source_id"] == source.get("id")),
+            None,
+        )
+        return {
+            "version_index": source_version,
+            "is_current": current_source_id == (source.get("id") or ""),
+            "current_source_id": current_source_id,
+        }
+
+    def source_replay_target(self, db: sqlite3.Connection, evidence: dict | sqlite3.Row) -> dict:
+        item = dict(evidence)
+        evidence_id = normalize_text(item.get("id") or "")
+        source_id = normalize_text(item.get("source_id") or "")
+        chunk_id = normalize_text(item.get("chunk_id") or "")
+        quote = str(item.get("quote") or "")
+        replay_id = "rpl_" + hashlib.sha256(evidence_id.encode("utf-8")).hexdigest()[:16]
+        empty_source = {
+            "url": "",
+            "canonical_url": "",
+            "title": "",
+            "kind": "",
+            "site": "",
+            "content_hash": "",
+            "captured_at": "",
+            "open_url": "",
+            "version_index": None,
+            "is_current": None,
+            "current_source_id": None,
+        }
+        empty_context = self.source_replay_context("", "")
+        empty_locator = self.source_replay_locator({"chunk_id": ""}, None)
+        claim = db.execute(
+            "SELECT project_id FROM claims WHERE id = ?",
+            (item.get("claim_id") or "",),
+        ).fetchone()
+        source_row = db.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone() if source_id else None
+        chunk_row = (
+            db.execute(
+                """
+                SELECT chunks.*, documents.source_id AS chunk_source_id,
+                       sources.project_id AS chunk_project_id
+                FROM chunks
+                JOIN documents ON documents.id = chunks.document_id
+                JOIN sources ON sources.id = documents.source_id
+                WHERE chunks.id = ?
+                """,
+                (chunk_id,),
+            ).fetchone()
+            if chunk_id
+            else None
+        )
+        claim_project_id = claim["project_id"] if claim else ""
+        source = dict(source_row) if source_row else {}
+        chunk = dict(chunk_row) if chunk_row else {}
+
+        project_mismatch = bool(
+            not claim_project_id
+            or (source and source.get("project_id") != claim_project_id)
+            or (chunk and chunk.get("chunk_project_id") != claim_project_id)
+        )
+        if project_mismatch:
+            return {
+                "version": 1,
+                "replay_id": replay_id,
+                "evidence_id": evidence_id,
+                "claim_id": normalize_text(item.get("claim_id") or ""),
+                "source_id": "",
+                "source": empty_source,
+                "locator": empty_locator,
+                "quote": {"text": "", "sha256": ""},
+                "context": empty_context,
+                "status": "unresolved",
+                "reason": "project_mismatch",
+            }
+
+        version_state = self.source_replay_version_state(db, source) if source else {
+            "version_index": None,
+            "is_current": None,
+            "current_source_id": None,
+        }
+        replay_source = {
+            "url": source.get("url") or "",
+            "canonical_url": source.get("canonical_url") or "",
+            "title": source.get("title") or "",
+            "kind": source.get("kind") or "",
+            "site": source.get("site") or "",
+            "content_hash": source.get("content_hash") or "",
+            "captured_at": source.get("captured_at") or "",
+            "open_url": safe_replay_open_url(source.get("canonical_url") or "", source.get("url") or ""),
+            **version_state,
+        }
+        locator = self.source_replay_locator(item, chunk)
+        context = self.source_replay_context(chunk.get("text") or "", quote)
+        replay_quote = {
+            "text": quote,
+            "sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest() if quote else "",
+        }
+
+        if not source:
+            status, reason = "unresolved", "missing_source"
+        elif not chunk:
+            status, reason = "unresolved", "missing_chunk"
+        elif chunk.get("chunk_source_id") != source_id:
+            status, reason = "unresolved", "chunk_source_mismatch"
+            context = empty_context
+        elif not quote:
+            status, reason = "unresolved", "missing_quote"
+        elif len(quote) > 800:
+            status, reason = "unresolved", "quote_too_long"
+        elif str(chunk.get("text") or "").find(quote) >= 0 and str(chunk.get("text") or "").find(
+            quote,
+            str(chunk.get("text") or "").find(quote) + 1,
+        ) >= 0:
+            status, reason = "unresolved", "ambiguous_quote"
+        elif context["quote_start_offset"] is None:
+            status, reason = "unresolved", "quote_mismatch"
+        elif version_state["is_current"] is False:
+            status, reason = "stale", "source_superseded"
+        else:
+            status, reason = "resolved", "exact_quote_match"
+        return {
+            "version": 1,
+            "replay_id": replay_id,
+            "evidence_id": evidence_id,
+            "claim_id": normalize_text(item.get("claim_id") or ""),
+            "source_id": source_id,
+            "source": replay_source,
+            "locator": locator,
+            "quote": replay_quote,
+            "context": context,
+            "status": status,
+            "reason": reason,
+        }
+
     def evidence_citation_is_valid(
         self,
         db: sqlite3.Connection,
@@ -6056,7 +6373,30 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
         *,
         quote_override: str | None = None,
     ) -> bool:
-        return self.citation_is_valid_in_db(db, self.evidence_citation(evidence, quote_override=quote_override))
+        item = dict(evidence)
+        claim_id = normalize_text(item.get("claim_id") or "")
+        source_id = normalize_text(item.get("source_id") or "")
+        chunk_id = normalize_text(item.get("chunk_id") or "")
+        quote = item.get("quote") if quote_override is None else quote_override
+        quote = str(quote or "")
+        if not claim_id or not source_id or not chunk_id or not quote:
+            return False
+        row = db.execute(
+            """
+            SELECT claims.project_id AS claim_project_id,
+                   sources.project_id AS source_project_id,
+                   chunks.text AS chunk_text
+            FROM claims
+            JOIN sources ON sources.id = ?
+            JOIN documents ON documents.source_id = sources.id
+            JOIN chunks ON chunks.document_id = documents.id AND chunks.id = ?
+            WHERE claims.id = ?
+            """,
+            (source_id, chunk_id, claim_id),
+        ).fetchone()
+        if not row or row["claim_project_id"] != row["source_project_id"]:
+            return False
+        return quote in (row["chunk_text"] or "")
 
     def annotate_evidence_rows(
         self,
@@ -6067,6 +6407,22 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
         for row in evidence_rows:
             item = dict(row)
             item["citation_valid"] = self.evidence_citation_is_valid(db, item)
+            item["replay"] = self.source_replay_target(db, item)
+            if item["replay"]["reason"] == "project_mismatch":
+                item["citation_valid"] = False
+                for field in (
+                    "source_id",
+                    "chunk_id",
+                    "quote",
+                    "url",
+                    "page",
+                    "floor",
+                    "timestamp",
+                    "chunk_context",
+                    "source_title",
+                    "source_url",
+                ):
+                    item[field] = ""
             annotated.append(item)
         return annotated
 
@@ -9580,9 +9936,46 @@ checked_at: {report.get('checked_at') or ''}
             row["metadata"] = {}
         return row
 
+    def evidence_replay_markdown(self, evidence_rows: list[dict]) -> str:
+        sections = []
+        for evidence in evidence_rows:
+            replay = evidence.get("replay") or {}
+            source = replay.get("source") or {}
+            locator = replay.get("locator") or {}
+            quote = replay.get("quote") or {}
+            context = replay.get("context") or {}
+            open_url = source.get("open_url") or "Unavailable"
+            sections.append(
+                "\n".join(
+                    [
+                        (
+                            f"- `{replay.get('replay_id') or ''}` · `{replay.get('status') or 'unresolved'}` · "
+                            f"`{replay.get('reason') or 'unresolved'}`"
+                        ),
+                        f"  - Evidence: `{replay.get('evidence_id') or evidence.get('id') or ''}`",
+                        f"  - Claim: `{replay.get('claim_id') or evidence.get('claim_id') or ''}`",
+                        f"  - Source: `{replay.get('source_id') or evidence.get('source_id') or ''}` · {replay_markdown_safe_inline(source.get('title') or '')}",
+                        f"  - Canonical fallback: {replay_markdown_safe_inline(open_url)}",
+                        f"  - Locator: {replay_markdown_safe_inline(locator.get('label') or 'Unresolved')}",
+                        f"  - Locator provenance: `{locator.get('provenance') or 'none'}`",
+                        f"  - Quote SHA-256: `{quote.get('sha256') or ''}`",
+                        "  - Exact quote:",
+                        markdown_verbatim_block(quote.get("text") or ""),
+                        "  - Captured context:",
+                        markdown_verbatim_block(context.get("text") or ""),
+                    ]
+                )
+            )
+        return "\n".join(sections) or "- No evidence replay targets."
+
     def export_package_markdown(self, package: dict) -> str:
         source_lines = "\n".join(
-            f"- `{item['id']}` · `{item.get('status') or 'new'}` — {markdown_escape(item['title'])} ({item.get('site') or ''}) {item.get('url') or ''}"
+            (
+                f"- `{item['id']}` · `{item.get('status') or 'new'}` — "
+                f"{replay_markdown_safe_inline(item['title'])} "
+                f"({replay_markdown_safe_inline(item.get('site') or '')}) "
+                f"{replay_markdown_safe_inline(safe_replay_open_url(item.get('canonical_url') or '', item.get('url') or '') or 'Unavailable')}"
+            )
             for item in package["sources"]
         ) or "- No sources."
         attachment_lines = "\n".join(
@@ -9710,6 +10103,7 @@ checked_at: {report.get('checked_at') or ''}
             f"- `{relation['id']}` · {relation.get('subject_entity_id') or '?'} {relation['predicate']} {relation.get('object_entity_id') or '?'}"
             for relation in knowledge["relations"]
         ) or "- No relations."
+        evidence_replay_lines = self.evidence_replay_markdown(knowledge.get("evidence") or [])
         claim_event_lines = "\n".join(
             (
                 f"- `{event['created_at']}` · `{event['event_type']}` · `{event.get('claim_id') or ''}`"
@@ -9760,6 +10154,10 @@ Vault: {package['vault_dir']}
 ### Claims
 
 {claim_lines}
+
+### Evidence Replay
+
+{evidence_replay_lines}
 
 ### Relations
 
@@ -9958,6 +10356,7 @@ Vault: {package['vault_dir']}
                         output[key].append(record)
 
             db.commit()
+            output["evidence"] = self.annotate_evidence_rows(db, output["evidence"])
 
         self.write_knowledge_wiki_pages(
             output,
@@ -11008,9 +11407,11 @@ CHUNKS:
         return candidates
 
     def mock_claim_sentences(self, chunks: list[dict], max_claims: int) -> list[tuple[dict, str]]:
-        output: list[tuple[dict, str]] = []
+        exact_once: list[tuple[dict, str]] = []
+        fallback_matched: list[tuple[dict, str]] = []
         for chunk in chunks:
-            text = normalize_text(chunk.get("text") or "")
+            raw_text = str(chunk.get("text") or "")
+            text = normalize_text(raw_text)
             sentences = re.split(r"(?<=[。！？.!?])\s+|\n+", text)
             for sentence in sentences:
                 sentence = normalize_text(sentence).strip("#*- ")
@@ -11018,9 +11419,26 @@ CHUNKS:
                     continue
                 if re.match(r"^(id|type|title|url|site|captured_at|content_hash):", sentence):
                     continue
-                output.append((chunk, sentence[:320]))
-                if len(output) >= max_claims:
-                    return output
+                if re.match(r"^https?://\S+$", sentence, re.I):
+                    continue
+                if re.match(r"^(?:主帖|评论|回复|post|reply)\s*[·#]", sentence, re.I):
+                    continue
+                if re.match(r"^(?:附件|图片|重要链接|attachments?|images?|links?)\s*[:：]", sentence, re.I):
+                    continue
+                if re.match(r"^!?\[[^\]]+\]\([^\s)]+\)$", sentence):
+                    continue
+                candidate = sentence[:320]
+                quote = candidate[:220]
+                first_match = raw_text.find(quote)
+                if first_match < 0:
+                    continue
+                target = exact_once if raw_text.find(quote, first_match + 1) < 0 else fallback_matched
+                target.append((chunk, candidate))
+        if max_claims <= 0:
+            return []
+        output = exact_once[:max_claims]
+        if len(output) < max_claims:
+            output.extend(fallback_matched[: max_claims - len(output)])
         return output
 
     def upsert_entity(self, db: sqlite3.Connection, project_id: str, item: dict | str, now: str) -> dict | None:
@@ -11599,11 +12017,11 @@ CHUNKS:
                 LEFT JOIN claims ON claims.id = evidence.claim_id
                 LEFT JOIN sources ON sources.id = evidence.source_id
                 LEFT JOIN chunks ON chunks.id = evidence.chunk_id
-                WHERE claims.project_id = ? OR sources.project_id = ?
+                WHERE claims.project_id = ?
                 ORDER BY evidence.created_at DESC
                 LIMIT ?
             """
-            evidence_params = (project_id, project_id, limit)
+            evidence_params = (project_id, limit)
         with self.connect() as db:
             entities = [
                 self.decode_entity(dict(row))
@@ -12515,9 +12933,7 @@ CHUNKS:
                 """,
                 (evidence_id,),
             ).fetchone()
-            item = dict(row) if row else {}
-            if item:
-                item["citation_valid"] = self.evidence_citation_is_valid(db, item)
+            item = self.annotate_evidence_rows(db, [row])[0] if row else {}
         if not row:
             raise KeyError(evidence_id)
         return item

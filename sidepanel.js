@@ -146,8 +146,11 @@ const state = {
   backtestResults: [],
   strategyReviews: [],
   claimReviewQueue: [],
+  knowledgeRecords: {},
+  projectViewGeneration: 0,
   onboardingMilestones: {},
-  onboardingDecisionVerified: false
+  onboardingDecisionVerified: false,
+  quickStartReplay: null
 };
 
 let pendingSelectionConsumption = Promise.resolve();
@@ -218,13 +221,83 @@ async function initializeUiLocale() {
 async function setUiLocale(preference) {
   if (!globalThis.QCI18n?.set) return "zh-CN";
   const locale = await globalThis.QCI18n.set(preference, document);
+  const knowledgeInteractions = snapshotAdvancedKnowledgeInteractions();
   refreshLocalizedNode($("status"));
   refreshLocalizedNode($("settingsStatus"));
   renderSource();
   renderQuickStart();
   renderQuickStartEvidenceChrome();
+  renderKnowledgeRecords(state.knowledgeRecords || {});
+  renderClaimReviewQueue(state.claimReviewQueue || []);
+  restoreAdvancedKnowledgeInteractions(knowledgeInteractions);
   updateAdvancedLanguageNotice();
   return locale;
+}
+
+function replayInteractionKey(button) {
+  const replayId = String(button?.dataset?.evidenceReplayId || "");
+  const scope = String(button?.dataset?.replayScope || "evidence");
+  return replayId ? `${scope}:${replayId}` : "";
+}
+
+function snapshotAdvancedKnowledgeInteractions() {
+  const claimDrafts = {};
+  for (const node of document.querySelectorAll?.("[data-claim-edit-text]") || []) {
+    const claimId = String(node?.dataset?.claimEditText || "");
+    if (claimId) claimDrafts[claimId] = String(node.value ?? "");
+  }
+  const selectedKnowledgeClaims = [...(document.querySelectorAll?.("[data-claim-select]") || [])]
+    .filter((node) => node.checked)
+    .map((node) => String(node.value || ""))
+    .filter(Boolean);
+  const selectedWorkbenchClaims = [...(document.querySelectorAll?.("[data-claim-workbench-select]") || [])]
+    .filter((node) => node.checked)
+    .map((node) => String(node.value || ""))
+    .filter(Boolean);
+  const expandedReplays = {};
+  for (const button of document.querySelectorAll?.("[data-evidence-replay-id]") || []) {
+    const expanded = String(button.getAttribute?.("aria-expanded") ?? button["aria-expanded"] ?? "false") === "true";
+    const key = replayInteractionKey(button);
+    if (!expanded || !key) continue;
+    const panelId = String(button.getAttribute?.("aria-controls") ?? button["aria-controls"] ?? "");
+    const panel = panelId ? document.getElementById?.(panelId) : null;
+    expandedReplays[key] = {
+      contextScrollTop: Number(panel?.querySelector?.("[data-replay-context]")?.scrollTop || 0),
+      storedQuoteScrollTop: Number(panel?.querySelector?.("[data-replay-stored-quote]")?.scrollTop || 0),
+    };
+  }
+  return { claimDrafts, selectedKnowledgeClaims, selectedWorkbenchClaims, expandedReplays };
+}
+
+function restoreAdvancedKnowledgeInteractions(snapshot = {}) {
+  const drafts = snapshot.claimDrafts || {};
+  for (const node of document.querySelectorAll?.("[data-claim-edit-text]") || []) {
+    const claimId = String(node?.dataset?.claimEditText || "");
+    if (Object.prototype.hasOwnProperty.call(drafts, claimId)) node.value = drafts[claimId];
+  }
+  const selectedKnowledgeClaims = new Set(snapshot.selectedKnowledgeClaims || []);
+  for (const node of document.querySelectorAll?.("[data-claim-select]") || []) {
+    node.checked = selectedKnowledgeClaims.has(String(node.value || ""));
+  }
+  const selectedWorkbenchClaims = new Set(snapshot.selectedWorkbenchClaims || []);
+  for (const node of document.querySelectorAll?.("[data-claim-workbench-select]") || []) {
+    node.checked = selectedWorkbenchClaims.has(String(node.value || ""));
+  }
+  const expandedReplays = snapshot.expandedReplays || {};
+  for (const button of document.querySelectorAll?.("[data-evidence-replay-id]") || []) {
+    const state = expandedReplays[replayInteractionKey(button)];
+    if (!state) continue;
+    button.setAttribute?.("aria-expanded", "true");
+    if (!button.setAttribute) button["aria-expanded"] = "true";
+    const panelId = String(button.getAttribute?.("aria-controls") ?? button["aria-controls"] ?? "");
+    const panel = panelId ? document.getElementById?.(panelId) : null;
+    if (!panel) continue;
+    panel.hidden = false;
+    const context = panel.querySelector?.("[data-replay-context]");
+    const storedQuote = panel.querySelector?.("[data-replay-stored-quote]");
+    if (context) context.scrollTop = Number(state.contextScrollTop || 0);
+    if (storedQuote) storedQuote.scrollTop = Number(state.storedQuoteScrollTop || 0);
+  }
 }
 
 function updateAdvancedLanguageNotice(activeTabId = "") {
@@ -294,6 +367,7 @@ function assertCurrentSourceProject() {
 
 function resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId) {
   if (previousProjectId === nextProjectId) return false;
+  clearProjectBoundKnowledgeViews();
   if (state.source) {
     state.source = null;
     state.lastAnswer = "";
@@ -309,6 +383,20 @@ function resetCurrentSourceAfterProjectChange(previousProjectId, nextProjectId) 
   renderQuickStart();
   setStatus(`已切换到项目 ${nextProjectId}；请重新读取该项目的来源。`);
   return true;
+}
+
+function clearProjectBoundKnowledgeViews() {
+  state.projectViewGeneration += 1;
+  state.knowledgeRecords = {};
+  state.claimReviewQueue = [];
+  for (const id of ["knowledgeRecordList", "claimReviewList"]) {
+    const node = $(id);
+    if (!node) continue;
+    node.replaceChildren?.();
+    node.textContent = "";
+    node.innerHTML = "";
+    if (Array.isArray(node.children)) node.children.length = 0;
+  }
 }
 
 function queryWithProject(params = {}) {
@@ -488,6 +576,9 @@ function bindEvents() {
   $("quickStartBtn").addEventListener("click", runQuickStart);
   $("quickStartAcceptClaimBtn").addEventListener("click", acceptQuickStartClaim);
   $("quickStartRejectClaimBtn").addEventListener("click", rejectQuickStartClaim);
+  $("quickStartReplayBtn").addEventListener("click", () => {
+    toggleReplayPanel($("quickStartReplayBtn"), $("quickStartReplayPanel"));
+  });
   $("useSelectionBtn").addEventListener("click", readSelectedTextFromPage);
   $("readSelectorBtn").addEventListener("click", readManualSelectorFromPage);
   $("enqueueNextPagesBtn").addEventListener("click", createNextPageCapturePlans);
@@ -1026,6 +1117,290 @@ function firstQuoteBackedClaim(records) {
   return null;
 }
 
+function replayValuePresent(value) {
+  return value !== null && value !== undefined && String(value) !== "";
+}
+
+function replayRangeLabel(single, start, end, formatter = (value) => String(value)) {
+  if (replayValuePresent(single)) return formatter(single);
+  if (!replayValuePresent(start) && !replayValuePresent(end)) return "";
+  const left = replayValuePresent(start) ? formatter(start) : formatter(end);
+  const right = replayValuePresent(end) ? formatter(end) : left;
+  return left === right ? left : `${left}–${right}`;
+}
+
+function replayTimestampLabel(value) {
+  if (!replayValuePresent(value)) return "";
+  const raw = String(value);
+  if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(raw)) return raw;
+  const number = Number(value);
+  return Number.isFinite(number) ? formatTimestamp(number) : raw;
+}
+
+function replayKindKey(sourceKind, locatorType) {
+  const normalized = String(sourceKind || "").toLowerCase();
+  if (["pdf", "paper"].includes(normalized) || locatorType === "page") return "pdf";
+  if (["thread", "forum", "post"].includes(normalized) || locatorType === "floor") return "thread";
+  if (["video", "youtube", "transcript"].includes(normalized) || locatorType === "timestamp") return "video";
+  if (["page", "web", "html", "article"].includes(normalized)) return "page";
+  return "source";
+}
+
+function replayLocatorLabel(replay) {
+  const locator = replay?.locator && typeof replay.locator === "object" ? replay.locator : {};
+  const source = replay?.source && typeof replay.source === "object" ? replay.source : {};
+  const type = String(locator.type || "").toLowerCase();
+  const segments = [uiText(`replay.kind.${replayKindKey(source.kind, type)}`)];
+  const page = replayRangeLabel(locator.page, locator.page_start, locator.page_end);
+  const floor = replayValuePresent(locator.floor) ? String(locator.floor) : "";
+  const timestamp = replayRangeLabel(
+    locator.timestamp,
+    locator.timestamp_start,
+    locator.timestamp_end,
+    replayTimestampLabel
+  );
+  const numericChunkIndex = Number(locator.chunk_index);
+  const chunk = replayValuePresent(locator.chunk_index)
+    ? Number.isInteger(numericChunkIndex) && numericChunkIndex >= 0
+      ? String(numericChunkIndex + 1)
+      : String(locator.chunk_index)
+    : replayValuePresent(locator.chunk_id)
+      ? String(locator.chunk_id)
+      : "";
+  if (page) segments.push(uiText("replay.locator.page", { value: page }));
+  if (floor) segments.push(uiText("replay.locator.floor", { value: floor }));
+  if (timestamp) segments.push(uiText("replay.locator.timestamp", { value: timestamp }));
+  if (chunk) segments.push(uiText("replay.locator.chunk", { value: chunk }));
+  if (segments.length === 1 && locator.label) segments.push(String(locator.label));
+  return segments.filter(Boolean).join(" · ");
+}
+
+function replayActionAriaLabel(replay) {
+  const source = replay?.source && typeof replay.source === "object" ? replay.source : {};
+  const sourceLabel = String(source.title || source.site || uiText("replay.source.unknown"));
+  const locatorLabel = replayLocatorLabel(replay) || uiText("replay.locator.unknown");
+  return uiText("replay.actionLabel", { source: sourceLabel, locator: locatorLabel });
+}
+
+function replayExactQuoteRange(replay) {
+  const quote = String(replay?.quote?.text ?? "");
+  const context = String(replay?.context?.text ?? "");
+  const start = Number(replay?.context?.quote_start_offset);
+  const end = Number(replay?.context?.quote_end_offset);
+  if (
+    !quote
+      || !Number.isInteger(start)
+      || !Number.isInteger(end)
+      || start < 0
+      || end < start
+      || end > context.length
+      || context.slice(start, end) !== quote
+  ) {
+    return null;
+  }
+  return { context, quote, start, end };
+}
+
+function replayPresentation(replay) {
+  const rawStatus = String(replay?.status || "unresolved").toLowerCase();
+  const status = ["resolved", "stale", "unresolved"].includes(rawStatus) ? rawStatus : "unresolved";
+  const exactRange = replayExactQuoteRange(replay);
+  if ((status === "resolved" || status === "stale") && !exactRange) {
+    return { status: "unresolved", reason: "context_offset_mismatch", exactRange: null };
+  }
+  return { status, reason: String(replay?.reason || ""), exactRange };
+}
+
+function safeReplaySourceUrl(replay) {
+  const rawCandidate = String(replay?.source?.open_url || "");
+  if (/[\u0000-\u001F\u007F]/.test(rawCandidate)) return "";
+  const candidate = rawCandidate.trim();
+  if (!candidate) return "";
+  try {
+    const url = new URL(candidate);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    if (url.username || url.password) return "";
+    return url.href;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function renderReplayPanelMarkup(replay) {
+  const presentation = replayPresentation(replay);
+  const source = replay?.source && typeof replay.source === "object" ? replay.source : {};
+  const locator = replay?.locator && typeof replay.locator === "object" ? replay.locator : {};
+  const projectMismatch = presentation.reason === "project_mismatch";
+  const quote = projectMismatch ? "" : String(replay?.quote?.text ?? "");
+  const context = projectMismatch ? "" : String(replay?.context?.text ?? "");
+  const sourceUrl = projectMismatch ? "" : safeReplaySourceUrl(replay);
+  const sourceMeta = projectMismatch ? [] : [
+    source.captured_at
+      ? uiText("replay.source.captured", { value: source.captured_at })
+      : "",
+    replayValuePresent(source.version_index)
+      ? uiText("replay.source.version", { value: `v${source.version_index}` })
+      : "",
+    source.content_hash
+      ? uiText("replay.source.hash", { value: source.content_hash })
+      : "",
+    source.is_current === true
+      ? uiText("replay.source.current")
+      : source.is_current === false && source.current_source_id
+        ? uiText("replay.source.superseded", { sourceId: source.current_source_id })
+        : ""
+  ].filter(Boolean);
+  const locatorLabel = projectMismatch ? "" : replayLocatorLabel(replay);
+  const provenance = projectMismatch || !locator.provenance
+    ? ""
+    : uiText("replay.locator.provenance", { value: locator.provenance });
+  let snapshotMarkup = "";
+  if (presentation.exactRange && presentation.status !== "unresolved") {
+    const { start, end } = presentation.exactRange;
+    snapshotMarkup = `
+      <div class="replay-snapshot-label">${escapeHtml(uiText("replay.snapshotTitle"))}</div>
+      <pre class="replay-context" data-replay-context tabindex="0" aria-label="${escapeHtml(uiText("replay.snapshotTitle"))}">${escapeHtml(context.slice(0, start))}<mark data-replay-exact-quote>${escapeHtml(context.slice(start, end))}</mark>${escapeHtml(context.slice(end))}</pre>
+    `;
+  } else if (context || quote) {
+    snapshotMarkup = `
+      ${context ? `<div class="replay-snapshot-label">${escapeHtml(uiText("replay.snapshotTitle"))}</div><pre class="replay-context" data-replay-context tabindex="0" aria-label="${escapeHtml(uiText("replay.snapshotTitle"))}">${escapeHtml(context)}</pre>` : ""}
+      ${quote ? `<div class="replay-snapshot-label">${escapeHtml(uiText("replay.storedQuote"))}</div><div class="replay-stored-quote" data-replay-stored-quote tabindex="0" aria-label="${escapeHtml(uiText("replay.storedQuote"))}">${escapeHtml(quote)}</div>` : ""}
+    `;
+  }
+  const reasonKey = `replay.reason.${presentation.reason || "missing_chunk"}`;
+  const reason = uiText(reasonKey, {}, presentation.reason || "");
+  return `
+    <div class="replay-status-row">
+      <span class="replay-status ${escapeHtml(presentation.status)}" data-replay-status="${escapeHtml(presentation.status)}">${escapeHtml(uiText(`replay.status.${presentation.status}`))}</span>
+      ${locatorLabel ? `<span class="replay-locator" data-replay-locator>${escapeHtml(locatorLabel)}</span>` : ""}
+    </div>
+    ${!projectMismatch && source.title ? `<strong class="replay-source-title">${escapeHtml(source.title)}</strong>` : ""}
+    ${sourceMeta.length ? `<small class="replay-source-meta">${escapeHtml(sourceMeta.join(" · "))}</small>` : ""}
+    ${provenance ? `<small class="replay-provenance">${escapeHtml(provenance)}</small>` : ""}
+    ${snapshotMarkup}
+    ${reason ? `<p class="replay-reason">${escapeHtml(reason)}</p>` : ""}
+    ${sourceUrl ? `
+      <a class="replay-source-link" data-replay-source-link href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(uiText("replay.source.open"))}</a>
+      <p class="replay-source-fallback">${escapeHtml(uiText("replay.source.fallback"))}</p>
+    ` : ""}
+  `;
+}
+
+function replayMatchesEvidence(replay, evidence, options = {}) {
+  if (!replay || typeof replay !== "object" || Number(replay.version) !== 1 || !replay.replay_id) return false;
+  const projectId = String(options.projectId || evidence?.project_id || "");
+  if (projectId && projectId !== currentProjectId()) return false;
+  const expected = {
+    evidence_id: evidence?.id || options.evidenceId || "",
+    claim_id: options.claimId || evidence?.claim_id || "",
+    source_id: evidence?.source_id || options.sourceId || ""
+  };
+  return Object.entries(expected).every(([key, value]) => !value || String(replay[key] || "") === String(value));
+}
+
+function replayPanelDomId(replayId, scope = "evidence") {
+  const raw = String(replayId || "replay");
+  const rawScope = String(scope || "evidence");
+  const readableScope = rawScope.replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 24) || "evidence";
+  const readable = raw.replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 36) || "replay";
+  return `replay-panel-${readableScope}-${readable}-${stableTextDigest(`${rawScope}:${raw}`)}`;
+}
+
+function renderEvidenceReplayControls(evidence, options = {}) {
+  const replay = evidence?.replay;
+  if (!replayMatchesEvidence(replay, evidence, options)) return "";
+  const replayId = String(replay.replay_id);
+  const scope = String(options.scope || "evidence");
+  const panelId = replayPanelDomId(replayId, scope);
+  const actionLabel = replayActionAriaLabel(replay);
+  return `
+    <div class="replay-container" data-replay-container="${escapeHtml(replayId)}">
+      <button
+        class="replay-action"
+        type="button"
+        data-evidence-replay-id="${escapeHtml(replayId)}"
+        data-replay-scope="${escapeHtml(scope)}"
+        aria-expanded="false"
+        aria-controls="${escapeHtml(panelId)}"
+        aria-label="${escapeHtml(actionLabel)}"
+      >${escapeHtml(uiText("replay.action"))}</button>
+      <section
+        id="${escapeHtml(panelId)}"
+        class="replay-panel"
+        data-replay-panel="${escapeHtml(replayId)}"
+        aria-label="${escapeHtml(uiText("replay.panelLabel"))}"
+        hidden
+      >${renderReplayPanelMarkup(replay)}</section>
+    </div>
+  `;
+}
+
+function toggleReplayPanel(button, panel) {
+  if (!button || !panel) return false;
+  const expanded = String(button.getAttribute?.("aria-expanded") ?? button["aria-expanded"] ?? "false") === "true";
+  const nextExpanded = !expanded;
+  button.setAttribute?.("aria-expanded", String(nextExpanded));
+  if (!button.setAttribute) button["aria-expanded"] = String(nextExpanded);
+  panel.hidden = !nextExpanded;
+  return nextExpanded;
+}
+
+function toggleEvidenceReplay(button, root = document) {
+  const replayId = button?.dataset?.evidenceReplayId || "";
+  if (!replayId) return false;
+  const panels = root?.querySelectorAll?.("[data-replay-panel]") || [];
+  const panel = [...panels].find((item) => item.dataset?.replayPanel === replayId);
+  return toggleReplayPanel(button, panel);
+}
+
+function bindReplayActions(root) {
+  for (const button of root?.querySelectorAll?.("[data-evidence-replay-id]") || []) {
+    button.addEventListener("click", () => toggleEvidenceReplay(button, root));
+  }
+}
+
+function renderQuickStartReplay() {
+  const card = $("quickStartEvidence");
+  const container = $("quickStartReplayContainer");
+  const button = $("quickStartReplayBtn");
+  const panel = $("quickStartReplayPanel");
+  if (!card || !container || !button || !panel) return;
+  const replay = state.quickStartReplay;
+  const matches = card.dataset.projectId === currentProjectId() && replayMatchesEvidence(
+    replay,
+    {
+      id: card.dataset.evidenceId || "",
+      claim_id: card.dataset.claimId || "",
+      source_id: card.dataset.sourceId || "",
+      project_id: card.dataset.projectId || ""
+    },
+    { projectId: card.dataset.projectId || "" }
+  );
+  if (!matches) {
+    container.hidden = true;
+    button.dataset.replayId = "";
+    button.setAttribute?.("aria-expanded", "false");
+    button.setAttribute?.("aria-label", uiText("replay.action"));
+    panel.dataset.replayPanel = "";
+    panel.dataset.replayStatus = "";
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  const sameReplay = button.dataset.replayId === replay.replay_id;
+  const wasExpanded = sameReplay
+    && String(button.getAttribute?.("aria-expanded") ?? button["aria-expanded"] ?? "false") === "true";
+  container.hidden = false;
+  button.dataset.replayId = replay.replay_id;
+  setLocalizedNodeText(button, "replay.action");
+  button.setAttribute?.("aria-label", replayActionAriaLabel(replay));
+  button.setAttribute?.("aria-expanded", String(wasExpanded));
+  panel.dataset.replayPanel = replay.replay_id;
+  panel.dataset.replayStatus = replayPresentation(replay).status;
+  panel.hidden = !wasExpanded;
+  panel.innerHTML = renderReplayPanelMarkup(replay);
+}
+
 function revealQuickStartEvidence(claim, evidence, options = {}) {
   const card = $("quickStartEvidence");
   if (!card || !claim || !evidence) return;
@@ -1035,6 +1410,10 @@ function revealQuickStartEvidence(claim, evidence, options = {}) {
   card.dataset.evidenceId = evidence.id || "";
   card.dataset.projectId = options.projectId || claim.project_id || currentProjectId();
   card.dataset.claimStatus = claim.status || "";
+  card.dataset.sourceId = evidence.source_id || evidence.replay?.source_id || "";
+  state.quickStartReplay = evidence.replay && typeof evidence.replay === "object"
+    ? evidence.replay
+    : null;
   card.hidden = false;
   renderQuickStartEvidenceChrome();
   if (options.focus !== false) {
@@ -1057,6 +1436,7 @@ function renderQuickStartEvidenceChrome() {
   const rejectButton = $("quickStartRejectClaimBtn");
   const reviewStatus = $("quickStartReviewStatus");
   if (!card) return;
+  renderQuickStartReplay();
   const claimId = card.dataset?.claimId || "";
   const claimStatus = card.dataset?.claimStatus || "";
   const decisionStatus = quickStartDecisionStatus();
@@ -1119,8 +1499,25 @@ function hideQuickStartEvidence() {
   card.dataset.evidenceId = "";
   card.dataset.projectId = "";
   card.dataset.claimStatus = "";
+  card.dataset.sourceId = "";
+  state.quickStartReplay = null;
   $("quickStartClaimText").textContent = "";
   $("quickStartQuoteText").textContent = "";
+  const replayContainer = $("quickStartReplayContainer");
+  const replayButton = $("quickStartReplayBtn");
+  const replayPanel = $("quickStartReplayPanel");
+  if (replayContainer) replayContainer.hidden = true;
+  if (replayButton) {
+    replayButton.dataset.replayId = "";
+    replayButton.setAttribute?.("aria-expanded", "false");
+    replayButton.setAttribute?.("aria-label", uiText("replay.action"));
+  }
+  if (replayPanel) {
+    replayPanel.dataset.replayPanel = "";
+    replayPanel.dataset.replayStatus = "";
+    replayPanel.hidden = true;
+    replayPanel.innerHTML = "";
+  }
   for (const id of ["quickStartAcceptClaimBtn", "quickStartRejectClaimBtn"]) {
     const button = $(id);
     if (!button) continue;
@@ -1275,6 +1672,8 @@ async function decideQuickStartClaim(decisionStatus) {
   const quote = String($("quickStartQuoteText")?.textContent || "").trim();
   const evidenceProjectId = String(card?.dataset?.projectId || "").trim();
   const evidenceId = String(card?.dataset?.evidenceId || "").trim();
+  const evidenceSourceId = String(card?.dataset?.sourceId || state.quickStartReplay?.source_id || "").trim();
+  const replayBeforeReview = state.quickStartReplay;
   if (
     !evidenceProjectId
       || evidenceProjectId !== currentProjectId()
@@ -1332,6 +1731,11 @@ async function decideQuickStartClaim(decisionStatus) {
     };
     if (decisionStatus === "reviewed") metadata.firstReviewedAt = new Date().toISOString();
     await refreshClaimReviewAfterMutation();
+    const refreshedReplay = replayMatchesEvidence(
+      state.quickStartReplay,
+      { id: evidenceId, claim_id: claimId, source_id: evidenceSourceId },
+      { projectId: currentProjectId() }
+    ) ? state.quickStartReplay : replayBeforeReview;
     state.onboardingDecisionVerified = true;
     await markOnboardingMilestone("firstDecisionAt", metadata);
     revealQuickStartEvidence(
@@ -1342,7 +1746,13 @@ async function decideQuickStartClaim(decisionStatus) {
         status: decisionStatus,
         text: result.claim?.text || claimText
       },
-      { id: evidenceId, claim_id: claimId, quote },
+      {
+        id: evidenceId,
+        claim_id: claimId,
+        source_id: evidenceSourceId,
+        quote,
+        replay: refreshedReplay
+      },
       { focus: false, projectId: currentProjectId() }
     );
     renderQuickStartEvidenceChrome();
@@ -5415,13 +5825,24 @@ async function refreshKnowledgeListsAfterMutation() {
 }
 
 async function loadKnowledgeRecords() {
+  const requestedProjectId = currentProjectId();
+  const requestedGeneration = state.projectViewGeneration;
   try {
-    const data = await companionRequest(`/v1/knowledge/records${queryWithProject({ limit: "50" })}`, { method: "GET" });
+    const query = new URLSearchParams({ limit: "50", project_id: requestedProjectId });
+    const data = await companionRequest(`/v1/knowledge/records?${query.toString()}`, { method: "GET" });
+    if (
+      requestedGeneration !== state.projectViewGeneration
+        || requestedProjectId !== currentProjectId()
+    ) return null;
     renderKnowledgeRecords(data);
     restoreQuickStartEvidenceFromRecords(data);
     setKnowledgeRecordStatus("");
     return data;
   } catch (error) {
+    if (
+      requestedGeneration !== state.projectViewGeneration
+        || requestedProjectId !== currentProjectId()
+    ) return null;
     console.warn("Companion knowledge records list failed.", error);
     renderKnowledgeRecords({});
     setKnowledgeRecordStatus(`无法读取结构化记录：${error.message}`);
@@ -5430,18 +5851,25 @@ async function loadKnowledgeRecords() {
 }
 
 async function loadClaimReviewQueue() {
+  const requestedProjectId = currentProjectId();
+  const requestedGeneration = state.projectViewGeneration;
   try {
     const status = $("claimReviewStatusFilter")?.value || "extracted,pending_validation";
-    const data = await companionRequest(`/v1/claims/review-queue${queryWithProject({
+    const query = new URLSearchParams({
       status,
       quote_validity: $("claimReviewQuoteFilter")?.value || "",
       evidence_strength: $("claimReviewStrengthFilter")?.value || "",
       source_id: $("claimReviewSourceFilter")?.value.trim() || "",
       topic_package_id: $("claimReviewTopicFilter")?.value.trim() || "",
-      limit: "50"
-    })}`, { method: "GET" });
+      limit: "50",
+      project_id: requestedProjectId
+    });
+    const data = await companionRequest(`/v1/claims/review-queue?${query.toString()}`, { method: "GET" });
+    if (
+      requestedGeneration !== state.projectViewGeneration
+        || requestedProjectId !== currentProjectId()
+    ) return null;
     const claims = Array.isArray(data.claims) ? data.claims : [];
-    state.claimReviewQueue = claims;
     renderClaimReviewQueue(claims);
     const filters = data.filters || {};
     const filterMeta = [
@@ -5452,22 +5880,27 @@ async function loadClaimReviewQueue() {
     ].filter(Boolean).join(" · ");
     setClaimReviewStatus(claims.length ? `${claims.length} 条 claim 待处理${filterMeta ? ` · ${filterMeta}` : ""}。` : "暂无符合条件的 claim。");
   } catch (error) {
+    if (
+      requestedGeneration !== state.projectViewGeneration
+        || requestedProjectId !== currentProjectId()
+    ) return null;
     console.warn("Companion claim review queue failed.", error);
-    state.claimReviewQueue = [];
     renderClaimReviewQueue([]);
     setClaimReviewStatus(`无法读取 claim 审阅队列：${error.message}`);
   }
 }
 
 function renderClaimReviewQueue(claims) {
+  const rows = Array.isArray(claims) ? claims : [];
+  state.claimReviewQueue = rows;
   const list = $("claimReviewList");
   if (!list) return;
   list.textContent = "";
-  if (!claims.length) {
+  if (!rows.length) {
     list.innerHTML = '<p class="hint">暂无 claim 审阅项。完成结构化抽取后，extracted / pending_validation claim 会出现在这里。</p>';
     return;
   }
-  for (const claim of claims) {
+  for (const claim of rows) {
     const node = document.createElement("article");
     node.className = "claim-review-card";
     const evidenceRows = Array.isArray(claim.evidence) ? claim.evidence : [];
@@ -5503,7 +5936,10 @@ function renderClaimReviewQueue(claims) {
         <button type="button" data-claim-workbench-id="${escapeHtml(claim.id)}" data-claim-status="rejected">拒绝</button>
       </div>
       <div class="claim-evidence-list">
-        ${evidenceRows.length ? evidenceRows.map(renderClaimEvidenceReviewCard).join("") : '<p class="hint">这个 claim 没有 evidence，不能进入 reviewed。</p>'}
+        ${evidenceRows.length ? evidenceRows.map((evidence) => renderClaimEvidenceReviewCard(evidence, {
+          claimId: claim.id,
+          projectId: claim.project_id || currentProjectId()
+        })).join("") : '<p class="hint">这个 claim 没有 evidence，不能进入 reviewed。</p>'}
       </div>
     `;
     bindClaimReviewWorkbenchActions(node);
@@ -5568,7 +6004,7 @@ function claimEventLabel(type) {
   }[type] || type;
 }
 
-function renderClaimEvidenceReviewCard(evidence) {
+function renderClaimEvidenceReviewCard(evidence, options = {}) {
   const meta = [
     evidence.status || "pending_validation",
     evidence.citation_valid === false ? "quote invalid" : evidence.citation_valid === true ? "quote valid" : "",
@@ -5590,6 +6026,10 @@ function renderClaimEvidenceReviewCard(evidence) {
       <blockquote>${escapeHtml(shortText(evidence.quote || "缺少 quote", 620))}</blockquote>
       ${evidence.chunk_context ? `<pre class="quote-context">${escapeHtml(shortText(evidence.chunk_context, 1200))}</pre>` : '<p class="hint">没有 chunk context。</p>'}
       ${sourceLine ? `<small>${escapeHtml(sourceLine)}</small>` : ""}
+      ${renderEvidenceReplayControls(evidence, {
+        ...options,
+        scope: options.scope || "claim-review"
+      })}
       <div class="source-actions">
         <button type="button" data-evidence-review-id="${escapeHtml(evidence.id)}" data-evidence-status="reviewed">接受证据</button>
         <button type="button" data-evidence-review-id="${escapeHtml(evidence.id)}" data-evidence-status="pending_validation">待验证</button>
@@ -5600,6 +6040,7 @@ function renderClaimEvidenceReviewCard(evidence) {
 }
 
 function bindClaimReviewWorkbenchActions(root) {
+  bindReplayActions(root);
   root.querySelectorAll("[data-claim-workbench-id]").forEach((button) => {
     button.addEventListener("click", () => reviewClaimFromWorkbench(button.dataset.claimWorkbenchId, button.dataset.claimStatus));
   });
@@ -5906,10 +6347,12 @@ function formatLearningCounts(counts) {
 }
 
 function renderKnowledgeRecords(records) {
+  const cachedRecords = records && typeof records === "object" ? records : {};
+  state.knowledgeRecords = cachedRecords;
   const list = $("knowledgeRecordList");
   if (!list) return;
   list.textContent = "";
-  const counts = knowledgeRecordCounts(records);
+  const counts = knowledgeRecordCounts(cachedRecords);
   const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
   if (!total) {
     list.innerHTML = '<p class="hint">还没有结构化记录。读取来源后点击“抽取结构化知识”。</p>';
@@ -5923,14 +6366,14 @@ function renderKnowledgeRecords(records) {
     .join("")}</div>`;
   list.appendChild(summary);
 
-  appendRecordGroup(list, "claims", records.claims, renderClaimRecord);
-  appendRecordGroup(list, "entities", records.entities, renderEntityRecord);
-  appendRecordGroup(list, "evidence", records.evidence, renderEvidenceRecord);
-  appendRecordGroup(list, "relations", records.relations, renderRelationRecord);
-  appendRecordGroup(list, "assumptions", records.assumptions, renderAssumptionRecord);
-  appendRecordGroup(list, "strategy_ideas", records.strategy_ideas, renderStrategyRecord);
-  appendRecordGroup(list, "risks", records.risks, renderRiskRecord);
-  appendRecordGroup(list, "tasks", records.tasks, renderTaskRecord);
+  appendRecordGroup(list, "claims", cachedRecords.claims, renderClaimRecord);
+  appendRecordGroup(list, "entities", cachedRecords.entities, renderEntityRecord);
+  appendRecordGroup(list, "evidence", cachedRecords.evidence, renderEvidenceRecord);
+  appendRecordGroup(list, "relations", cachedRecords.relations, renderRelationRecord);
+  appendRecordGroup(list, "assumptions", cachedRecords.assumptions, renderAssumptionRecord);
+  appendRecordGroup(list, "strategy_ideas", cachedRecords.strategy_ideas, renderStrategyRecord);
+  appendRecordGroup(list, "risks", cachedRecords.risks, renderRiskRecord);
+  appendRecordGroup(list, "tasks", cachedRecords.tasks, renderTaskRecord);
   bindClaimReviewActions(list);
 }
 
@@ -5978,6 +6421,7 @@ function renderClaimRecord(item) {
 }
 
 function bindClaimReviewActions(root) {
+  bindReplayActions(root);
   root.querySelectorAll("[data-claim-review-id]").forEach((button) => {
     button.addEventListener("click", () => reviewClaim(button.dataset.claimReviewId, button.dataset.claimStatus));
   });
@@ -6019,6 +6463,11 @@ function renderEvidenceRecord(item) {
       <strong>${escapeHtml(shortText(item.quote || item.claim_id || "evidence", 180))}</strong>
       ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
       ${item.url ? `<p>${escapeHtml(shortText(item.url, 260))}</p>` : ""}
+      ${renderEvidenceReplayControls(item, {
+        claimId: item.claim_id || "",
+        projectId: item.project_id || currentProjectId(),
+        scope: "knowledge-record"
+      })}
     </div>
   `;
 }
@@ -6720,6 +7169,8 @@ function renderProjectSelect() {
 
 async function changeProject() {
   const previousProjectId = state.batchProjectId || currentProjectId();
+  const selectedProjectId = $("projectSelect")?.value || currentProjectId();
+  if (selectedProjectId !== previousProjectId) clearProjectBoundKnowledgeViews();
   await saveBatchQueue(previousProjectId);
   await saveSettings({ saveModel: false });
   const nextProjectId = currentProjectId();

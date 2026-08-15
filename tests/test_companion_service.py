@@ -5830,6 +5830,909 @@ class CompanionServiceCase(unittest.TestCase):
         self.assertEqual(agent_runs[0]["status"], "success")
         self.assertNotIn("test-provider-extract-key", agent_runs[0]["input_json"])
 
+    def test_source_replay_v1_covers_web_pdf_forum_and_youtube_locators(self) -> None:
+        fixtures = [
+            {
+                "name": "web",
+                "source": {
+                    "kind": "page",
+                    "url": "https://example.com/replay/web?utm_source=test",
+                    "canonical_url": "https://example.com/replay/web",
+                    "title": "Replay Web Fixture",
+                    "site": "example.com",
+                },
+                "content": {
+                    "text": "Web replay keeps this exact captured sentence available for later review.",
+                    "markdown": "Web replay keeps this exact captured sentence available for later review.",
+                },
+                "quote": "this exact captured sentence",
+                "citation": {},
+                "locator_type": "chunk",
+                "locator_values": {"chunk_index": 0, "provenance": "chunk.index"},
+            },
+            {
+                "name": "pdf",
+                "source": {
+                    "kind": "pdf",
+                    "url": "https://example.com/replay/paper.pdf",
+                    "canonical_url": "https://example.com/replay/paper.pdf",
+                    "title": "Replay PDF Fixture",
+                    "site": "example.com",
+                },
+                "content": {
+                    "text": "PDF replay evidence appears on the fourth captured page.",
+                    "markdown": "PDF replay evidence appears on the fourth captured page.",
+                    "pages": [{"page": 4, "text": "PDF replay evidence appears on the fourth captured page."}],
+                },
+                "quote": "evidence appears on the fourth captured page",
+                "citation": {"page": "99"},
+                "locator_type": "page",
+                "locator_values": {
+                    "label": "Page 4",
+                    "page_start": 4,
+                    "page_end": 4,
+                    "provenance": "chunk.page",
+                },
+            },
+            {
+                "name": "forum",
+                "source": {
+                    "kind": "thread",
+                    "url": "https://forum.example.com/t/replay/12",
+                    "canonical_url": "https://forum.example.com/t/replay/12",
+                    "title": "Replay Forum Fixture",
+                    "site": "forum.example.com",
+                },
+                "content": {
+                    "text": "Forum replay preserves the exact claim discussed on floor twelve.",
+                    "markdown": "Forum replay preserves the exact claim discussed on floor twelve.",
+                },
+                "quote": "the exact claim discussed on floor twelve",
+                "citation": {"floor": "12"},
+                "locator_type": "floor",
+                "locator_values": {"floor": "12", "provenance": "evidence.floor"},
+            },
+            {
+                "name": "youtube",
+                "source": {
+                    "kind": "video",
+                    "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                    "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                    "title": "Replay YouTube Fixture",
+                    "site": "youtube",
+                },
+                "content": {
+                    "text": "YouTube replay returns the timestamped captured transcript sentence.",
+                    "markdown": "YouTube replay returns the timestamped captured transcript sentence.",
+                    "transcript_segments": [
+                        {
+                            "start": 90,
+                            "end": 105.5,
+                            "text": "YouTube replay returns the timestamped captured transcript sentence.",
+                        }
+                    ],
+                },
+                "quote": "timestamped captured transcript sentence",
+                "citation": {"page": "999", "floor": "77", "timestamp": "09:59"},
+                "locator_type": "timestamp",
+                "locator_values": {
+                    "timestamp_start": 90.0,
+                    "timestamp_end": 105.5,
+                    "provenance": "chunk.timestamp",
+                    "label": "Time 01:30–01:45",
+                },
+            },
+        ]
+
+        expected_replays = {}
+        for fixture in fixtures:
+            capture = self.request(
+                "/v1/captures",
+                {"source": fixture["source"], "content": fixture["content"], "browser": {}},
+                method="POST",
+            )
+            source = capture["source"]
+            chunk_id = capture["chunks"][0]["id"]
+            records = self.request(
+                "/v1/knowledge/records",
+                {
+                    "source_id": source["id"],
+                    "claims": [
+                        {
+                            "text": f"Replay claim for {fixture['name']}.",
+                            "evidence": [
+                                {
+                                    "source_id": source["id"],
+                                    "chunk_id": chunk_id,
+                                    "quote": fixture["quote"],
+                                    "url": source["url"],
+                                    **fixture["citation"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                method="POST",
+            )
+            evidence_id = records["evidence"][0]["id"]
+            replay = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+            expected_replays[evidence_id] = replay
+
+            self.assertEqual(replay["version"], 1)
+            self.assertEqual(
+                replay["replay_id"],
+                "rpl_" + hashlib.sha256(evidence_id.encode("utf-8")).hexdigest()[:16],
+            )
+            self.assertEqual(replay["evidence_id"], evidence_id)
+            self.assertEqual(replay["claim_id"], records["claims"][0]["id"])
+            self.assertEqual(replay["source_id"], source["id"])
+            self.assertEqual(
+                replay["source"],
+                {
+                    "url": source["url"],
+                    "canonical_url": source["canonical_url"],
+                    "title": source["title"],
+                    "kind": source["kind"],
+                    "site": source["site"],
+                    "content_hash": source["content_hash"],
+                    "captured_at": source["captured_at"],
+                    "open_url": source["canonical_url"],
+                    "version_index": 1,
+                    "is_current": True,
+                    "current_source_id": source["id"],
+                },
+            )
+            self.assertEqual(replay["locator"]["type"], fixture["locator_type"])
+            self.assertEqual(replay["locator"]["chunk_id"], chunk_id)
+            self.assertEqual(replay["locator"]["chunk_index"], 0)
+            for key, value in fixture["locator_values"].items():
+                self.assertEqual(replay["locator"][key], value)
+            self.assertEqual(replay["quote"]["text"], fixture["quote"])
+            self.assertEqual(
+                replay["quote"]["sha256"],
+                hashlib.sha256(fixture["quote"].encode("utf-8")).hexdigest(),
+            )
+            self.assertLessEqual(len(replay["context"]["text"]), 800)
+            self.assertIn(fixture["quote"], replay["context"]["text"])
+            self.assertEqual(replay["status"], "resolved")
+            self.assertEqual(replay["reason"], "exact_quote_match")
+            self.assertEqual(records["evidence"][0]["replay"], replay)
+
+        listing = self.request("/v1/knowledge/records?limit=20")
+        listed_replays = {item["id"]: item["replay"] for item in listing["evidence"]}
+        for evidence_id, replay in expected_replays.items():
+            self.assertEqual(listed_replays[evidence_id], replay)
+
+    def test_mock_extraction_skips_repeated_heading_quotes_before_applying_max_claims(self) -> None:
+        repeated_heading = "Repeated Chromium Evidence Heading For Replay"
+        unique_sentences = [
+            "The first unique body sentence preserves a precise evidence quote for replay.",
+            "The second unique body sentence proves scanning continues until the claim limit is filled.",
+        ]
+        text = "\n".join(
+            [
+                f"# {repeated_heading}",
+                repeated_heading,
+                *unique_sentences,
+            ]
+        )
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": "https://example.com/replay/repeated-heading",
+                    "title": repeated_heading,
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        chunks = self.store.source_chunks(capture["source"]["id"])
+        candidates = self.store.mock_claim_sentences(chunks, max_claims=2)
+        self.assertEqual([sentence for _, sentence in candidates], unique_sentences)
+        for chunk, sentence in candidates:
+            quote = sentence[:220]
+            first_match = chunk["text"].find(quote)
+            self.assertGreaterEqual(first_match, 0)
+            self.assertEqual(chunk["text"].find(quote, first_match + 1), -1)
+
+        result = self.request(
+            f"/v1/sources/{capture['source']['id']}/extract-knowledge",
+            {"mode": "mock", "max_claims": 2},
+            method="POST",
+        )
+        evidence_rows = result["records"]["evidence"]
+        self.assertEqual(len(evidence_rows), 2)
+        self.assertEqual([item["quote"] for item in evidence_rows], unique_sentences)
+        self.assertTrue(all(item["replay"]["status"] == "resolved" for item in evidence_rows))
+        self.assertNotIn(repeated_heading, [item["quote"] for item in evidence_rows])
+
+    def test_mock_extraction_uses_repeated_quote_fallback_when_no_unique_sentence_exists(self) -> None:
+        repeated_sentence = (
+            "Repeated fallback evidence keeps legacy mock extraction productive while replay remains cautious."
+        )
+        text = "\n".join(
+            [
+                "https://example.com/replay/repeated-fallback",
+                "### 主帖 · #1 · 作者：Replay Fixture · 时间：2026-08-15 08:00",
+                "附件：[fixture.zip](https://example.com/fixture.zip)",
+                " ".join([repeated_sentence] * 12),
+            ]
+        )
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "thread",
+                    "url": "https://example.com/replay/repeated-fallback",
+                    "title": "Repeated Fallback Fixture",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        chunks = self.store.source_chunks(capture["source"]["id"])
+        candidates = self.store.mock_claim_sentences(chunks, max_claims=2)
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual([sentence for _, sentence in candidates], [repeated_sentence, repeated_sentence])
+
+        result = self.request(
+            f"/v1/sources/{capture['source']['id']}/extract-knowledge",
+            {"mode": "mock", "max_claims": 1},
+            method="POST",
+        )
+        self.assertEqual(len(result["records"]["claims"]), 1)
+        self.assertEqual(len(result["records"]["evidence"]), 1)
+        evidence = result["records"]["evidence"][0]
+        self.assertEqual(evidence["quote"], repeated_sentence)
+        self.assertEqual(evidence["replay"]["status"], "unresolved")
+        self.assertEqual(evidence["replay"]["reason"], "ambiguous_quote")
+
+    def test_source_replay_v1_is_identical_across_apis_and_deterministic_exports(self) -> None:
+        text = (
+            ("Captured lead-in context remains immutable for replay verification. " * 24)
+            + "Deterministic source replay keeps an exact quote\nwith  double spaces and ```literal``` enough surrounding captured context for review."
+        )
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": "https://example.com/replay/deterministic",
+                    "canonical_url": "https://example.com/replay/deterministic",
+                    "title": "Deterministic Replay Fixture",
+                    "site": "example.com",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = capture["source"]["id"]
+        chunk_id = capture["chunks"][0]["id"]
+        records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": source_id,
+                "claims": [
+                    {
+                        "text": "Replay serialization must be deterministic.",
+                        "evidence": [
+                            {
+                                "source_id": source_id,
+                                "chunk_id": chunk_id,
+                                "quote": "an exact quote\nwith  double spaces and ```literal``` enough surrounding captured context",
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        claim_id = records["claims"][0]["id"]
+        evidence_id = records["evidence"][0]["id"]
+
+        evidence_replay = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        self.assertEqual(evidence_replay["status"], "resolved")
+        self.assertGreater(evidence_replay["context"]["quote_start_offset"], 0)
+        self.assertLessEqual(len(evidence_replay["context"]["text"]), 800)
+        self.assertIn(evidence_replay["quote"]["text"], evidence_replay["context"]["text"])
+        context = evidence_replay["context"]
+        stored_chunk_text = self.db_rows("SELECT text FROM chunks WHERE id = ?", (chunk_id,))[0]["text"]
+        self.assertEqual(
+            context["text"],
+            stored_chunk_text[context["chunk_start_offset"] : context["chunk_end_offset"]],
+        )
+        self.assertEqual(
+            context["text"][context["quote_start_offset"] : context["quote_end_offset"]],
+            evidence_replay["quote"]["text"],
+        )
+        claim = self.request(f"/v1/claims/{claim_id}")["claim"]
+        claim_replay = next(item["replay"] for item in claim["evidence"] if item["id"] == evidence_id)
+        listing = self.request("/v1/knowledge/records?limit=10")
+        listing_replay = next(item["replay"] for item in listing["evidence"] if item["id"] == evidence_id)
+        review_queue = self.request("/v1/claims/review-queue?status=extracted,pending_validation&limit=10")
+        queue_claim = next(item for item in review_queue["claims"] if item["id"] == claim_id)
+        queue_replay = next(item["replay"] for item in queue_claim["evidence"] if item["id"] == evidence_id)
+
+        first_json = json.loads(self.request("/v1/export?format=json")["content"])
+        second_json = json.loads(self.request("/v1/export?format=json")["content"])
+        first_export_replay = next(
+            item["replay"] for item in first_json["knowledge"]["evidence"] if item["id"] == evidence_id
+        )
+        second_export_replay = next(
+            item["replay"] for item in second_json["knowledge"]["evidence"] if item["id"] == evidence_id
+        )
+        self.assertEqual(
+            [
+                records["evidence"][0]["replay"],
+                evidence_replay,
+                claim_replay,
+                listing_replay,
+                queue_replay,
+                first_export_replay,
+                second_export_replay,
+            ],
+            [evidence_replay] * 7,
+        )
+
+        markdown = self.request("/v1/export?format=markdown")["content"]
+        self.assertIn("### Evidence Replay", markdown)
+        self.assertIn(evidence_replay["replay_id"], markdown)
+        self.assertIn("Canonical fallback: https://example.com/replay/deterministic", markdown)
+        self.assertIn(f"Locator: {evidence_replay['locator']['label']}", markdown)
+        self.assertIn(evidence_replay["quote"]["sha256"], markdown)
+
+        def extract_verbatim(label: str) -> str:
+            marker = f"  - {label}:\n"
+            marker_start = markdown.index(marker) + len(marker)
+            fence_end = markdown.index("\n", marker_start)
+            fence = markdown[marker_start:fence_end]
+            self.assertRegex(fence, r"^`{3,}$")
+            content_start = fence_end + 1
+            content_end = markdown.index(f"\n{fence}", content_start)
+            return markdown[content_start:content_end]
+
+        self.assertEqual(extract_verbatim("Exact quote"), evidence_replay["quote"]["text"])
+        self.assertEqual(extract_verbatim("Captured context"), evidence_replay["context"]["text"])
+
+    def test_source_replay_v1_marks_superseded_and_quote_mismatch_explicitly(self) -> None:
+        canonical_url = "https://example.com/replay/versioned"
+        original_text = "Captured version one contains an immutable exact replay quote for reviewers."
+        original = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": canonical_url,
+                    "canonical_url": canonical_url,
+                    "title": "Replay Version One",
+                    "site": "example.com",
+                },
+                "content": {"text": original_text, "markdown": original_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        source_id = original["source"]["id"]
+        chunk_id = original["chunks"][0]["id"]
+        records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": source_id,
+                "claims": [
+                    {
+                        "text": "Version drift must be explicit.",
+                        "evidence": [
+                            {
+                                "source_id": source_id,
+                                "chunk_id": chunk_id,
+                                "quote": "an immutable exact replay quote",
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        evidence_id = records["evidence"][0]["id"]
+
+        replacement_text = (
+            "Captured version two changes the canonical source while preserving the immutable first snapshot. "
+            "This longer replacement is intentionally distinct and provides a realistic source update."
+        )
+        replacement = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": canonical_url,
+                    "canonical_url": canonical_url,
+                    "title": "Replay Version Two",
+                    "site": "example.com",
+                },
+                "content": {"text": replacement_text, "markdown": replacement_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        stale = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        self.assertEqual(stale["status"], "stale")
+        self.assertEqual(stale["reason"], "source_superseded")
+        self.assertFalse(stale["source"]["is_current"])
+        self.assertEqual(stale["source"]["version_index"], 1)
+        self.assertEqual(stale["source"]["current_source_id"], replacement["source"]["id"])
+        self.assertEqual(stale["quote"]["text"], "an immutable exact replay quote")
+        self.assertIn(stale["quote"]["text"], stale["context"]["text"])
+
+        db = sqlite3.connect(self.data_dir / "state" / "qc_smart_reader.sqlite3")
+        try:
+            db.execute("UPDATE chunks SET text = ? WHERE id = ?", ("Captured chunk was corrupted.", chunk_id))
+            db.commit()
+        finally:
+            db.close()
+
+        unresolved = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        self.assertEqual(unresolved["status"], "unresolved")
+        self.assertEqual(unresolved["reason"], "quote_mismatch")
+        self.assertFalse(unresolved["source"]["is_current"])
+        self.assertEqual(unresolved["context"]["text"], "Captured chunk was corrupted.")
+        self.assertIsNone(unresolved["context"]["quote_start_offset"])
+        self.assertIsNone(unresolved["context"]["quote_end_offset"])
+
+        db = sqlite3.connect(self.data_dir / "state" / "qc_smart_reader.sqlite3")
+        try:
+            db.execute("UPDATE evidence SET chunk_id = NULL WHERE id = ?", (evidence_id,))
+            db.commit()
+        finally:
+            db.close()
+        missing_chunk = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        self.assertEqual(missing_chunk["status"], "unresolved")
+        self.assertEqual(missing_chunk["reason"], "missing_chunk")
+        self.assertEqual(missing_chunk["locator"]["chunk_id"], "")
+        self.assertEqual(missing_chunk["locator"]["provenance"], "none")
+
+        markdown = self.request("/v1/export?format=markdown")["content"]
+        self.assertIn(f"`{missing_chunk['replay_id']}` · `unresolved` · `missing_chunk`", markdown)
+        self.assertIn(f"Canonical fallback: {canonical_url}", markdown)
+
+    def test_source_replay_v1_uses_claim_project_authority_and_masks_legacy_mismatches(self) -> None:
+        project_a = self.request(
+            "/v1/projects",
+            {"id": "proj_replay_a", "name": "Replay Project A"},
+            method="POST",
+        )["project"]
+        project_b = self.request(
+            "/v1/projects",
+            {"id": "proj_replay_b", "name": "Replay Project B"},
+            method="POST",
+        )["project"]
+
+        captures = {}
+        records = {}
+        for project, suffix in ((project_a, "a"), (project_b, "b")):
+            text = f"Private replay source {suffix.upper()} contains project-owned exact evidence."
+            captures[suffix] = self.request(
+                "/v1/captures",
+                {
+                    "project_id": project["id"],
+                    "source": {
+                        "kind": "page",
+                        "url": f"https://{suffix}.private.example/replay",
+                        "canonical_url": f"https://{suffix}.private.example/replay",
+                        "title": f"Private Replay {suffix.upper()}",
+                        "site": f"{suffix}.private.example",
+                    },
+                    "content": {"text": text, "markdown": text},
+                    "browser": {},
+                },
+                method="POST",
+            )
+            records[suffix] = self.request(
+                "/v1/knowledge/records",
+                {
+                    "project_id": project["id"],
+                    "source_id": captures[suffix]["source"]["id"],
+                    "claims": [
+                        {
+                            "text": f"Project {suffix.upper()} owns this replay claim.",
+                            "evidence": [
+                                {
+                                    "source_id": captures[suffix]["source"]["id"],
+                                    "chunk_id": captures[suffix]["chunks"][0]["id"],
+                                    "quote": "project-owned exact evidence",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                method="POST",
+            )
+
+        evidence_a_id = records["a"]["evidence"][0]["id"]
+        claim_a_id = records["a"]["claims"][0]["id"]
+        claim_b_id = records["b"]["claims"][0]["id"]
+        source_b = captures["b"]["source"]
+        chunk_b_id = captures["b"]["chunks"][0]["id"]
+        db = sqlite3.connect(self.data_dir / "state" / "qc_smart_reader.sqlite3")
+        try:
+            db.execute(
+                "UPDATE evidence SET source_id = ?, chunk_id = ?, quote = ? WHERE id = ?",
+                (source_b["id"], chunk_b_id, "project-owned exact evidence", evidence_a_id),
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        project_a_listing = self.request(f"/v1/knowledge/records?project_id={project_a['id']}&limit=20")
+        self.assertIn(claim_a_id, [claim["id"] for claim in project_a_listing["claims"]])
+        self.assertNotIn(claim_b_id, [claim["id"] for claim in project_a_listing["claims"]])
+        listed_mismatch = next(item for item in project_a_listing["evidence"] if item["id"] == evidence_a_id)
+        self.assertEqual(listed_mismatch["replay"]["status"], "unresolved")
+        self.assertEqual(listed_mismatch["replay"]["reason"], "project_mismatch")
+        self.assertFalse(listed_mismatch["citation_valid"])
+        self.assertEqual(listed_mismatch["source_id"], "")
+        self.assertEqual(listed_mismatch["chunk_id"], "")
+        self.assertEqual(listed_mismatch["quote"], "")
+        self.assertEqual(listed_mismatch["url"], "")
+        self.assertEqual(listed_mismatch["replay"]["source"]["url"], "")
+        self.assertEqual(listed_mismatch["replay"]["source_id"], "")
+        self.assertEqual(listed_mismatch["replay"]["quote"]["text"], "")
+        self.assertEqual(listed_mismatch["replay"]["context"]["text"], "")
+        self.assertEqual(listed_mismatch["source_url"], "")
+        self.assertEqual(listed_mismatch["source_title"], "")
+        self.assertEqual(listed_mismatch["chunk_context"], "")
+        serialized_mismatch = json.dumps(listed_mismatch, ensure_ascii=False)
+        for private_value in (
+            source_b["id"],
+            chunk_b_id,
+            source_b["url"],
+            source_b["title"],
+            "Private replay source B contains project-owned exact evidence.",
+        ):
+            self.assertNotIn(private_value, serialized_mismatch)
+
+        project_b_listing = self.request(f"/v1/knowledge/records?project_id={project_b['id']}&limit=20")
+        self.assertNotIn(
+            evidence_a_id,
+            [evidence["id"] for evidence in project_b_listing["evidence"]],
+            "source ownership must not pull another project's claim evidence into this project listing",
+        )
+
+        detail = self.request(f"/v1/evidence/{evidence_a_id}")["evidence"]
+        self.assertEqual(detail["project_id"], project_a["id"])
+        self.assertFalse(detail["citation_valid"])
+        self.assertEqual(detail["source_id"], "")
+        self.assertEqual(detail["chunk_id"], "")
+        self.assertEqual(detail["quote"], "")
+        self.assertEqual(detail["replay"]["reason"], "project_mismatch")
+        self.assertEqual(detail["replay"]["source"]["canonical_url"], "")
+        self.assertEqual(detail["replay"]["context"]["text"], "")
+        self.assertEqual(detail["source_url"], "")
+        self.assertEqual(detail["chunk_context"], "")
+        with self.assertRaisesRegex(AssertionError, "valid source/chunk/quote evidence"):
+            self.request(
+                f"/v1/claims/{claim_a_id}/review",
+                {"status": "reviewed", "reviewer": "project-boundary-test"},
+                method="POST",
+            )
+
+    def test_source_replay_v1_fails_closed_for_ambiguous_quotes(self) -> None:
+        repeated_quote = "the same replay quote"
+        text = f"First occurrence has {repeated_quote}. Later context repeats {repeated_quote}."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": "https://example.com/replay/ambiguous",
+                    "title": "Ambiguous Replay Fixture",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": capture["source"]["id"],
+                "claims": [
+                    {
+                        "text": "Repeated quotes must not silently select the first occurrence.",
+                        "evidence": [
+                            {
+                                "source_id": capture["source"]["id"],
+                                "chunk_id": capture["chunks"][0]["id"],
+                                "quote": repeated_quote,
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        replay = records["evidence"][0]["replay"]
+        self.assertEqual(replay["status"], "unresolved")
+        self.assertEqual(replay["reason"], "ambiguous_quote")
+        self.assertIsNone(replay["context"]["quote_start_offset"])
+        self.assertIsNone(replay["context"]["quote_end_offset"])
+        detail = self.request(f"/v1/evidence/{records['evidence'][0]['id']}")["evidence"]
+        self.assertEqual(detail["replay"], replay)
+        self.assertTrue(detail["citation_valid"], "legacy citation validity remains backward-compatible")
+
+    def test_source_replay_v1_only_exposes_safe_http_open_urls(self) -> None:
+        text = "Safe replay URL validation keeps an exact local snapshot regardless of link safety."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": "https://example.com/replay/safe-url",
+                    "canonical_url": "https://example.com/replay/safe-url",
+                    "title": "Replay URL Safety Fixture",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": capture["source"]["id"],
+                "claims": [
+                    {
+                        "text": "Replay links must be safe before becoming open targets.",
+                        "evidence": [
+                            {
+                                "source_id": capture["source"]["id"],
+                                "chunk_id": capture["chunks"][0]["id"],
+                                "quote": "an exact local snapshot regardless of link safety",
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        evidence_id = records["evidence"][0]["id"]
+        safe = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        self.assertEqual(safe["source"]["open_url"], "https://example.com/replay/safe-url")
+
+        unsafe_urls = [
+            "data:text/html,unsafe",
+            "javascript:alert(1)",
+            "file:///tmp/private.txt",
+            "https://user:password@example.com/private",
+            "https://example.com/unsafe\nheader",
+        ]
+        for unsafe_url in unsafe_urls:
+            db = sqlite3.connect(self.data_dir / "state" / "qc_smart_reader.sqlite3")
+            try:
+                db.execute(
+                    "UPDATE sources SET url = ?, canonical_url = ? WHERE id = ?",
+                    (unsafe_url, unsafe_url, capture["source"]["id"]),
+                )
+                db.commit()
+            finally:
+                db.close()
+            replay = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+            self.assertEqual(replay["source"]["url"], unsafe_url)
+            self.assertEqual(replay["source"]["canonical_url"], unsafe_url)
+            self.assertEqual(replay["source"]["open_url"], "")
+            markdown = self.request("/v1/export?format=markdown")["content"]
+            self.assertIn("Canonical fallback: Unavailable", markdown)
+            self.assertNotIn(f"Canonical fallback: {unsafe_url}", markdown)
+            self.assertNotIn(unsafe_url, markdown)
+            self.assertNotIn("qc://", markdown)
+
+    def test_source_replay_markdown_escapes_untrusted_title_and_locator_text(self) -> None:
+        malicious_title = "Unsafe ![tracking](https://evil.example/pixel) [click](javascript:alert(1))"
+        malicious_page = "1](https://evil.example/page) ![tracking"
+        malicious_url = "https://example.com/)[click](javascript:alert(1))"
+        malicious_site = "unsafe-site [visit](javascript:site()) ![pixel]"
+        text = "Replay Markdown must render captured labels as inert text instead of active links."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": malicious_url,
+                    "title": malicious_title,
+                    "site": malicious_site,
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": capture["source"]["id"],
+                "claims": [
+                    {
+                        "text": "Untrusted replay labels must remain inert in Markdown exports.",
+                        "evidence": [
+                            {
+                                "source_id": capture["source"]["id"],
+                                "chunk_id": capture["chunks"][0]["id"],
+                                "quote": "captured labels as inert text instead of active links",
+                                "page": malicious_page,
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        self.assertEqual(records["evidence"][0]["replay"]["locator"]["provenance"], "evidence.page")
+        markdown = self.request("/v1/export?format=markdown")["content"]
+        self.assertNotIn(malicious_title, markdown)
+        self.assertNotIn(malicious_page, markdown)
+        self.assertNotIn(malicious_url, markdown)
+        self.assertNotIn(malicious_site, markdown)
+        self.assertNotIn("![", markdown)
+        self.assertNotIn("](https://evil.example", markdown)
+        self.assertNotIn("](javascript:", markdown)
+        self.assertIn(r"https://example.com/\)\[click\]\(javascript:alert\(1\)\)", markdown)
+        self.assertIn(r"unsafe-site \[visit\]\(javascript:site\(\)\) \!\[pixel\]", markdown)
+
+    def test_source_replay_v1_rejects_quotes_larger_than_the_context_bound(self) -> None:
+        oversized_quote = "Q" * 900
+        text = f"Captured prefix. {oversized_quote} Captured suffix."
+        capture = self.request(
+            "/v1/captures",
+            {
+                "source": {
+                    "kind": "page",
+                    "url": "https://example.com/replay/oversized-quote",
+                    "title": "Oversized Replay Quote Fixture",
+                },
+                "content": {"text": text, "markdown": text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        records = self.request(
+            "/v1/knowledge/records",
+            {
+                "source_id": capture["source"]["id"],
+                "claims": [
+                    {
+                        "text": "Oversized quotes must fail closed within the replay context bound.",
+                        "evidence": [
+                            {
+                                "source_id": capture["source"]["id"],
+                                "chunk_id": capture["chunks"][0]["id"],
+                                "quote": oversized_quote,
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        create_replay = records["evidence"][0]["replay"]
+        self.assertEqual(create_replay["status"], "unresolved")
+        self.assertEqual(create_replay["reason"], "quote_too_long")
+        self.assertEqual(len(create_replay["context"]["text"]), 800)
+        self.assertIsNone(create_replay["context"]["quote_start_offset"])
+        self.assertIsNone(create_replay["context"]["quote_end_offset"])
+        self.assertEqual(create_replay["quote"]["text"], oversized_quote)
+        detail_replay = self.request(f"/v1/evidence/{records['evidence'][0]['id']}")["evidence"]["replay"]
+        self.assertEqual(detail_replay, create_replay)
+
+    def test_source_replay_v1_legacy_version_state_is_unknown_and_project_scoped(self) -> None:
+        canonical_url = "https://example.com/replay/shared-canonical"
+        project_a = self.request(
+            "/v1/projects",
+            {"id": "proj_replay_legacy_a", "name": "Replay Legacy A"},
+            method="POST",
+        )["project"]
+        project_b = self.request(
+            "/v1/projects",
+            {"id": "proj_replay_legacy_b", "name": "Replay Legacy B"},
+            method="POST",
+        )["project"]
+        source_a_text = "Legacy source A keeps an exact replay quote without newer local versions."
+        source_a = self.request(
+            "/v1/captures",
+            {
+                "project_id": project_a["id"],
+                "source": {
+                    "kind": "page",
+                    "url": canonical_url,
+                    "canonical_url": canonical_url,
+                    "title": "Legacy Replay A",
+                },
+                "content": {"text": source_a_text, "markdown": source_a_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        records_a = self.request(
+            "/v1/knowledge/records",
+            {
+                "project_id": project_a["id"],
+                "source_id": source_a["source"]["id"],
+                "claims": [
+                    {
+                        "text": "Cross-project versions must not affect source currency.",
+                        "evidence": [
+                            {
+                                "source_id": source_a["source"]["id"],
+                                "chunk_id": source_a["chunks"][0]["id"],
+                                "quote": "an exact replay quote without newer local versions",
+                            }
+                        ],
+                    }
+                ],
+            },
+            method="POST",
+        )
+        evidence_id = records_a["evidence"][0]["id"]
+        source_b_text = "Project B captured a different source body under the same canonical URL."
+        self.request(
+            "/v1/captures",
+            {
+                "project_id": project_b["id"],
+                "source": {
+                    "kind": "page",
+                    "url": canonical_url,
+                    "canonical_url": canonical_url,
+                    "title": "Legacy Replay B",
+                },
+                "content": {"text": source_b_text, "markdown": source_b_text},
+                "browser": {},
+            },
+            method="POST",
+        )
+        still_current = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        self.assertTrue(still_current["source"]["is_current"])
+        self.assertEqual(still_current["status"], "resolved")
+
+        db = sqlite3.connect(self.data_dir / "state" / "qc_smart_reader.sqlite3")
+        try:
+            db.execute(
+                "DELETE FROM source_versions WHERE project_id = ? AND source_id = ?",
+                (project_a["id"], source_a["source"]["id"]),
+            )
+            db.execute(
+                "UPDATE sources SET canonical_url = '' WHERE id = ?",
+                (source_a["source"]["id"],),
+            )
+            db.commit()
+            before_count = db.execute(
+                "SELECT COUNT(*) FROM source_versions WHERE project_id = ?",
+                (project_a["id"],),
+            ).fetchone()[0]
+        finally:
+            db.close()
+
+        first_legacy = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        second_legacy = self.request(f"/v1/evidence/{evidence_id}")["evidence"]["replay"]
+        self.assertEqual(first_legacy, second_legacy)
+        self.assertIsNone(first_legacy["source"]["version_index"])
+        self.assertIsNone(first_legacy["source"]["is_current"])
+        self.assertIsNone(first_legacy["source"]["current_source_id"])
+        self.assertEqual(first_legacy["status"], "resolved")
+        self.assertEqual(first_legacy["locator"]["provenance"], "chunk.index")
+
+        db = sqlite3.connect(self.data_dir / "state" / "qc_smart_reader.sqlite3")
+        try:
+            after_count = db.execute(
+                "SELECT COUNT(*) FROM source_versions WHERE project_id = ?",
+                (project_a["id"],),
+            ).fetchone()[0]
+        finally:
+            db.close()
+        self.assertEqual(after_count, before_count, "Replay serialization must not mutate legacy source versions")
+
 
 if __name__ == "__main__":
     unittest.main()

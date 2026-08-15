@@ -795,6 +795,40 @@ async function exerciseCleanProfileFirstEvidence(t, { browserLocale, htmlLang, d
       `displayed quote was not exact source text: ${JSON.stringify(firstEvidence.quote)}`
     );
 
+    assert.equal(await sidepanel.locator("#quickStartReplayBtn").isVisible(), true);
+    assert.equal(await sidepanel.locator("#quickStartReplayBtn").getAttribute("aria-expanded"), "false");
+    assert.equal(await sidepanel.locator("#quickStartReplayPanel").isHidden(), true);
+    await sidepanel.locator("#quickStartReplayBtn").click();
+    await sidepanel.waitForFunction(() => {
+      const panel = document.querySelector("#quickStartReplayPanel");
+      return panel
+        && !panel.hidden
+        && Boolean(panel.dataset.replayStatus);
+    }, null, { timeout: 15000 });
+    const replaySnapshot = await sidepanel.evaluate(() => {
+      const panel = document.querySelector("#quickStartReplayPanel");
+      return {
+        status: panel?.dataset.replayStatus || "",
+        reason: panel?.querySelector(".replay-reason")?.textContent || "",
+        locator: panel?.querySelector("[data-replay-locator]")?.textContent || "",
+        quote: panel?.querySelector("[data-replay-exact-quote]")?.textContent || "",
+        context: panel?.querySelector("[data-replay-context]")?.textContent || "",
+        sourceUrl: panel?.querySelector("[data-replay-source-link]")?.getAttribute("href") || ""
+      };
+    });
+    assert.equal(
+      replaySnapshot.status,
+      "resolved",
+      `Source Replay was not resolved: ${JSON.stringify(replaySnapshot)}`
+    );
+    assert.ok(replaySnapshot.locator, "Source Replay did not expose a captured locator");
+    assert.equal(replaySnapshot.quote, firstEvidence.quote);
+    assert.ok(
+      replaySnapshot.context.includes(firstEvidence.quote),
+      "Source Replay context did not contain the exact stored quote"
+    );
+    assert.match(replaySnapshot.sourceUrl, /^https?:\/\//);
+
     let records = await waitForKnowledgeRecords(
       serviceUrl,
       token,
@@ -866,6 +900,20 @@ async function exerciseCleanProfileFirstEvidence(t, { browserLocale, htmlLang, d
     assert.equal(await reopened.locator("#quickStartClaimText").textContent(), firstEvidence.claim);
     assert.equal(await reopened.locator("#quickStartQuoteText").textContent(), firstEvidence.quote);
     assert.equal(await reopened.locator("#quickStartProgress").textContent(), "3 / 3");
+    await reopened.locator('button[data-tab="knowledge"]').click();
+    assert.equal(
+      await reopened.locator("#quickStartReplayBtn").isVisible(),
+      true,
+      "restored Source Replay controls were hidden in the Knowledge tab"
+    );
+    await reopened.locator("#quickStartReplayBtn").click();
+    await reopened.waitForFunction((expectedQuote) => {
+      const panel = document.querySelector("#quickStartReplayPanel");
+      return panel
+        && !panel.hidden
+        && panel.dataset.replayStatus === "resolved"
+        && panel.querySelector("[data-replay-exact-quote]")?.textContent === expectedQuote;
+    }, firstEvidence.quote, { timeout: 15000 });
     assert.equal(
       await reopened.locator("#quickStartEvidence").getAttribute("data-claim-status"),
       decisionStatus
