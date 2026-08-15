@@ -16,10 +16,9 @@ The launch goal is to find real users who care about verifiable research and lea
 
 ## Launch prerequisites
 
-- [ ] Public repository has v0.9.3 source, passing CI, license, privacy policy, security policy, support guide, and contribution guide.
-- [ ] GitHub Release contains both ZIPs and `SHA256SUMS`.
-- [x] English and Simplified Chinese First Evidence reference screenshots were captured from the reviewed v0.9.2 build and passed visual, deterministic-hash, and sensitive-data checks.
-- [ ] Refresh the localized screenshots from the reviewed v0.9.3 build before presenting them as current Replay UI.
+- [x] Public repository has v0.9.3 source, passing CI, license, privacy policy, security policy, support guide, and contribution guide.
+- [x] The public v0.9.3 GitHub Release contains both ZIPs and `SHA256SUMS`; anonymous downloads match the published digests.
+- [x] English and Simplified Chinese First Evidence screenshots were captured from the reviewed v0.9.3 build with the real Companion and independent clean profiles. They passed Replay-contract, visual, deterministic-hash, RGB-dimension, and sensitive-data checks.
 - [ ] A clean macOS account completes install → pair → capture → evidence review → restart recovery → uninstall.
 - [ ] Issues and Discussions are enabled and monitored for the first launch week.
 - [ ] Chrome Web Store status is described accurately; do not say “available in the store” before approval.

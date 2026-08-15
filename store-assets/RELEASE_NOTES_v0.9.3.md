@@ -48,7 +48,7 @@ Uninstall preserves the Vault unless the explicit purge flow is confirmed. Back 
 
 - The supported packaged lifecycle is macOS-first, and the extension still requires Chrome Developer mode until a Web Store release is approved.
 - English covers setup, pairing, Quick Start, core current-page feedback, First Evidence, and Replay controls. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls remain in Simplified Chinese and are labeled accordingly.
-- Existing tracked Web Store screenshots were captured from v0.9.2 and do not show Replay; they are reference captures, not v0.9.3 UI evidence.
+- The localized Web Store screenshots now use independent clean profiles and the real v0.9.3 Companion to show pending review and the same resolved Replay restored after a human decision. They are reproducible release assets; Chrome Web Store upload and approval remain separate publisher steps.
 - Replay is anchored to the local captured snapshot and does not guarantee a deep link into the current remote page.
 - Automatic YouTube import supports public captions only and does not import cookies or transcribe audio.
 - Complex PDF tables, formulas, figures, and multi-column layouts may require manual review.

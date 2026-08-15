@@ -368,6 +368,10 @@ test("live extension routes queued selections to the matching open side-panel wi
     await sidepanelA.evaluate((url) => chrome.windows.create({ url, type: "normal" }), sidepanelUrl);
     const sidepanelB = await sidepanelBPromise;
     await sidepanelB.waitForLoadState("domcontentloaded");
+    await Promise.all([
+      waitForInteractiveSidepanel(sidepanelA),
+      waitForInteractiveSidepanel(sidepanelB)
+    ]);
 
     const panelA = await sidepanelA.evaluate(async () => {
       const tab = await chrome.tabs.getCurrent();

@@ -21,7 +21,7 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 | --- | --- | --- |
 | ![在 QC Smart Reader 侧边栏采集网页](store-assets/screenshots/01-capture.png) | ![用原文 quote 审阅 claim](store-assets/screenshots/02-evidence-review.png) | ![查看本地 Markdown 与 SQLite Vault](store-assets/screenshots/03-local-vault.png) |
 
-上方三张总览图来自已验收的 v0.9.1 扩展与本地 Companion，使用公开、确定性 fixture 生成，因此保留该版本的简体中文界面。v0.9.2 的 Chrome Web Store 截图已使用真实 Companion 与干净浏览器配置生成，包括[英文待审](store-assets/web-store/en-US/01-first-evidence-pending-review.png)、[英文已审](store-assets/web-store/en-US/02-reviewed-exact-quote.png)、[简体中文待审](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png)和[简体中文已审](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png)。它们早于 v0.9.3 的 Replay 控件，因此仅标注为历史参考截图，不冒充当前版本界面。
+上方三张总览图来自已验收的 v0.9.1 扩展与本地 Companion，使用公开、确定性 fixture 生成，因此保留该版本的简体中文界面。当前 v0.9.3 的 Chrome Web Store 截图已使用真实 Companion 与相互独立的干净浏览器配置生成，包括[英文待审](store-assets/web-store/en-US/01-first-evidence-pending-review.png)、[英文已审 Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png)、[简体中文待审](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png)和[简体中文已审 Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png)。它们展示了尚未判断的 exact-quote claim，以及关闭并重开侧边栏后恢复的同一条服务端 Replay、来源版本和人工判断。
 
 > **v0.9.3 界面覆盖：**首次设置、配对、Quick Start、当前页核心反馈、First Evidence 与 Source Replay 控件已支持 English / 简体中文；默认跟随浏览器语言，也可选择 Auto、English 或简体中文。批量、Agent、大部分知识库、交付以及项目/模型控制仍保持中文，并在英文界面明确提示。
 
