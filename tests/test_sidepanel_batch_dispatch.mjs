@@ -82,7 +82,7 @@ async function createSidepanelHarness({
   runtimeMessageHandler,
   confirmHandler = () => true,
   uiLanguage = "zh-CN",
-  manifestVersion = "0.9.3",
+  manifestVersion = "0.9.4",
   currentTab = { id: 41, windowId: 7, url: "https://example.com/current", title: "Current tab" }
 } = {}) {
   const i18nJs = await projectFile("sidepanel_i18n.js");

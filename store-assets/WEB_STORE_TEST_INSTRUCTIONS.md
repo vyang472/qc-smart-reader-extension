@@ -1,19 +1,19 @@
-# Chrome Web Store reviewer test instructions — QC Smart Reader v0.9.3
+# Chrome Web Store reviewer test instructions — QC Smart Reader v0.9.4
 
-**Handoff status:** published-release instructions for v0.9.3. The public Companion and checksum links have been verified without authentication. Do not paste these instructions into the dashboard until the publisher has repeated the complete flow with the exact extension ZIP on a clean macOS account.
+**Handoff status:** candidate instructions for v0.9.4. The v0.9.4 GitHub Release, public-link verification, clean-account run, Web Store upload, submission, and approval are still pending. Do not paste these instructions into the dashboard until the public assets exist and the publisher has repeated the complete flow with the exact candidate extension ZIP on a clean macOS account.
 
 ## Dashboard-ready instructions
 
 QC Smart Reader requires macOS, Chrome 116 or later, and the free local Companion from the same release. No account, payment, API key, Codex CLI, or external model is required for the core review flow.
 
 1. Download the Companion and checksum file:
-   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.3/qc-smart-reader-companion-0.9.3.zip`
-   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.3/SHA256SUMS`
+   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.4/qc-smart-reader-companion-0.9.4.zip`
+   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.4/SHA256SUMS`
 2. In Terminal, verify and install the per-user Companion:
 
    ```bash
    cd ~/Downloads
-   RELEASE_VERSION="0.9.3"
+   RELEASE_VERSION="0.9.4"
    grep "qc-smart-reader-companion-${RELEASE_VERSION}.zip" SHA256SUMS | shasum -a 256 -c -
    mkdir -p "qc-smart-reader-companion-${RELEASE_VERSION}"
    unzip "qc-smart-reader-companion-${RELEASE_VERSION}.zip" -d "qc-smart-reader-companion-${RELEASE_VERSION}"
@@ -22,9 +22,9 @@ QC Smart Reader requires macOS, Chrome 116 or later, and the free local Companio
    ```
 
    Expected: the installer reports a healthy Companion at `http://127.0.0.1:37621`, prints the Pairing Token, and copies the token to the clipboard.
-3. Open the installed QC Smart Reader extension. Leave **Interface language** on **Auto (browser)** on an English-language Chrome profile, or explicitly choose **English**. In **Settings**, enter `http://127.0.0.1:37621`, paste the Pairing Token, and choose **Test local Companion**.
+3. Open the installed QC Smart Reader extension. Leave **Interface language** on **Auto (browser)** on an English-language Chrome profile, or explicitly choose **English**. In **Settings**, confirm **Download Companion v0.9.4** targets the Companion URL in step 1 and **Verify SHA256SUMS** targets the checksum URL in step 1. Then enter `http://127.0.0.1:37621`, paste the Pairing Token, and choose **Test local Companion**.
 
-   Expected: the status says the local Companion and Pairing Token are ready, and Quick Start becomes available.
+   Expected: both setup links open the public, version-matched GitHub Release assets in a new tab without exposing the Pairing Token, the status says the local Companion and Pairing Token are ready, and Quick Start becomes available.
 4. Open the public IANA fixture `https://example.com/` in a normal tab. Return to QC Smart Reader **Read** and start Quick Start from the current page.
 
    Expected: QC Smart Reader saves the page in the local Vault, labels the run as the local template / Mock mode with no external model call, and shows a draft claim beside an exact quote from the page. The claim remains unreviewed.
@@ -51,7 +51,7 @@ Expected: the per-user service is removed. The default uninstall deliberately pr
 
 ## Publisher verification before submission
 
-- Confirm both v0.9.3 release URLs still return public assets without authentication before submission.
-- Confirm the checksum command reports `qc-smart-reader-companion-0.9.3.zip: OK`.
+- Confirm both v0.9.4 release URLs return public assets without authentication before submission.
+- Confirm the checksum command reports `qc-smart-reader-companion-0.9.4.zip: OK`.
 - Repeat the complete flow on a clean macOS user account with the exact extension ZIP submitted to the Web Store.
 - Do not provide the reviewer with a reused Pairing Token, API key, password, private Vault, or private source URL.

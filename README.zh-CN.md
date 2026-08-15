@@ -21,9 +21,9 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 | --- | --- | --- |
 | ![在 QC Smart Reader 侧边栏采集网页](store-assets/screenshots/01-capture.png) | ![用原文 quote 审阅 claim](store-assets/screenshots/02-evidence-review.png) | ![查看本地 Markdown 与 SQLite Vault](store-assets/screenshots/03-local-vault.png) |
 
-上方三张总览图来自已验收的 v0.9.1 扩展与本地 Companion，使用公开、确定性 fixture 生成，因此保留该版本的简体中文界面。当前 v0.9.3 的 Chrome Web Store 截图已使用真实 Companion 与相互独立的干净浏览器配置生成，包括[英文待审](store-assets/web-store/en-US/01-first-evidence-pending-review.png)、[英文已审 Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png)、[简体中文待审](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png)和[简体中文已审 Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png)。它们展示了尚未判断的 exact-quote claim，以及关闭并重开侧边栏后恢复的同一条服务端 Replay、来源版本和人工判断。
+上方三张总览图来自已验收的 v0.9.1 扩展与本地 Companion，使用公开、确定性 fixture 生成，因此保留该版本的简体中文界面。当前 v0.9.4 Chrome Web Store 截图已用真实 v0.9.4 Companion 与相互独立的干净浏览器配置重新生成两轮，包括[英文待审](store-assets/web-store/en-US/01-first-evidence-pending-review.png)、[英文已审 Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png)、[简体中文待审](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png)和[简体中文已审 Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png)。它们展示了尚未判断的 exact-quote claim，以及关闭并重开侧边栏后恢复的同一条服务端 Replay、来源版本和人工判断。由于 v0.9.4 只修改设置页安装入口，这些 First Evidence 像素与已验收的 v0.9.3 截图保持一致。
 
-> **v0.9.3 界面覆盖：**首次设置、配对、Quick Start、当前页核心反馈、First Evidence 与 Source Replay 控件已支持 English / 简体中文；默认跟随浏览器语言，也可选择 Auto、English 或简体中文。批量、Agent、大部分知识库、交付以及项目/模型控制仍保持中文，并在英文界面明确提示。
+> **v0.9.4 界面覆盖：**首次设置、配对、Quick Start、当前页核心反馈、First Evidence 与 Source Replay 控件已支持 English / 简体中文；默认跟随浏览器语言，也可选择 Auto、English 或简体中文。批量、Agent、大部分知识库、交付以及项目/模型控制仍保持中文，并在英文界面明确提示。
 
 ## 它和普通 AI 阅读器有什么不同
 
@@ -35,20 +35,20 @@ QC Smart Reader 是一个 **macOS 优先**的 Chrome 扩展 + 本地 Python Comp
 - **回放当时捕获的记录。** 从已保存的上下文、定位、来源版本与 exact quote 重新查验 evidence。Replay 会明确报告 stale 或 unresolved，不会伪造远程页面的精确位置。
 - **不用 API Key 也能试完整链路。** 确定性的本地模板会生成一条草稿 claim，exact quote 取自已保存原文。它不是 AI 总结；草稿会保持待定，直到你人工判断为支持或不支持。Codex CLI 与直连 API 都只是可选路线。
 
-## 安装 v0.9.3
+## 安装 v0.9.4
 
 当前正式支持路径是 **macOS + Chrome 116+**。首次设置、First Evidence 与 Replay 控件已支持 English / 简体中文，高级工作台仍为简体中文。
 
 开始前请确认 Mac 上已有 **Python 3.9+**、Chrome 116+，并能在首次安装 Companion 时联网下载经过 hash 锁定的 Python wheels。Codex CLI、`yt-dlp` 与 Swift 工具链都是可选依赖，只分别影响对应的模型、公开字幕与 OCR 路线。
 
-1. 从 [QC Smart Reader v0.9.3](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.3) 下载三个文件：
-   - `qc-smart-reader-companion-0.9.3.zip`
-   - `qc-smart-reader-extension-0.9.3.zip`
+1. v0.9.4 GitHub Release 发布后，从 [QC Smart Reader v0.9.4](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.4) 下载三个文件：
+   - `qc-smart-reader-companion-0.9.4.zip`
+   - `qc-smart-reader-extension-0.9.4.zip`
    - `SHA256SUMS`
 2. 在下载目录运行 `shasum -a 256 -c SHA256SUMS`，确认两个 ZIP 都显示 `OK`。
 3. 解压 Companion ZIP，双击 `install.command`（也可以运行 `bash install.command`）。安装器会安装当前用户的后台服务、验证可用性，并把 Pairing Token 复制到剪贴板。
 4. 解压 Extension ZIP。打开 `chrome://extensions`，开启**开发者模式**，点击**加载已解压的扩展程序**，选择包含 `manifest.json` 的目录。
-5. 打开 QC Smart Reader 侧边栏，让**界面语言**保持**自动（浏览器）**，或选择 English / 简体中文。在 **Settings / 设置**中填入 `http://127.0.0.1:37621`，粘贴 Pairing Token，点击 **Test local Companion / 测试本地服务**。只有 token 通过受保护的 projects API 鉴权后，首次使用流程才会解锁。
+5. 打开 QC Smart Reader 侧边栏，让**界面语言**保持**自动（浏览器）**，或选择 English / 简体中文。设置页也会根据已安装扩展版本显示 **下载 Companion v0.9.4** 与对应的 `SHA256SUMS` 直达链接。填入 `http://127.0.0.1:37621`，粘贴 Pairing Token，点击 **Test local Companion / 测试本地服务**。只有 token 通过受保护的 projects API 鉴权后，首次使用流程才会解锁。
 6. 打开一篇普通文章，从 **Read / 聊天**启动 Quick Start。First Evidence 显示三个用户步骤：连接 Companion、采集当前页、核对并保存。系统会把当前页保存进 Vault，在内部运行确定性的本地模板抽取，并并排显示一条草稿 claim 与 exact quote。只有原文支持 claim 时才选择“支持”，不支持时选择“不支持”。点击 **Replay** 可在捕获时上下文中核对这段 quote；关闭并重新打开侧边栏后，服务端保存的 evidence、Replay 目标和判断仍会恢复。
 
 Quick Start 即使在已配置外部模型时也不会调用它。本地模板只是刻意保持简单的结构化草稿，不是 AI 总结；quote 来自已保存原文，claim 会保持待定，直到你标记为支持（`reviewed`）或不支持（`rejected`）。其他抽取或 Agent 操作需要模型时，再到**设置 → 模型设置**选择：
@@ -76,7 +76,7 @@ Chrome 采集 / PDF / 字幕
 
 扩展只向 loopback Companion 发送带鉴权的请求。Companion 在 `~/Documents/QC Smart Reader Vault/` 下维护便于查询的 SQLite，以及可直接阅读、迁移和用 Obsidian 打开的 Markdown Vault。只有当你主动选择模型操作时，相关提示词与材料才会发给你选择的 provider，并受该 provider 的条款约束。
 
-## v0.9.3 能力
+## v0.9.4 能力
 
 | 工作流 | 当前行为 |
 | --- | --- |
@@ -102,7 +102,7 @@ Chrome 采集 / PDF / 字幕
 ## 当前限制
 
 - 安装器、后台服务生命周期和扫描版 PDF OCR 目前以 macOS 为主；尚无 Windows / Linux 正式安装包。
-- v0.9.3 的首次使用、First Evidence 与 Replay 控件支持 English / 简体中文。批量、Agent、大部分知识库与交付视图，以及项目/模型控制仍为简体中文；英文界面会明确提示这一边界。
+- v0.9.4 的首次使用、First Evidence 与 Replay 控件支持 English / 简体中文。批量、Agent、大部分知识库与交付视图，以及项目/模型控制仍为简体中文；英文界面会明确提示这一边界。
 - Replay 锚定的是本地捕获快照。“打开 canonical 来源”不保证精确跳到当前远程页面中的原位置；quote 匹配不唯一或缺失时会保持 unresolved。
 - Chrome Web Store 版本通过审核前，需要使用开发者模式加载扩展。
 - 复杂 PDF 的双栏顺序、表格、图、公式仍可能需要人工复核。
