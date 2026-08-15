@@ -1,6 +1,6 @@
 # QC Smart Reader v0.9.5 launch kit
 
-**Status:** ready-to-edit candidate drafts. Nothing in this file means the v0.9.5 GitHub Release, a post, a submission, an endorsement, a Chrome Web Store upload, or store approval has happened. Use versioned launch copy only after the matching public assets exist.
+**Status:** the v0.9.5 GitHub Release is public and its assets were independently downloaded and checksum-verified. The channel copy below remains an editable draft: nothing here means a post, endorsement, Chrome Web Store upload, submission, or approval has happened.
 
 The launch goal is to find real users who care about verifiable research and learn where the workflow fails. It is not to manufacture a ranking.
 
@@ -16,8 +16,8 @@ The launch goal is to find real users who care about verifiable research and lea
 
 ## Launch prerequisites
 
-- [ ] Public repository has merged v0.9.5 source with passing CI, license, privacy policy, security policy, support guide, and contribution guide.
-- [ ] The public v0.9.5 GitHub Release contains both ZIPs and `SHA256SUMS`; anonymous downloads match the published digests.
+- [x] Public repository has merged v0.9.5 source with passing CI, license, privacy policy, security policy, support guide, and contribution guide.
+- [x] The public v0.9.5 GitHub Release contains both ZIPs and `SHA256SUMS`; anonymous downloads match the published digests.
 - [x] The v0.9.5 candidate exposes direct, manifest-matched Companion and `SHA256SUMS` setup links without carrying secrets.
 - [ ] The current English and Simplified Chinese First Evidence screenshots are verified v0.9.4 prior-release references. They were not recaptured from v0.9.5 and do not show the selection context-menu flow; decide whether to recapture them before any store upload.
 - [ ] A clean macOS account completes install → pair → capture → evidence review → restart recovery → uninstall.
@@ -98,7 +98,7 @@ It captures the current page or recoverable URL batches using the live Chrome se
 
 v0.9.5 adds a shorter path: select a passage, right-click, and explicitly save its exact quote plus bounded context as pending local evidence. This path makes no model or agent call and still waits for a human accept/reject decision. Failed or unpaired saves remain in a bounded local recovery queue until Companion persistence and ACK succeed; the queue is not developer telemetry.
 
-You can try the v0.9.5 release here after it is published: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5
+You can try the public v0.9.5 release here: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5
 
 Current limits: macOS-first installer, unpacked Chrome extension, Simplified Chinese advanced workspaces, and imperfect complex-PDF handling. Core setup, First Evidence, and Replay controls are bilingual. Replay is anchored to the local captured snapshot rather than a guaranteed live-page deep link. I would appreciate technical feedback on the evidence invariant, local service boundary, and the roughest part of installation. The repository includes the complete release gate and threat boundaries.
 
@@ -148,7 +148,7 @@ QC Smart Reader v0.9.5: save one exact selection without a model
 
 ### Body
 
-The v0.9.5 preview is ready for real research workflows after the matching GitHub Release is published.
+The public v0.9.5 preview is ready for real research workflows.
 
 Highlights:
 
@@ -167,7 +167,7 @@ Highlights:
 
 The supported path is currently macOS + Chrome 116+, with bilingual core onboarding and Replay controls, Simplified Chinese advanced workspaces, and Developer-mode installation. Please use public or synthetic fixtures in reports and keep secrets and private Vault content out of issues.
 
-Start with the release after it is published: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5
+Start with the public release: https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.5
 
 ## Awesome-list proposal draft
 

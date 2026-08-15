@@ -1,6 +1,6 @@
 # Chrome Web Store listing handoff — QC Smart Reader v0.9.5
 
-**Status:** v0.9.5 is a Chrome Web Store candidate. The bilingual listing copy, permission explanations, data-use answers, and version-neutral small promo tile are prepared. The locale-specific Replay screenshots are verified v0.9.4 **prior-release references**, not v0.9.5 captures. The v0.9.5 GitHub Release, publisher-account checks, clean-account test, screenshot decision or recapture, asset upload, dashboard submission, and approval are still pending. This file is not evidence that any of those steps happened.
+**Status:** v0.9.5 is a Chrome Web Store candidate. The public GitHub Release and anonymous asset-link verification are complete. The bilingual listing copy, permission explanations, data-use answers, and version-neutral small promo tile are prepared. The locale-specific Replay screenshots are verified v0.9.4 **prior-release references**, not v0.9.5 captures. Publisher-account checks, the clean-account test, screenshot decision or recapture, asset upload, dashboard submission, and approval are still pending. This file is not evidence that any of those remaining steps happened.
 
 This file records the listing copy, permission explanations, data-use answers, assets, and clean-install checks for the publisher account. Re-check the Chrome Web Store dashboard requirements on submission day.
 
@@ -145,14 +145,15 @@ Before upload, confirm each screenshot matches the dashboard's current dimension
 
 ## Publisher checklist
 
-- [ ] Publish the v0.9.5 GitHub Release, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
+- [x] Publish the v0.9.5 GitHub Release, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
 - [x] Render the locale- and version-neutral small promo tile from its tracked SVG source; verify dimensions, visible-text/version scanning, and deterministic hashes.
 - [ ] Verify the publisher identity and required contact details in the dashboard.
 - [ ] Recapture all four localized screenshots from the v0.9.5 build, or record an explicit publisher decision to use the verified v0.9.4 files only as prior-release references; re-run dimension and sensitive-data checks before upload.
 - [ ] Upload the final approved en-US pair to the English primary listing and the zh-CN pair to the Simplified Chinese localized listing.
 - [ ] Complete privacy, permission, distribution, pricing, and tester declarations truthfully.
 - [x] Verify the v0.9.5 extension derives the direct Companion ZIP and `SHA256SUMS` targets from its manifest version without carrying a Pairing Token or other secret.
-- [ ] After publishing v0.9.5, verify both reviewer-instruction links without authentication. Paste the instructions into the dashboard only after the remaining clean-account test.
+- [x] Verify both v0.9.5 reviewer-instruction links without authentication.
+- [ ] Paste the reviewer instructions into the dashboard only after the remaining clean-account test.
 - [ ] Explain why HTTP(S) host access is necessary for user-selected arbitrary research pages and requested URL batches.
 - [ ] Confirm there is no remotely hosted executable code and no undisclosed analytics.
 - [ ] Install both release ZIPs on a clean macOS user account.
