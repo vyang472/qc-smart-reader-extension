@@ -80,6 +80,7 @@ async function createSidepanelHarness({
   extractionResult,
   executeScriptHandler,
   runtimeMessageHandler,
+  storageSetHandler,
   confirmHandler = () => true,
   uiLanguage = "zh-CN",
   manifestVersion = "0.9.4",
@@ -91,11 +92,13 @@ async function createSidepanelHarness({
   const documentElement = createMockNode("html");
   const body = createMockNode("body");
   const storageState = {};
+  const storageSetCalls = [];
   const intervalCallbacks = [];
   let nextTimerId = 1;
   let nextUuid = 1;
   const fetchCalls = [];
   const runtimeListeners = [];
+  const storageChangeListeners = [];
 
   const context = {
     console: {
@@ -160,6 +163,11 @@ async function createSidepanelHarness({
         }
       },
       storage: {
+        onChanged: {
+          addListener(listener) {
+            storageChangeListeners.push(listener);
+          }
+        },
         local: {
           async get(keys) {
             if (Array.isArray(keys)) {
@@ -170,6 +178,8 @@ async function createSidepanelHarness({
             return { ...storageState };
           },
           async set(values) {
+            storageSetCalls.push(structuredClone(values));
+            if (storageSetHandler) await storageSetHandler(values, storageState);
             Object.assign(storageState, values);
           },
           async remove(keys) {
@@ -233,6 +243,8 @@ async function createSidepanelHarness({
     async fetch(url, options = {}) {
       const parsed = new URL(url);
       const call = {
+        url: parsed.toString(),
+        origin: parsed.origin,
         path: parsed.pathname,
         search: parsed.search,
         searchParams: Object.fromEntries(parsed.searchParams.entries()),
@@ -277,6 +289,8 @@ async function createSidepanelHarness({
     nodes,
     runtimeListeners,
     storageState,
+    storageSetCalls,
+    storageChangeListeners,
     intervalCallbacks,
     run(expression) {
       return runInContext(expression, context);
@@ -285,7 +299,14 @@ async function createSidepanelHarness({
       return JSON.parse(runInContext("JSON.stringify({ queue: state.batchQueue, metrics: state.batchMetrics, running: state.batchRunning, paused: state.batchPaused, cancelRequested: state.batchCancelRequested })", context));
     },
     setState(values) {
-      runInContext(`Object.assign(state, ${JSON.stringify(values)})`, context);
+      const normalized = { ...values };
+      if (
+        normalized.companionAuthenticated === true
+          && !Object.prototype.hasOwnProperty.call(normalized, "companionCapabilities")
+      ) {
+        normalized.companionCapabilities = ["selection_first_evidence_v1"];
+      }
+      runInContext(`Object.assign(state, ${JSON.stringify(normalized)})`, context);
     }
   };
 }
@@ -481,6 +502,51 @@ test("Source Replay suppresses unsafe links and preserves exact quote and contex
     }));
     assert.doesNotMatch(controlCharacterHtml, /href=/);
   }
+});
+
+test("Source Replay interprets wire offsets as Unicode code points", async () => {
+  const harness = await createSidepanelHarness({ uiLanguage: "en-US" });
+  harness.setState({ settings: { projectId: "project-unicode" } });
+  const prefix = "before🙂\n";
+  const quote = "exact🙂 quote";
+  const contextText = `${prefix}${quote}\nafter`;
+  const replay = replayFixture({
+    replayId: "rpl-unicode",
+    evidenceId: "evidence-unicode",
+    claimId: "claim-unicode",
+    sourceId: "source-unicode",
+    quoteText: quote,
+    contextText
+  });
+  replay.context.quote_start_offset = Array.from(prefix).length;
+  replay.context.quote_end_offset = replay.context.quote_start_offset + Array.from(quote).length;
+  const evidence = {
+    id: "evidence-unicode",
+    project_id: "project-unicode",
+    claim_id: "claim-unicode",
+    source_id: "source-unicode",
+    quote,
+    citation_valid: true,
+    replay
+  };
+  const claim = {
+    id: "claim-unicode",
+    project_id: "project-unicode",
+    source_id: "source-unicode",
+    text: quote,
+    status: "pending_validation"
+  };
+
+  const exactRange = harness.context.replayExactQuoteRange(replay);
+  assert.equal(exactRange.exact, quote);
+  assert.equal(exactRange.before, prefix);
+  assert.equal(exactRange.after, "\nafter");
+  const markup = harness.context.renderReplayPanelMarkup(replay);
+  assert.match(markup, /<mark data-replay-exact-quote>exact🙂 quote<\/mark>/);
+  assert.doesNotThrow(() => harness.context.validateSelectionFirstEvidence(
+    { ok: true, source: { id: "source-unicode", project_id: "project-unicode" }, claim, evidence },
+    { sourceId: "source-unicode", projectId: "project-unicode", quote }
+  ));
 });
 
 test("Source Replay project mismatch is explicit and does not expose source or context", async () => {
@@ -781,6 +847,77 @@ test("project switching clears Replay views synchronously and discards late proj
   assert.equal(harness.nodes.get("claimReviewList").children.length, 0);
   assert.equal(harness.run("state.claimReviewQueue.length"), 0);
   assert.equal(harness.run("Object.keys(state.knowledgeRecords).length"), 0);
+});
+
+test("knowledge restore prefers milestone IDs when First Evidence falls outside the records limit", async () => {
+  const replay = replayFixture({
+    replayId: "rpl-direct-restore",
+    evidenceId: "evidence-direct-restore",
+    claimId: "claim-direct-restore",
+    sourceId: "source-direct-restore",
+    quoteText: "The exact saved quote remains restorable beyond the list limit.",
+    contextText: "Prefix. The exact saved quote remains restorable beyond the list limit. Suffix."
+  });
+  const claim = {
+    id: "claim-direct-restore",
+    project_id: "project-a",
+    source_id: "source-direct-restore",
+    text: "The exact saved quote remains restorable beyond the list limit.",
+    status: "pending_validation",
+    evidence_count: 1
+  };
+  const evidence = {
+    id: "evidence-direct-restore",
+    claim_id: claim.id,
+    source_id: claim.source_id,
+    project_id: "project-a",
+    quote: replay.quote.text,
+    status: "pending_validation",
+    citation_valid: true,
+    replay
+  };
+  const harness = await createSidepanelHarness({
+    fetchHandler: async (call) => {
+      if (call.path === `/v1/claims/${claim.id}`) return { ok: true, claim };
+      if (call.path === `/v1/evidence/${evidence.id}`) return { ok: true, evidence };
+      if (call.path === "/v1/knowledge/records") {
+        return {
+          ok: true,
+          claims: [{ id: "newer-claim", project_id: "project-a", text: "Newer", status: "extracted" }],
+          evidence: []
+        };
+      }
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "project-a"
+    },
+    onboardingMilestones: {
+      pairedAt: "2026-08-15T07:00:00.000Z",
+      capturedAt: "2026-08-15T07:01:00.000Z",
+      claimReadyAt: "2026-08-15T07:02:00.000Z",
+      projectId: "project-a",
+      lastSourceId: "source-direct-restore",
+      firstSelectionId: "selection-direct-restore",
+      firstClaimId: claim.id,
+      firstEvidenceId: evidence.id
+    }
+  });
+
+  await harness.context.loadKnowledgeRecords();
+
+  assert.deepEqual(
+    harness.fetchCalls.slice(0, 3).map((call) => call.path),
+    [`/v1/claims/${claim.id}`, `/v1/evidence/${evidence.id}`, "/v1/knowledge/records"]
+  );
+  assert.equal(harness.nodes.get("quickStartEvidence").hidden, false);
+  assert.equal(harness.nodes.get("quickStartEvidence").dataset.claimId, claim.id);
+  assert.equal(harness.nodes.get("quickStartEvidence").dataset.evidenceId, evidence.id);
+  assert.equal(harness.nodes.get("quickStartReplayPanel").dataset.replayStatus, "resolved");
 });
 
 test("changeProject clears project-bound knowledge before its first awaited persistence step", async () => {
@@ -1517,7 +1654,7 @@ test("English selected-text and pending-selection statuses retain dynamic values
       reason: "queue_full"
     })
   });
-  queued.setState({ settings: { projectId: "project-a" }, source: null });
+  queued.setState({ companionAuthenticated: true, settings: { projectId: "project-a" }, source: null });
 
   await queued.context.hydratePendingSelection({ noticeId: "notice-en" });
   assert.match(queued.nodes.get("status").textContent, /12 selected-text items.*queue is full/i);
@@ -2537,93 +2674,55 @@ test("batch storage migrates legacy items once and isolates queues and sources b
   assert.match(js, /changeProject[\s\S]*resetCurrentSourceAfterProjectChange\(previousProjectId, nextProjectId\)/);
 });
 
-test("sidepanel consumes targeted selection claims live without overwriting an active source", async () => {
-  let queued = [{
+test("unpaired manual selected-text reading never claims a pending context-menu save", async () => {
+  const queued = [{
     id: "selection-a",
-    text: "Window A selected text",
-    title: "Window A title",
+    text: "Pending context-menu evidence",
+    title: "Pending intent",
     url: "https://example.com/a",
     tabId: 41,
     windowId: 7,
     projectId: "project-a",
     capturedAt: "2026-01-01T00:00:00.000Z"
   }];
-  const claimCalls = [];
+  const runtimeCalls = [];
   const harness = await createSidepanelHarness({
+    executeScriptHandler: async () => "Fresh live page selection",
     runtimeMessageHandler: async (message) => {
-      claimCalls.push(message);
-      if (message.type !== "qc-smart-reader-claim-selection") return undefined;
-      const index = queued.findIndex((item) => !message.selectionId || item.id === message.selectionId);
-      if (index < 0) return { ok: true, selection: null, pendingCount: queued.length };
-      const item = queued[index];
-      if (item.projectId !== message.projectId) {
-        return {
-          ok: true,
-          selection: null,
-          pendingCount: queued.length,
-          reason: "project_mismatch",
-          selectionProjectId: item.projectId
-        };
-      }
-      if (item.windowId !== message.windowId) {
-        return { ok: true, selection: null, pendingCount: queued.length, reason: "target_mismatch" };
-      }
-      queued.splice(index, 1);
-      return { ok: true, selection: item, pendingCount: queued.length };
+      runtimeCalls.push(structuredClone(message));
+      return { ok: true, selection: queued[0], leaseId: "must-not-be-used", pendingCount: 1 };
     }
   });
   harness.setState({
-    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-a", pairingToken: "pair-token" }
+    companionAuthenticated: false,
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-a", pairingToken: "stale-token" }
   });
 
-  assert.equal(await harness.context.hydratePendingSelection(), true);
-  assert.equal(harness.run("state.source.title"), "Window A title");
+  assert.equal(await harness.context.hydratePendingSelection(), false);
+  assert.equal(runtimeCalls.length, 0, "manual hydration leased before authentication");
+  await harness.context.readSelectedTextFromPage();
+
+  assert.equal(runtimeCalls.length, 0, "Use selected text consumed a context-menu intent");
+  assert.equal(queued.length, 1);
+  assert.equal(harness.run("state.source.text"), "Fresh live page selection");
   assert.equal(harness.run("state.source.projectId"), "project-a");
-  assert.equal(queued.length, 0);
-  assert.equal(claimCalls[0].tabId, 41);
-  assert.equal(claimCalls[0].windowId, 7);
+  assert.equal(harness.run("state.source.text === 'Pending context-menu evidence'"), false);
+});
 
-  queued = [{
-    id: "selection-b",
-    text: "Second selected text",
-    title: "Second title",
-    url: "https://example.com/b",
-    tabId: 41,
-    windowId: 7,
-    projectId: "project-a",
-    capturedAt: "2026-01-01T00:00:01.000Z"
-  }];
-  const callsBeforeNotification = claimCalls.length;
-  harness.context.bindPendingSelectionMessages();
-  assert.equal(harness.runtimeListeners.length, 1);
-  harness.runtimeListeners[0]({
-    type: "qc-smart-reader-selection-queued",
-    selectionId: "selection-b",
-    tabId: 41,
-    windowId: 7
+test("unpaired live notices are shown only in their target window without claiming", async () => {
+  const runtimeCalls = [];
+  const harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      return { ok: true, selection: null };
+    }
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(harness.run("state.source.title"), "Window A title", "live delivery silently overwrote the active source");
-  assert.equal(queued.length, 1, "an automatically deferred selection was removed from the queue");
-  assert.equal(claimCalls.length, callsBeforeNotification, "automatic delivery claimed before checking the active source");
-  assert.match(harness.nodes.get("status").textContent, /待载入|使用选中文本/);
+  harness.setState({
+    companionAuthenticated: false,
+    settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-a", pairingToken: "stale-token" }
+  });
+  harness.context.bindPendingSelectionMessages();
 
-  assert.equal(await harness.context.hydratePendingSelection(), true, "manual hydration did not consume the next queued selection");
-  assert.equal(harness.run("state.source.title"), "Second title");
-  assert.equal(queued.length, 0);
-
-  harness.setState({ source: null });
-  queued = [{
-    id: "selection-other-window",
-    text: "Other window text",
-    title: "Other window title",
-    url: "https://example.com/other-window",
-    tabId: 202,
-    windowId: 22,
-    projectId: "project-a",
-    capturedAt: "2026-01-01T00:00:02.000Z"
-  }];
-  const claimsBeforeOtherWindow = claimCalls.length;
   harness.runtimeListeners[0]({
     type: "qc-smart-reader-selection-queued",
     selectionId: "selection-other-window",
@@ -2631,30 +2730,757 @@ test("sidepanel consumes targeted selection claims live without overwriting an a
     windowId: 22
   });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(harness.run("state.source === null"), true, "a selection for another window was rendered");
-  assert.equal(queued.length, 1, "a selection for another window was consumed");
-  assert.equal(claimCalls.length, claimsBeforeOtherWindow, "another window's selection reached the claim endpoint");
+  assert.equal(harness.nodes.get("status")?.textContent || "", "");
+  assert.equal(runtimeCalls.length, 0);
 
-  queued = [{
-    id: "selection-live",
-    text: "Live selected text",
-    title: "Live title",
-    url: "https://example.com/live",
-    tabId: 41,
-    windowId: 7,
-    projectId: "project-a",
-    capturedAt: "2026-01-01T00:00:03.000Z"
-  }];
   harness.runtimeListeners[0]({
     type: "qc-smart-reader-selection-queued",
-    selectionId: "selection-live",
+    selectionId: "selection-moved-tab",
+    tabId: 41,
+    windowId: 22
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.nodes.get("status")?.textContent || "", "");
+  assert.equal(runtimeCalls.length, 0, "a matching tab id bypassed the frozen window binding");
+
+  harness.runtimeListeners[0]({
+    type: "qc-smart-reader-selection-queued",
+    selectionId: "selection-current-window",
     tabId: 41,
     windowId: 7
   });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(harness.run("state.source.title"), "Live title", "same-window live selection was not rendered");
-  assert.equal(harness.run("state.source.projectId"), "project-a");
-  assert.equal(queued.length, 0, "same-window live selection was not atomically removed");
+  assert.match(harness.nodes.get("status").textContent, /保留.*队列|配对|测试本地/);
+  assert.equal(runtimeCalls.length, 0);
+});
+
+test("a queued selection resumes when unrelated busy work returns the panel to idle", async () => {
+  const runtimeCalls = [];
+  const harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      return { ok: true, selection: null, pendingCount: 0, reason: "not_found" };
+    }
+  });
+  harness.setState({
+    companionAuthenticated: true,
+    busy: true,
+    busyDepth: 1,
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      projectId: "project-a",
+      pairingToken: "pair-token"
+    }
+  });
+  harness.run("selectionDrainRequested = true; setBusy(false);");
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.run("state.busy"), false);
+  assert.deepEqual(
+    runtimeCalls.map((call) => call.type),
+    ["qc-smart-reader-claim-selection"]
+  );
+});
+
+test("switching back to a selection project schedules its retained queue", async () => {
+  const runtimeCalls = [];
+  const harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      return { ok: true, selection: null, pendingCount: 0, reason: "not_found" };
+    }
+  });
+  harness.setState({
+    companionAuthenticated: true,
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      projectId: "project-b",
+      pairingToken: "pair-token"
+    }
+  });
+  const projectSelect = harness.context.document.getElementById("projectSelect");
+  projectSelect.value = "project-a";
+  projectSelect.selectedOptions = [{ textContent: "Project A" }];
+  harness.run(`
+    saveBatchQueue = async () => {};
+    saveSettings = async () => {
+      state.settings.projectId = document.getElementById("projectSelect").value;
+      return state.settings;
+    };
+    loadBatchQueue = async () => {};
+    loadProjectBrief = async () => {};
+    loadCapturePlans = async () => {};
+    refreshKnowledgeWorkspace = async () => {};
+    loadTopicPackages = async () => {};
+    loadDeliverables = async () => {};
+    loadStrategyWorkspace = async () => {};
+    loadProjectDashboard = async () => {};
+    setProjectStatus = () => {};
+  `);
+
+  await harness.context.changeProject();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.run("currentProjectId()"), "project-a");
+  assert.deepEqual(
+    runtimeCalls.map((call) => [call.type, call.projectId]),
+    [["qc-smart-reader-claim-selection", "project-a"]]
+  );
+});
+
+test("an external project change synchronizes every open panel before selection drain", async () => {
+  const runtimeCalls = [];
+  const harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      return { ok: true, selection: null, pendingCount: 0, reason: "not_found" };
+    }
+  });
+  harness.setState({
+    companionAuthenticated: true,
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      projectId: "project-a",
+      pairingToken: "pair-token"
+    },
+    source: {
+      title: "Project A source",
+      url: "https://example.com/a",
+      text: "Project A content must be cleared before project B can receive evidence.",
+      kind: "page",
+      projectId: "project-a",
+      sourceId: "source-a"
+    }
+  });
+  harness.context.renderSource();
+  harness.run(`
+    saveBatchQueue = async () => {};
+    loadBatchQueue = async () => {};
+    hydrateStartupWorkspaces = async () => {};
+  `);
+  harness.context.bindSettingsStorageChanges();
+
+  harness.storageChangeListeners[0]({
+    settings: {
+      oldValue: {
+        serviceUrl: "http://127.0.0.1:37621",
+        pairingToken: "pair-token",
+        projectId: "project-a"
+      },
+      newValue: {
+        serviceUrl: "http://127.0.0.1:47621",
+        pairingToken: "new-pair-token",
+        projectId: "project-b"
+      }
+    }
+  }, "local");
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.run("currentProjectId()"), "project-b");
+  assert.equal(harness.run("state.source === null"), true);
+  assert.equal(harness.nodes.get("projectSelect").value, "project-b");
+  assert.equal(harness.run("state.companionAuthenticated"), false);
+  assert.equal(runtimeCalls.length, 0, "the stale panel leased before authenticating the new Companion");
+  assert.equal(harness.fetchCalls.length, 1);
+  assert.deepEqual([...new Set(harness.fetchCalls.map((call) => call.origin))], ["http://127.0.0.1:47621"]);
+});
+
+test("an authenticated old Companion keeps selections queued before leasing", async () => {
+  const runtimeCalls = [];
+  const harness = await createSidepanelHarness({
+    uiLanguage: "en-US",
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      return { ok: true, selection: null };
+    }
+  });
+  harness.setState({
+    companionAuthenticated: true,
+    companionCapabilities: [],
+    companionServiceVersion: "0.9.4",
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      projectId: "project-a",
+      pairingToken: "pair-token"
+    }
+  });
+
+  assert.equal(await harness.context.hydratePendingSelection({ automatic: true }), false);
+  assert.equal(runtimeCalls.length, 0, "an unsupported Companion leased or consumed the selection");
+  assert.equal(harness.fetchCalls.length, 0);
+  assert.equal(harness.nodes.get("status").dataset.i18nDynamicKey, "selectionSave.updateCompanion");
+  assert.match(harness.nodes.get("status").textContent, /update Companion.*0\.9\.4/i);
+  assert.equal(harness.run("selectionDrainRequested"), true);
+});
+
+test("authenticated automatic selection saves detached local First Evidence before ACK without changing active source", async () => {
+  const pending = {
+    id: "selection-first-evidence",
+    text: "A saved selection stays pending until a person verifies this exact quote.",
+    contextText: [
+      "Bounded prefix from the clicked DOM range.",
+      "A saved selection stays pending until a person verifies this exact quote.",
+      "Bounded suffix from the clicked DOM range."
+    ].join("\n"),
+    contextMode: "dom-range",
+    title: "Selection fixture",
+    url: "https://example.com/selection",
+    tabId: 41,
+    windowId: 7,
+    projectId: "project-a",
+    capturedAt: "2026-08-15T08:00:00.000Z"
+  };
+  const replay = replayFixture({
+    replayId: "rpl-selection-first",
+    evidenceId: "evidence-selection-first",
+    claimId: "claim-selection-first",
+    sourceId: "source-selection-first",
+    quoteText: pending.text,
+    contextText: pending.contextText
+  });
+  const runtimeCalls = [];
+  const persistenceOrder = [];
+  let queued = true;
+  let harness;
+  harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      persistenceOrder.push(message.type);
+      if (message.type === "qc-smart-reader-claim-selection") {
+        return queued
+          ? { ok: true, selection: pending, leaseId: "lease-selection-first", pendingCount: 1 }
+          : { ok: true, selection: null, pendingCount: 0, reason: "not_found" };
+      }
+      if (message.type === "qc-smart-reader-ack-selection") {
+        assert.equal(
+          harness.storageState.onboardingMilestones.firstEvidenceId,
+          "evidence-selection-first",
+          "queue ACK happened before the restore pointer was durable"
+        );
+        queued = false;
+        return { ok: true, acknowledged: true, pendingCount: 0 };
+      }
+      if (message.type === "qc-smart-reader-release-selection") {
+        return { ok: true, released: true, pendingCount: queued ? 1 : 0 };
+      }
+      return undefined;
+    },
+    storageSetHandler: async (values) => {
+      if (values.onboardingMilestones?.firstEvidenceId) persistenceOrder.push("milestones");
+    },
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures" && call.method === "POST") {
+        persistenceOrder.push("capture");
+        return {
+          ok: true,
+          source: {
+            id: "source-selection-first",
+            project_id: "project-a",
+            markdown_path: "wiki/sources/source-selection-first.md"
+          },
+          chunks: [{ id: "chunk-selection-first" }]
+        };
+      }
+      if (call.path === "/v1/sources/source-selection-first/first-evidence" && call.method === "POST") {
+        persistenceOrder.push("first-evidence");
+        return {
+          ok: true,
+          reused: { claim: false, evidence: false },
+          source: { id: "source-selection-first", project_id: "project-a" },
+          claim: {
+            id: "claim-selection-first",
+            source_id: "source-selection-first",
+            project_id: "project-a",
+            text: pending.text,
+            status: "pending_validation",
+            evidence_count: 1
+          },
+          evidence: {
+            id: "evidence-selection-first",
+            claim_id: "claim-selection-first",
+            source_id: "source-selection-first",
+            quote: pending.text,
+            status: "pending_validation",
+            citation_valid: true,
+            replay
+          }
+        };
+      }
+      return { ok: true };
+    }
+  });
+  const activeSource = {
+    title: "Active source must remain",
+    url: "https://example.com/active",
+    text: "This is the active source and must not be replaced by automatic selection saving.",
+    kind: "page",
+    site: "example",
+    projectId: "project-a",
+    sourceId: "source-active",
+    sourceFingerprint: "active-fingerprint",
+    chunks: [{ id: "chunk-active" }]
+  };
+  harness.setState({
+    companionAuthenticated: true,
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "project-a",
+      provider: "openai",
+      modelReady: true,
+      modelRoute: "provider"
+    },
+    source: activeSource,
+    onboardingMilestones: { pairedAt: "2026-08-15T07:59:00.000Z" }
+  });
+  harness.context.renderSource();
+  const sourceBefore = harness.run("JSON.stringify(state.source)");
+
+  assert.equal(await harness.context.hydratePendingSelection({ automatic: true }), true);
+
+  assert.equal(harness.run("JSON.stringify(state.source)"), sourceBefore);
+  assert.equal(harness.nodes.get("sourceTitle").textContent, activeSource.title);
+  assert.equal(harness.nodes.get("sourceUrl").textContent, activeSource.url);
+  const capture = harness.fetchCalls.find((call) => call.path === "/v1/captures");
+  assert.equal(capture.body.project_id, "project-a");
+  assert.equal(capture.body.source.kind, "selection");
+  assert.equal(capture.body.content.text, pending.contextText);
+  const firstEvidence = harness.fetchCalls.find((call) => call.path.endsWith("/first-evidence"));
+  assert.deepEqual(firstEvidence.body, { project_id: "project-a", quote: pending.text });
+  assert.equal(
+    harness.fetchCalls.some((call) => /extract-knowledge|reextract|llm|model/i.test(call.path)),
+    false,
+    "automatic selection reached a model/extraction route"
+  );
+  assert.equal(runtimeCalls.at(-1).type, "qc-smart-reader-ack-selection");
+  assert.equal(runtimeCalls.at(-1).leaseId, "lease-selection-first");
+  assert.deepEqual(persistenceOrder, [
+    "qc-smart-reader-claim-selection",
+    "capture",
+    "first-evidence",
+    "milestones",
+    "qc-smart-reader-ack-selection"
+  ]);
+  assert.equal(harness.nodes.get("quickStartEvidence").hidden, false);
+  assert.equal(harness.nodes.get("quickStartReviewStatus").dataset.i18nDynamicKey, "firstEvidence.review.pending");
+  assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, false);
+  assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, false);
+  assert.equal(harness.storageState.onboardingMilestones.projectId, "project-a");
+  assert.equal(harness.storageState.onboardingMilestones.lastSourceId, "source-selection-first");
+  assert.equal(harness.storageState.onboardingMilestones.firstSelectionId, pending.id);
+  assert.equal(harness.storageState.onboardingMilestones.firstClaimId, "claim-selection-first");
+  assert.equal(harness.storageState.onboardingMilestones.firstEvidenceId, "evidence-selection-first");
+  const milestoneWrites = harness.storageSetCalls.filter((entry) => entry.onboardingMilestones);
+  assert.equal(milestoneWrites.length, 1, "selection milestones were not committed in one durable write");
+  assert.equal(
+    harness.storageState.onboardingMilestones.capturedAt,
+    harness.storageState.onboardingMilestones.claimReadyAt
+  );
+  for (const forbidden of ["text", "claim", "quote", "context", "contextText", "replay", "pairingToken"]) {
+    assert.equal(forbidden in harness.storageState.onboardingMilestones, false, `${forbidden} leaked into local restore state`);
+  }
+});
+
+test("idempotent selection retries preserve server-confirmed reviewed and rejected decisions", async () => {
+  for (const decisionStatus of ["reviewed", "rejected"]) {
+    const pending = {
+      id: `selection-${decisionStatus}`,
+      text: `This exact quote already has a ${decisionStatus} human decision.`,
+      contextText: `Prefix. This exact quote already has a ${decisionStatus} human decision. Suffix.`,
+      title: `Decision ${decisionStatus}`,
+      url: `https://example.com/${decisionStatus}`,
+      tabId: 41,
+      windowId: 7,
+      projectId: "project-a"
+    };
+    const ids = {
+      source: `source-${decisionStatus}`,
+      claim: `claim-${decisionStatus}`,
+      evidence: `evidence-${decisionStatus}`
+    };
+    const replay = replayFixture({
+      replayId: `rpl-${decisionStatus}`,
+      evidenceId: ids.evidence,
+      claimId: ids.claim,
+      sourceId: ids.source,
+      quoteText: pending.text,
+      contextText: pending.contextText
+    });
+    const priorDecisionAt = "2026-08-15T08:10:00.000Z";
+    const harness = await createSidepanelHarness({
+      runtimeMessageHandler: async (message) => {
+        if (message.type === "qc-smart-reader-claim-selection") {
+          return { ok: true, selection: pending, leaseId: `lease-${decisionStatus}`, pendingCount: 1 };
+        }
+        if (message.type === "qc-smart-reader-ack-selection") {
+          return { ok: true, acknowledged: true, pendingCount: 0 };
+        }
+        return { ok: true, released: true, pendingCount: 1 };
+      },
+      fetchHandler: async (call) => {
+        if (call.path === "/v1/captures") {
+          return { ok: true, source: { id: ids.source, project_id: "project-a" } };
+        }
+        if (call.path.endsWith("/first-evidence")) {
+          return {
+            ok: true,
+            reused: { claim: true, evidence: true },
+            source: { id: ids.source, project_id: "project-a" },
+            claim: {
+              id: ids.claim,
+              source_id: ids.source,
+              project_id: "project-a",
+              text: pending.text,
+              status: decisionStatus
+            },
+            evidence: {
+              id: ids.evidence,
+              claim_id: ids.claim,
+              source_id: ids.source,
+              project_id: "project-a",
+              quote: pending.text,
+              status: decisionStatus,
+              citation_valid: true,
+              replay
+            }
+          };
+        }
+        return { ok: true };
+      }
+    });
+    harness.setState({
+      companionAuthenticated: true,
+      settings: {
+        serviceUrl: "http://127.0.0.1:37621",
+        projectId: "project-a",
+        pairingToken: "pair-token"
+      },
+      onboardingMilestones: {
+        pairedAt: "2026-08-15T08:00:00.000Z",
+        projectId: "project-a",
+        firstSelectionId: pending.id,
+        firstClaimId: ids.claim,
+        firstEvidenceId: ids.evidence,
+        firstDecisionAt: priorDecisionAt,
+        firstDecisionStatus: decisionStatus,
+        ...(decisionStatus === "reviewed" ? { firstReviewedAt: priorDecisionAt } : {})
+      }
+    });
+
+    assert.equal(await harness.context.hydratePendingSelection({ automatic: true }), true);
+    assert.equal(harness.storageState.onboardingMilestones.firstDecisionStatus, decisionStatus);
+    assert.equal(harness.storageState.onboardingMilestones.firstDecisionAt, priorDecisionAt);
+    assert.equal(
+      harness.storageState.onboardingMilestones.firstReviewedAt || "",
+      decisionStatus === "reviewed" ? priorDecisionAt : ""
+    );
+    assert.equal(harness.run("state.onboardingDecisionVerified"), true);
+    assert.equal(harness.nodes.get("quickStartAcceptClaimBtn").disabled, true);
+    assert.equal(harness.nodes.get("quickStartRejectClaimBtn").disabled, true);
+    assert.equal(
+      harness.nodes.get("quickStartReviewStatus").dataset.i18nDynamicKey,
+      decisionStatus === "reviewed"
+        ? "firstEvidence.review.reviewed"
+        : "firstEvidence.review.rejected"
+    );
+  }
+});
+
+test("project drift during the single milestone write releases without rendering or ACK", async () => {
+  const pending = {
+    id: "selection-storage-drift",
+    text: "Project drift must not attach this evidence to the newly active project.",
+    contextText: "Prefix. Project drift must not attach this evidence to the newly active project. Suffix.",
+    title: "Storage drift",
+    url: "https://example.com/storage-drift",
+    tabId: 41,
+    windowId: 7,
+    projectId: "project-a"
+  };
+  const replay = replayFixture({
+    replayId: "rpl-storage-drift",
+    evidenceId: "evidence-storage-drift",
+    claimId: "claim-storage-drift",
+    sourceId: "source-storage-drift",
+    quoteText: pending.text,
+    contextText: pending.contextText
+  });
+  const runtimeCalls = [];
+  let endpointReturned = false;
+  let harness;
+  harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      if (message.type === "qc-smart-reader-claim-selection") {
+        return { ok: true, selection: pending, leaseId: "lease-storage-drift", pendingCount: 1 };
+      }
+      if (message.type === "qc-smart-reader-release-selection") {
+        return { ok: true, released: true, pendingCount: 1 };
+      }
+      return { ok: true, acknowledged: true, pendingCount: 0 };
+    },
+    storageSetHandler: async (values) => {
+      if (!values.onboardingMilestones?.firstEvidenceId) return;
+      assert.equal(endpointReturned, true, "milestones were written before First Evidence returned");
+      harness.setState({
+        settings: {
+          serviceUrl: "http://127.0.0.1:37621",
+          pairingToken: "pair-token",
+          projectId: "project-b"
+        }
+      });
+      harness.nodes.get("status").textContent = "project-b-status";
+      await Promise.resolve();
+    },
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures") {
+        return { ok: true, source: { id: "source-storage-drift", project_id: "project-a" }, chunks: [] };
+      }
+      if (call.path.endsWith("/first-evidence")) {
+        endpointReturned = true;
+        return {
+          ok: true,
+          reused: { claim: false, evidence: false },
+          source: { id: "source-storage-drift", project_id: "project-a" },
+          claim: {
+            id: "claim-storage-drift",
+            source_id: "source-storage-drift",
+            project_id: "project-a",
+            text: pending.text,
+            status: "pending_validation"
+          },
+          evidence: {
+            id: "evidence-storage-drift",
+            claim_id: "claim-storage-drift",
+            source_id: "source-storage-drift",
+            project_id: "project-a",
+            quote: pending.text,
+            status: "pending_validation",
+            citation_valid: true,
+            replay
+          }
+        };
+      }
+      return { ok: true };
+    }
+  });
+  const activeSource = {
+    title: "Project A active source",
+    url: "https://example.com/active-a",
+    text: "This source must remain untouched during detached selection persistence.",
+    kind: "page",
+    projectId: "project-a",
+    sourceId: "source-active-a"
+  };
+  harness.setState({
+    companionAuthenticated: true,
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "pair-token",
+      projectId: "project-a"
+    },
+    source: activeSource,
+    onboardingMilestones: { pairedAt: "2026-08-15T07:59:00.000Z" }
+  });
+  const sourceBefore = harness.run("JSON.stringify(state.source)");
+
+  assert.equal(await harness.context.hydratePendingSelection({ automatic: true }), false);
+
+  assert.deepEqual(
+    runtimeCalls.map((call) => call.type),
+    ["qc-smart-reader-claim-selection", "qc-smart-reader-release-selection"]
+  );
+  assert.equal(runtimeCalls.some((call) => call.type === "qc-smart-reader-ack-selection"), false);
+  assert.equal(harness.nodes.get("status").textContent, "project-b-status");
+  assert.equal(harness.nodes.get("quickStartEvidence")?.dataset?.claimId || "", "");
+  assert.equal(harness.run("JSON.stringify(state.source)"), sourceBefore);
+  assert.equal(harness.run("state.onboardingMilestones.firstEvidenceId || ''"), "");
+  assert.equal(harness.storageState.onboardingMilestones.firstEvidenceId, "evidence-storage-drift");
+});
+
+test("automatic selection keeps a failed item but continues to the next valid queued item", async () => {
+  const runtimeCalls = [];
+  const pending = {
+    id: "selection-retry",
+    text: "This exact selection must remain queued after a local persistence failure.",
+    contextText: "This exact selection must remain queued after a local persistence failure.",
+    title: "Retry selection",
+    url: "https://example.com/retry",
+    tabId: 41,
+    windowId: 7,
+    projectId: "project-a"
+  };
+  const validPending = {
+    ...pending,
+    id: "selection-after-failure",
+    text: "A later valid selection must not be blocked by the retained failed item.",
+    contextText: "A later valid selection must not be blocked by the retained failed item.",
+    title: "Valid selection",
+    url: "https://example.com/valid-after-failure"
+  };
+  const validReplay = replayFixture({
+    replayId: "rpl-after-failure",
+    evidenceId: "evidence-after-failure",
+    claimId: "claim-after-failure",
+    sourceId: "source-after-failure",
+    quoteText: validPending.text,
+    contextText: validPending.contextText
+  });
+  let validAcknowledged = false;
+  let queueNoticeDelivered = false;
+  const harness = await createSidepanelHarness({
+    runtimeMessageHandler: async (message) => {
+      runtimeCalls.push(structuredClone(message));
+      if (message.type === "qc-smart-reader-claim-selection") {
+        if (!queueNoticeDelivered) {
+          queueNoticeDelivered = true;
+          return { ok: true, selection: null, pendingCount: 2, reason: "queue_full" };
+        }
+        if (validAcknowledged) {
+          return { ok: true, selection: null, pendingCount: 1, reason: "not_found" };
+        }
+        if ((message.excludeSelectionIds || []).includes(pending.id)) {
+          return {
+            ok: true,
+            selection: validPending,
+            leaseId: "lease-after-failure",
+            pendingCount: 2
+          };
+        }
+        return { ok: true, selection: pending, leaseId: "lease-retry", pendingCount: 2 };
+      }
+      if (message.type === "qc-smart-reader-release-selection") {
+        return { ok: true, released: true, pendingCount: 2 };
+      }
+      if (message.type === "qc-smart-reader-ack-selection") {
+        validAcknowledged = true;
+        return { ok: true, acknowledged: true, pendingCount: 1 };
+      }
+      return { ok: true, acknowledged: false, pendingCount: 1 };
+    },
+    fetchHandler: async (call) => {
+      if (call.path === "/v1/captures") {
+        const valid = call.body.source.url === validPending.url;
+        return {
+          ok: true,
+          source: {
+            id: valid ? "source-after-failure" : "source-retry",
+            project_id: "project-a"
+          },
+          chunks: [{ id: valid ? "chunk-after-failure" : "chunk-retry" }]
+        };
+      }
+      if (call.path === "/v1/sources/source-retry/first-evidence") {
+        return { ok: false, status: 400, error: "first evidence failed closed", reason: "ambiguous_quote" };
+      }
+      if (call.path === "/v1/sources/source-after-failure/first-evidence") {
+        return {
+          ok: true,
+          source: { id: "source-after-failure", project_id: "project-a" },
+          claim: {
+            id: "claim-after-failure",
+            project_id: "project-a",
+            source_id: "source-after-failure",
+            text: validPending.text,
+            status: "pending_validation"
+          },
+          evidence: {
+            id: "evidence-after-failure",
+            project_id: "project-a",
+            claim_id: "claim-after-failure",
+            source_id: "source-after-failure",
+            quote: validPending.text,
+            status: "pending_validation",
+            citation_valid: true,
+            replay: validReplay
+          }
+        };
+      }
+      return { ok: true };
+    }
+  });
+  harness.setState({
+    companionAuthenticated: false,
+    settings: {
+      serviceUrl: "http://127.0.0.1:37621",
+      pairingToken: "stale-token",
+      projectId: "project-a"
+    },
+    source: null
+  });
+
+  assert.equal(await harness.context.hydratePendingSelection({ automatic: true }), false);
+  assert.equal(runtimeCalls.length, 0, "stored token was treated as authenticated pairing");
+  assert.equal(harness.fetchCalls.length, 0);
+
+  harness.setState({ companionAuthenticated: true });
+  assert.equal(await harness.context.hydratePendingSelection({ automatic: true }), false);
+  for (let index = 0; index < 5 && !validAcknowledged; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(validAcknowledged, true, "a retained failed item poisoned the later valid selection");
+  const claimCalls = runtimeCalls.filter((call) => call.type === "qc-smart-reader-claim-selection");
+  assert.equal(claimCalls.length >= 3, true);
+  assert.deepEqual(
+    claimCalls.find((call) => (call.excludeSelectionIds || []).includes(pending.id)).excludeSelectionIds,
+    [pending.id]
+  );
+  assert.equal(
+    runtimeCalls.some((call) => call.type === "qc-smart-reader-release-selection" && call.selectionId === pending.id),
+    true
+  );
+  assert.equal(
+    runtimeCalls.some((call) => call.type === "qc-smart-reader-ack-selection" && call.selectionId === validPending.id),
+    true
+  );
+  assert.equal(harness.storageState.onboardingMilestones.firstSelectionId, validPending.id);
+  assert.equal(harness.storageState.onboardingMilestones.firstEvidenceId, "evidence-after-failure");
+  assert.equal(harness.nodes.get("quickStartEvidence").dataset.evidenceId, "evidence-after-failure");
+  assert.equal(
+    harness.nodes.get("status").dataset.i18nDynamicKey,
+    "currentPage.pending.queueFull",
+    "saving older queued items hid that the newest explicit selection was never enqueued"
+  );
+});
+
+test("sidepanel gives a bilingual retry prompt for an overlong selection notice", async () => {
+  const makeHarness = (uiLanguage) => createSidepanelHarness({
+    uiLanguage,
+    runtimeMessageHandler: async (message) => {
+      if (message.type !== "qc-smart-reader-claim-selection") return undefined;
+      return {
+        ok: true,
+        selection: null,
+        pendingCount: 0,
+        reason: "selection_too_long",
+        length: 811,
+        max: 800
+      };
+    }
+  });
+
+  const english = await makeHarness("en-US");
+  english.setState({
+    companionAuthenticated: true,
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-a" }
+  });
+  assert.equal(await english.context.hydratePendingSelection({ automatic: true, noticeId: "too-long-en" }), false);
+  assert.equal(english.nodes.get("status").dataset.i18nDynamicKey, "selectionSave.tooLong");
+  assert.match(english.nodes.get("status").textContent, /811.*800|800.*811/);
+  assert.match(english.nodes.get("status").textContent, /shorter selection/i);
+
+  const chinese = await makeHarness("zh-CN");
+  chinese.setState({
+    companionAuthenticated: true,
+    settings: { serviceUrl: "http://127.0.0.1:37621", pairingToken: "pair-token", projectId: "project-a" }
+  });
+  assert.equal(await chinese.context.hydratePendingSelection({ automatic: true, noticeId: "too-long-zh" }), false);
+  assert.match(chinese.nodes.get("status").textContent, /811.*800|800.*811/);
+  assert.match(chinese.nodes.get("status").textContent, /缩短|重新选择/);
 });
 
 test("sidepanel surfaces queue overflow instead of pretending the newest selection was loaded", async () => {
@@ -2665,6 +3491,7 @@ test("sidepanel surfaces queue overflow instead of pretending the newest selecti
     }
   });
   harness.setState({
+    companionAuthenticated: true,
     settings: { serviceUrl: "http://127.0.0.1:37621", projectId: "project-a", pairingToken: "pair-token" },
     source: null
   });

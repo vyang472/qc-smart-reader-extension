@@ -128,7 +128,7 @@ test("sidepanel wires project brief and capture plan APIs", async () => {
   assert.match(js, /setLocalizedStatus\("currentPage\.nextPages\.working", \{ count: nextPages\.length \}\)/);
   assert.match(js, /setLocalizedStatus\("currentPage\.nextPages\.success", \{ count: nextPages\.length \}\)/);
   assert.match(js, /next_pages: extracted\.nextPages \|\| \[\]/);
-  assert.match(js, /next_pages: state\.source\.nextPages \|\| \[\]/);
+  assert.match(js, /next_pages: source\?\.nextPages \|\| \[\]/);
   assert.match(js, /pagination_from_url/);
   assert.match(js, /chrome\.scripting\.executeScript/);
   assert.match(js, /func: discoverCandidateLinksFromPage/);

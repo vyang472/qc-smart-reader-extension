@@ -6,6 +6,26 @@ All notable changes to QC Smart Reader will be documented here. The project foll
 
 No unreleased changes have been announced.
 
+## [0.9.5] - 2026-08-15
+
+This release adds a selection-first path for saving one exact quote as pending local evidence without invoking a model.
+
+### Added
+
+- An explicit browser context-menu action, **Save selection as pending evidence (local, no model)**, that preserves the selected quote and bounded captured context as one pending claim/evidence pair in the local Companion.
+- A versioned `selection_first_evidence_v1` Companion capability. An older Companion that does not advertise the capability is rejected before the queued selection is claimed, and the extension asks the user to install the matching v0.9.5 Companion.
+
+### Changed
+
+- Selection First Evidence remains pending until a person explicitly accepts (`reviewed`) or rejects (`rejected`) it. Saving the selection itself never makes that decision and never starts a model or agent run.
+- The bounded pending selection is retained in `chrome.storage.local` only for restart recovery. A failed or unpaired save remains queued; a successful Companion write followed by queue acknowledgement removes it. Clearing the extension's stored data or uninstalling the extension also lets Chrome remove this extension-owned queue.
+- Extension, Companion, installer, plugin, and package metadata now identify v0.9.5 consistently. `API_VERSION` and `SCHEMA_VERSION` remain at 1, and Companion v0.9.5 continues to accept extensions from v0.9.0 onward.
+
+### Trust boundary
+
+- Selection saving is an explicit user gesture, stays project/tab/window scoped, preserves the exact selected text, and does not call Codex CLI, any external model provider, or developer telemetry.
+- The existing locale-specific Web Store screenshots are prior-release v0.9.4 references; they were not recaptured as v0.9.5 screenshots. The v0.9.5 GitHub Release, Chrome Web Store upload, submission, and approval remain pending publisher actions.
+
 ## [0.9.4] - 2026-08-15
 
 This release prepares the first Chrome Web Store candidate and removes a setup dead end by linking each extension build to its exact matching Companion archive and checksum file.
@@ -136,7 +156,8 @@ First public preview.
 - Isolated Codex CLI runs in an ephemeral restricted environment and disabled shell, web, plugin, and delegation capabilities for provider calls.
 - Added archive/input validation, dependency integrity checks, cautious installer path handling, and rollback verification.
 
-[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.1...v0.9.2

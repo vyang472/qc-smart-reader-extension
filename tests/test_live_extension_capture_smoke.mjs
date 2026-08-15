@@ -331,7 +331,7 @@ function terminate(child) {
   });
 }
 
-test("live extension routes queued selections to the matching open side-panel window", async (t) => {
+test("live extension keeps window-scoped selections queued until Companion authentication", async (t) => {
   const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-selection-chrome-"));
   let browserContext;
   try {
@@ -359,7 +359,13 @@ test("live extension routes queued selections to the matching open side-panel wi
           model: ""
         }
       });
-      await chrome.storage.session.remove(["pendingSelection", "pendingSelections"]);
+      await chrome.storage.local.remove("pendingSelections");
+      await chrome.storage.session.remove([
+        "pendingSelection",
+        "pendingSelections",
+        "pendingSelectionNotice",
+        "pendingSelectionSessionId"
+      ]);
     });
 
     const sidepanelA = await browserContext.newPage();
@@ -408,7 +414,7 @@ test("live extension routes queued selections to the matching open side-panel wi
       }
     ];
     await worker.evaluate(async (items) => {
-      await chrome.storage.session.set({ pendingSelections: items });
+      await chrome.storage.local.set({ pendingSelections: items });
     }, selections);
 
     for (const selection of selections) {
@@ -426,22 +432,182 @@ test("live extension routes queued selections to the matching open side-panel wi
       }, selection);
     }
 
-    // First-run onboarding may intentionally keep the capture panel hidden until
-    // the local service is paired. Selection routing must still hydrate the
-    // project-bound source without forcing users away from onboarding.
-    await sidepanelA.waitForFunction(() => document.querySelector("#sourceTitle")?.textContent === "Selection A");
-    await sidepanelB.waitForFunction(() => document.querySelector("#sourceTitle")?.textContent === "Selection B");
-    assert.equal(await sidepanelA.locator("#sourceUrl").textContent(), "https://selection-fixture.localhost/a");
-    assert.equal(await sidepanelB.locator("#sourceUrl").textContent(), "https://selection-fixture.localhost/b");
-    assert.notEqual(await sidepanelA.locator("#sourceTitle").textContent(), "Selection B");
-    assert.notEqual(await sidepanelB.locator("#sourceTitle").textContent(), "Selection A");
+    await Promise.all([sidepanelA, sidepanelB].map((panel) => panel.waitForFunction(() => (
+      /queued|队列|Companion/i.test(document.querySelector("#status")?.textContent || "")
+    ))));
+    assert.notEqual(await sidepanelA.locator("#sourceTitle").textContent(), "Selection A");
+    assert.notEqual(await sidepanelB.locator("#sourceTitle").textContent(), "Selection B");
     const remaining = await worker.evaluate(async () => {
-      const { pendingSelections = [] } = await chrome.storage.session.get("pendingSelections");
+      const { pendingSelections = [] } = await chrome.storage.local.get("pendingSelections");
       return pendingSelections;
     });
-    assert.deepEqual(remaining, [], "live side panels did not atomically consume both selections");
+    assert.deepEqual(
+      remaining.map((item) => item.id),
+      selections.map((item) => item.id),
+      "an unauthenticated side panel claimed or removed a pending selection"
+    );
   } finally {
     if (browserContext) await browserContext.close();
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test("live paired extension saves detached First Evidence, ACKs once, and restores by local IDs", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "qc-live-selection-service-"));
+  const userDataDir = await mkdtemp(join(tmpdir(), "qc-live-selection-paired-chrome-"));
+  const servicePort = await freePort();
+  const serviceUrl = `http://127.0.0.1:${servicePort}`;
+  const companion = startCompanion(dataDir, servicePort);
+  const service = companion.child;
+  let browserContext;
+  try {
+    await waitForHealth(serviceUrl, companion);
+    const token = (await readFile(join(dataDir, "state", "pairing_token.txt"), "utf8")).trim();
+    await serviceJson(serviceUrl, token, "/v1/projects", {
+      method: "POST",
+      body: { id: "project-isolation", name: "Selection isolation" }
+    });
+    browserContext = await launchPersistentChromium(
+      t,
+      userDataDir,
+      extensionLaunchOptions("MAP selection-paired.localhost 127.0.0.1")
+    );
+    if (!browserContext) return;
+
+    const worker = await extensionServiceWorker(t, browserContext);
+    if (!worker) return;
+    const extensionId = new URL(worker.url()).host;
+    const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
+    await worker.evaluate(async ({ targetServiceUrl, pairingToken }) => {
+      await chrome.storage.local.set({
+        settings: {
+          serviceUrl: targetServiceUrl,
+          pairingToken,
+          projectId: "default",
+          provider: "mock",
+          baseUrl: "",
+          model: "",
+          modelReady: true,
+          modelRoute: "mock"
+        }
+      });
+      await chrome.storage.local.remove("pendingSelections");
+      await chrome.storage.session.remove([
+        "pendingSelection",
+        "pendingSelections",
+        "pendingSelectionNotice",
+        "pendingSelectionSessionId"
+      ]);
+    }, { targetServiceUrl: serviceUrl, pairingToken: token });
+
+    const sidepanel = await browserContext.newPage();
+    await sidepanel.goto(sidepanelUrl);
+    await waitForInteractiveSidepanel(sidepanel);
+    const target = await sidepanel.evaluate(async () => {
+      const tab = await chrome.tabs.getCurrent();
+      const window = await chrome.windows.getCurrent();
+      return { tabId: tab?.id, windowId: window?.id };
+    });
+    const sourceTitleBefore = await sidepanel.locator("#sourceTitle").textContent();
+    const quote = "A live selected quote is saved locally without invoking any model.";
+    const contextText = `Bounded prefix from the click.\n${quote}\nBounded suffix from the click.`;
+    const selection = {
+      id: "live-selection-first-evidence",
+      text: quote,
+      contextText,
+      contextMode: "dom-range",
+      title: "Live selection First Evidence",
+      url: "https://selection-paired.localhost/article",
+      tabId: target.tabId,
+      windowId: target.windowId,
+      projectId: "default",
+      capturedAt: "2026-08-15T08:00:00.000Z"
+    };
+    await worker.evaluate(async (item) => {
+      await chrome.storage.local.set({ pendingSelections: [item] });
+      try {
+        await chrome.runtime.sendMessage({
+          type: "qc-smart-reader-selection-queued",
+          selectionId: item.id,
+          tabId: item.tabId,
+          windowId: item.windowId
+        });
+      } catch (_error) {
+        // The card, Vault records, and ACK below are the observable contract.
+      }
+    }, selection);
+
+    await sidepanel.waitForFunction((expectedQuote) => {
+      const card = document.querySelector("#quickStartEvidence");
+      return card?.hidden === false
+        && document.querySelector("#quickStartQuoteText")?.textContent === expectedQuote
+        && card.dataset.evidenceId;
+    }, quote);
+    assert.equal(await sidepanel.locator("#sourceTitle").textContent(), sourceTitleBefore);
+    assert.equal(await sidepanel.locator("#quickStartReviewStatus").getAttribute("data-i18n-dynamic-key"), "firstEvidence.review.pending");
+    assert.equal(await sidepanel.locator("#quickStartReplayPanel").getAttribute("data-replay-status"), "resolved");
+
+    const records = await waitForKnowledgeRecords(
+      serviceUrl,
+      token,
+      (candidate) => (candidate.evidence || []).some((item) => item.quote === quote)
+    );
+    const evidence = records.evidence.find((item) => item.quote === quote);
+    const claim = records.claims.find((item) => item.id === evidence.claim_id);
+    assert.equal(claim.project_id, "default");
+    assert.equal(claim.source_id, evidence.source_id);
+    assert.equal(claim.status, "pending_validation");
+    assert.equal(evidence.status, "pending_validation");
+    assert.equal(evidence.replay.status, "resolved");
+    assert.equal(evidence.replay.reason, "exact_quote_match");
+
+    const extensionState = await worker.evaluate(async () => {
+      const local = await chrome.storage.local.get(["pendingSelections", "onboardingMilestones"]);
+      return {
+        pendingSelections: local.pendingSelections || [],
+        milestones: local.onboardingMilestones || {}
+      };
+    });
+    assert.deepEqual(extensionState.pendingSelections, []);
+    assert.equal(extensionState.milestones.firstSelectionId, selection.id);
+    assert.equal(extensionState.milestones.firstClaimId, claim.id);
+    assert.equal(extensionState.milestones.firstEvidenceId, evidence.id);
+    assert.equal(extensionState.milestones.lastSourceId, evidence.source_id);
+    for (const forbidden of ["text", "quote", "context", "contextText", "replay"]) {
+      assert.equal(forbidden in extensionState.milestones, false, `${forbidden} leaked into local milestones`);
+    }
+    const runCount = await execFilePromise(
+      TEST_PYTHON,
+      [
+        "-c",
+        "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); print(db.execute('SELECT COUNT(*) FROM agent_runs').fetchone()[0]); db.close()",
+        join(dataDir, "state", "qc_smart_reader.sqlite3")
+      ],
+      { cwd: ROOT }
+    );
+    assert.equal(Number(runCount.stdout.trim()), 0, "selection First Evidence invoked an agent/model run");
+
+    await sidepanel.close();
+    const restored = await browserContext.newPage();
+    await restored.goto(sidepanelUrl);
+    await waitForInteractiveSidepanel(restored);
+    await restored.waitForFunction((expectedEvidenceId) => (
+      document.querySelector("#quickStartEvidence")?.dataset.evidenceId === expectedEvidenceId
+        && document.querySelector("#quickStartReplayPanel")?.dataset.replayStatus === "resolved"
+    ), evidence.id);
+
+    await restored.evaluate(async () => {
+      const { settings = {} } = await chrome.storage.local.get("settings");
+      await chrome.storage.local.set({ settings: { ...settings, projectId: "project-isolation" } });
+    });
+    await restored.reload({ waitUntil: "domcontentloaded" });
+    await waitForInteractiveSidepanel(restored);
+    await restored.waitForFunction(() => document.querySelector("#quickStartEvidence")?.hidden === true);
+    assert.equal(await restored.locator("#quickStartQuoteText").textContent(), "");
+  } finally {
+    if (browserContext) await browserContext.close();
+    await terminate(service);
+    await rm(dataDir, { recursive: true, force: true });
     await rm(userDataDir, { recursive: true, force: true });
   }
 });

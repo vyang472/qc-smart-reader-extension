@@ -36,10 +36,11 @@ from uuid import uuid4
 
 
 APP_NAME = "QC Smart Reader"
-SERVICE_VERSION = "0.9.4"
+SERVICE_VERSION = "0.9.5"
 API_VERSION = 1
 SCHEMA_VERSION = 1
 MIN_EXTENSION_VERSION = "0.9.0"
+SERVICE_CAPABILITIES = ("selection_first_evidence_v1",)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 37621
 MAX_BODY_BYTES = 25 * 1024 * 1024
@@ -169,6 +170,14 @@ class _RejectModelRedirects(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, request, fp, code, message, headers, new_url):
         return None
+
+
+class FirstEvidenceValidationError(ValueError):
+    """A deterministic selection cannot be bound to one exact source location."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 def utc_now() -> str:
@@ -1484,14 +1493,17 @@ class Store:
             """
         )
         for table in ("sources", "capture_plans"):
+            selection_filter = " AND kind != 'selection'" if table == "sources" else ""
             rows = db.execute(
-                f"SELECT id, url FROM {table} WHERE canonical_url IS NULL OR canonical_url = ''"
+                f"SELECT id, url FROM {table} "
+                f"WHERE (canonical_url IS NULL OR canonical_url = ''){selection_filter}"
             ).fetchall()
             for row in rows:
                 db.execute(
                     f"UPDATE {table} SET canonical_url = ? WHERE id = ?",
                     (canonicalize_url(row["url"] or ""), row["id"]),
                 )
+        db.execute("UPDATE sources SET canonical_url = '' WHERE kind = 'selection' AND canonical_url != ''")
         db.execute("CREATE INDEX IF NOT EXISTS idx_project_briefs_status ON project_briefs(status, updated_at DESC)")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_plans_project_url ON capture_plans(project_id, url)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_capture_plans_project_status ON capture_plans(project_id, status, priority, updated_at DESC)")
@@ -1664,6 +1676,7 @@ When working in this QC Smart Reader vault:
             "api_version": API_VERSION,
             "schema_version": SCHEMA_VERSION,
             "min_extension_version": MIN_EXTENSION_VERSION,
+            "capabilities": list(SERVICE_CAPABILITIES),
             "data_dir": str(self.data_dir),
             "vault_dir": str(self.vault_dir),
             "db_path": str(self.db_path),
@@ -3486,7 +3499,10 @@ source_type: {plan['source_type']}
         author = source.get("author") or ""
         published_at = source.get("published_at") or ""
         stats = content.get("stats") if isinstance(content.get("stats"), dict) else {}
-        canonical_url = canonicalize_url(
+        # A selection is an immutable, user-chosen excerpt rather than a new
+        # version of the whole page. Reusing the page canonical URL here would
+        # make a second selection incorrectly supersede the first one.
+        canonical_url = "" if kind == "selection" else canonicalize_url(
             source.get("canonical_url")
             or source.get("canonicalUrl")
             or stats.get("canonicalUrl")
@@ -3505,7 +3521,27 @@ source_type: {plan['source_type']}
             captured_at=captured_at,
         )
 
-        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # Selection captures are provenance-bearing snapshots. The same quote
+        # can legitimately appear on different pages, so its stable identity
+        # must include the captured page URL while ordinary source dedupe keeps
+        # the existing text-only behavior.
+        if kind == "selection":
+            # Preserve the raw captured URL fragment for hash-routed/SPAs: two
+            # routes can share the same origin, path and selected context while
+            # still being distinct provenance targets. Canonical metadata is a
+            # fallback only when the capture has no usable page URL.
+            identity_url = normalize_text(url) or canonicalize_url(
+                source.get("canonical_url")
+                or source.get("canonicalUrl")
+                or stats.get("canonicalUrl")
+                or stats.get("canonical_url")
+            )
+            content_hash = hashlib.sha256(
+                NULL_JOIN.join(["selection", identity_url, text_hash]).encode("utf-8")
+            ).hexdigest()
+        else:
+            content_hash = text_hash
         scoped_hash = hashlib.sha256(f"{project_id}\0{content_hash}".encode("utf-8")).hexdigest()
         source_id = f"src_{scoped_hash[:14]}"
         document_id = f"doc_{scoped_hash[:14]}"
@@ -3522,6 +3558,39 @@ source_type: {plan['source_type']}
             existing = db.execute(
                 "SELECT * FROM sources WHERE project_id = ? AND content_hash = ?", (project_id, content_hash)
             ).fetchone()
+            if not existing and kind == "selection":
+                # Before selection identities were domain-separated by URL,
+                # they used the ordinary text hash. Reuse that legacy row only
+                # when its original raw URL is exactly the URL captured now;
+                # otherwise identical quotes on different pages must remain
+                # distinct provenance records.
+                existing = db.execute(
+                    """
+                    SELECT *
+                    FROM sources
+                    WHERE project_id = ?
+                      AND content_hash = ?
+                      AND kind = 'selection'
+                      AND COALESCE(url, '') = ?
+                    """,
+                    (project_id, text_hash, url),
+                ).fetchone()
+            if existing and ((existing["kind"] == "selection") != (kind == "selection")):
+                # Pre-v0.9.5 selection rows used the ordinary text hash. A new
+                # page/PDF with identical text must not reuse that row and point
+                # its provenance at the old selection. Use a stable fallback
+                # identity only for this legacy cross-kind collision, then
+                # re-check so retries still dedupe.
+                content_hash = hashlib.sha256(
+                    NULL_JOIN.join(["non-selection", kind, text_hash]).encode("utf-8")
+                ).hexdigest()
+                scoped_hash = hashlib.sha256(f"{project_id}\0{content_hash}".encode("utf-8")).hexdigest()
+                source_id = f"src_{scoped_hash[:14]}"
+                document_id = f"doc_{scoped_hash[:14]}"
+                existing = db.execute(
+                    "SELECT * FROM sources WHERE project_id = ? AND content_hash = ?",
+                    (project_id, content_hash),
+                ).fetchone()
             if existing:
                 duplicate = True
                 self.record_source_version(
@@ -3646,6 +3715,7 @@ source_type: {plan['source_type']}
                           AND source_versions.canonical_url = ?
                           AND source_versions.source_id != ?
                           AND source_versions.content_hash != ?
+                          AND sources.kind != 'selection'
                         """,
                         (project_id, canonical_url, source_id, content_hash),
                     ).fetchall()
@@ -6189,13 +6259,12 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
             }
 
         quote_end = quote_index + len(quote)
-        context_start = max(0, quote_index - 240)
-        context_end = min(len(text), max(quote_end + 240, context_start + limit))
-        if context_end - context_start > limit:
-            context_end = context_start + limit
-        if quote_end > context_end:
-            context_end = min(len(text), quote_end + 120)
-            context_start = max(0, context_end - limit)
+        remaining = limit - len(quote)
+        left = min(quote_index, remaining // 2)
+        right = min(len(text) - quote_end, remaining - left)
+        left += min(quote_index - left, remaining - left - right)
+        context_start = quote_index - left
+        context_end = quote_end + right
         context_text = text[context_start:context_end]
         relative_quote_start = quote_index - context_start
         relative_quote_end = relative_quote_start + len(quote)
@@ -6208,6 +6277,12 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
         }
 
     def source_replay_version_state(self, db: sqlite3.Connection, source: dict) -> dict:
+        if (source.get("kind") or "") == "selection":
+            return {
+                "version_index": 1,
+                "is_current": True,
+                "current_source_id": source.get("id") or None,
+            }
         canonical_url = canonicalize_url(source.get("canonical_url") or source.get("url") or "")
         if not canonical_url:
             return {
@@ -6312,6 +6387,11 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
             "is_current": None,
             "current_source_id": None,
         }
+        source_open_url = (
+            safe_replay_open_url(source.get("url") or "", source.get("canonical_url") or "")
+            if source.get("kind") == "selection"
+            else safe_replay_open_url(source.get("canonical_url") or "", source.get("url") or "")
+        )
         replay_source = {
             "url": source.get("url") or "",
             "canonical_url": source.get("canonical_url") or "",
@@ -6320,7 +6400,7 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
             "site": source.get("site") or "",
             "content_hash": source.get("content_hash") or "",
             "captured_at": source.get("captured_at") or "",
-            "open_url": safe_replay_open_url(source.get("canonical_url") or "", source.get("url") or ""),
+            "open_url": source_open_url,
             **version_state,
         }
         locator = self.source_replay_locator(item, chunk)
@@ -6347,6 +6427,11 @@ course_links: {json.dumps(course_links, ensure_ascii=False)}
         ) >= 0:
             status, reason = "unresolved", "ambiguous_quote"
         elif context["quote_start_offset"] is None:
+            status, reason = "unresolved", "quote_mismatch"
+        elif not (
+            0 <= context["quote_start_offset"] <= context["quote_end_offset"] <= len(context["text"])
+            and context["text"][context["quote_start_offset"] : context["quote_end_offset"]] == quote
+        ):
             status, reason = "unresolved", "quote_mismatch"
         elif version_state["is_current"] is False:
             status, reason = "stale", "source_superseded"
@@ -10393,6 +10478,188 @@ Vault: {package['vault_dir']}
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def create_first_evidence_for_source(self, source_id: str, payload: dict) -> dict:
+        project_id = normalize_text(payload.get("project_id") or "")
+        if not project_id:
+            raise FirstEvidenceValidationError(
+                "missing_project_id",
+                "first evidence requires project_id",
+            )
+        raw_quote = payload.get("quote")
+        if not isinstance(raw_quote, str) or not raw_quote:
+            raise FirstEvidenceValidationError(
+                "missing_quote",
+                "first evidence requires a non-empty exact quote",
+            )
+        if len(raw_quote) > 800:
+            raise FirstEvidenceValidationError(
+                "quote_too_long",
+                "first evidence exact quote must be at most 800 characters",
+            )
+        if not normalize_text(raw_quote):
+            raise FirstEvidenceValidationError(
+                "missing_quote",
+                "first evidence requires a non-whitespace exact quote",
+            )
+
+        records = {
+            "entities": [],
+            "claims": [],
+            "evidence": [],
+            "relations": [],
+            "assumptions": [],
+            "risks": [],
+            "strategy_ideas": [],
+            "tasks": [],
+        }
+        reused = {"claim": False, "evidence": False}
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            source_row = db.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+            if not source_row:
+                raise KeyError(source_id)
+            source = dict(source_row)
+            if source.get("project_id") != project_id:
+                raise FirstEvidenceValidationError(
+                    "project_mismatch",
+                    "first evidence project_id does not match the source project",
+                )
+            version_state = self.source_replay_version_state(db, source)
+            if version_state.get("is_current") is False:
+                raise FirstEvidenceValidationError(
+                    "source_superseded",
+                    "first evidence cannot be created for a superseded source",
+                )
+
+            chunk_rows = db.execute(
+                """
+                SELECT chunks.*
+                FROM chunks
+                JOIN documents ON documents.id = chunks.document_id
+                WHERE documents.source_id = ?
+                ORDER BY chunks.chunk_index ASC
+                """,
+                (source_id,),
+            ).fetchall()
+            if not chunk_rows:
+                raise FirstEvidenceValidationError(
+                    "missing_chunk",
+                    "first evidence source has no captured chunks",
+                )
+
+            matches: list[tuple[sqlite3.Row, int]] = []
+            for chunk in chunk_rows:
+                chunk_text = str(chunk["text"] or "")
+                search_from = 0
+                while True:
+                    offset = chunk_text.find(raw_quote, search_from)
+                    if offset < 0:
+                        break
+                    matches.append((chunk, offset))
+                    search_from = offset + 1
+                    if len(matches) > 1:
+                        break
+                if len(matches) > 1:
+                    break
+            if not matches:
+                raise FirstEvidenceValidationError(
+                    "quote_mismatch",
+                    "first evidence exact quote was not found in the captured source",
+                )
+            if len(matches) != 1:
+                raise FirstEvidenceValidationError(
+                    "ambiguous_quote",
+                    "first evidence exact quote is ambiguous in the captured source",
+                )
+
+            chunk, _quote_offset = matches[0]
+            now = utc_now()
+            claim, evidence_rows = self.insert_claim_with_evidence(
+                db,
+                project_id,
+                source_id,
+                {
+                    "text": normalize_text(raw_quote),
+                    "status": "pending_validation",
+                    "evidence": [
+                        {
+                            "source_id": source_id,
+                            "chunk_id": chunk["id"],
+                            "quote": raw_quote,
+                            "url": source.get("url") or "",
+                            "strength": "supporting",
+                        }
+                    ],
+                },
+                now,
+                preserve_exact_quote=True,
+            )
+            if not claim or len(evidence_rows) != 1:
+                raise FirstEvidenceValidationError(
+                    "quote_mismatch",
+                    "first evidence exact quote could not be persisted",
+                )
+            annotated_evidence = self.annotate_evidence_rows(db, evidence_rows)
+            replay = annotated_evidence[0].get("replay") or {}
+            if replay.get("status") != "resolved" or replay.get("reason") != "exact_quote_match":
+                raise FirstEvidenceValidationError(
+                    replay.get("reason") or "quote_mismatch",
+                    "first evidence replay did not resolve to one exact captured quote",
+                )
+            reused = {
+                "claim": bool(claim.pop("reused", False)),
+                "evidence": bool(annotated_evidence[0].pop("reused", False)),
+            }
+            records["claims"].append(claim)
+            records["evidence"].extend(annotated_evidence)
+            db.commit()
+
+        warnings: list[dict] = []
+
+        def post_commit_warning(code: str, message: str, error: Exception) -> None:
+            warnings.append(
+                {
+                    "code": code,
+                    "message": f"{message}: {short_text(str(error), 500)}",
+                    "retry_selection": False,
+                }
+            )
+
+        try:
+            self.write_knowledge_wiki_pages(records, project_id=project_id, source_id=source_id)
+        except Exception as error:
+            post_commit_warning(
+                "first_evidence_wiki_write_failed",
+                "First Evidence was committed, but its rebuildable Wiki page was not updated",
+                error,
+            )
+        try:
+            self.append_log(f"first evidence | {source_id} | {records['claims'][0]['id']}")
+        except Exception as error:
+            post_commit_warning(
+                "first_evidence_activity_log_failed",
+                "First Evidence was committed, but the activity log was not updated",
+                error,
+            )
+        try:
+            self.rebuild_index()
+        except Exception as error:
+            post_commit_warning(
+                "first_evidence_index_rebuild_failed",
+                "First Evidence was committed, but the rebuildable Vault index was not refreshed",
+                error,
+            )
+        claim_detail = self.get_claim(records["claims"][0]["id"])
+        evidence_detail = self.get_evidence(records["evidence"][0]["id"])
+        return {
+            "ok": True,
+            "reused": reused,
+            "warnings": warnings,
+            "source": self.get_source(source_id),
+            "claim": claim_detail,
+            "evidence": evidence_detail,
+        }
+
     def extract_knowledge_for_source(self, source_id: str, payload: dict) -> dict:
         if not self.source_exists(source_id):
             raise KeyError(source_id)
@@ -11605,6 +11872,7 @@ CHUNKS:
         project_id: str,
         source_id: str,
         text: str,
+        preserve_exact_text: bool = False,
     ) -> sqlite3.Row | None:
         rows = db.execute(
             """
@@ -11620,6 +11888,8 @@ CHUNKS:
             """,
             (project_id, source_id),
         ).fetchall()
+        if preserve_exact_text:
+            return next((row for row in rows if str(row["text"] or "") == text), None)
         text_key = self.knowledge_text_key(text)
         return next((row for row in rows if self.knowledge_text_key(row["text"] or "") == text_key), None)
 
@@ -11629,11 +11899,13 @@ CHUNKS:
         *,
         claim_id: str,
         citation: dict,
+        preserve_exact_quote: bool = False,
     ) -> sqlite3.Row | None:
         source_id = citation.get("source_id") or ""
         chunk_id = citation.get("chunk_id") or ""
         strength = normalize_text(citation.get("strength") or "supporting").casefold()
-        quote_key = self.knowledge_text_key(citation.get("quote") or "")
+        requested_quote = str(citation.get("quote") or "")
+        quote_key = self.knowledge_text_key(requested_quote)
         rows = db.execute(
             """
             SELECT *
@@ -11650,7 +11922,11 @@ CHUNKS:
             (
                 row
                 for row in rows
-                if self.knowledge_text_key(row["quote"] or "") == quote_key
+                if (
+                    str(row["quote"] or "") == requested_quote
+                    if preserve_exact_quote
+                    else self.knowledge_text_key(row["quote"] or "") == quote_key
+                )
                 and normalize_text(row["strength"] or "supporting").casefold() == strength
             ),
             None,
@@ -11663,6 +11939,8 @@ CHUNKS:
         default_source_id: str,
         item: dict | str,
         now: str,
+        *,
+        preserve_exact_quote: bool = False,
     ) -> tuple[dict | None, list[dict]]:
         if isinstance(item, str):
             text = normalize_text(item)
@@ -11685,7 +11963,9 @@ CHUNKS:
             if not isinstance(citation, dict):
                 continue
             normalized = self.normalize_citation({**citation, "source_id": citation.get("source_id") or default_source_id})
-            if normalized and self.citation_is_valid(normalized):
+            if preserve_exact_quote:
+                normalized["quote"] = str(citation.get("quote") or citation.get("excerpt") or "")
+            if normalized and self.citation_is_valid_in_db(db, normalized):
                 valid_citations.append(normalized)
         requested_status = requested_status if requested_status in CLAIM_REVIEW_STATUSES else ""
         if requested_status in {"reviewed", "extracted"}:
@@ -11697,10 +11977,19 @@ CHUNKS:
             project_id=project_id,
             source_id=default_source_id,
             text=text,
+            preserve_exact_text=preserve_exact_quote,
         )
         if existing_claim:
             claim_id = existing_claim["id"]
             claim = dict(existing_claim)
+            if preserve_exact_quote and (claim.get("status") or "") == "extracted":
+                db.execute(
+                    "UPDATE claims SET status = 'pending_validation', reviewed_at = '', updated_at = ? WHERE id = ?",
+                    (now, claim_id),
+                )
+                claim["status"] = "pending_validation"
+                claim["reviewed_at"] = ""
+                claim["updated_at"] = now
             claim["reused"] = True
         else:
             claim_id = f"claim_{uuid4().hex[:12]}"
@@ -11729,6 +12018,7 @@ CHUNKS:
                 db,
                 claim_id=claim_id,
                 citation=citation,
+                preserve_exact_quote=preserve_exact_quote,
             )
             if existing_evidence:
                 evidence_rows.append({**dict(existing_evidence), "reused": True})
@@ -15277,6 +15567,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 parts = path.strip("/").split("/")
                 source_id = parts[2]
                 return json_response(self, 200, self.store.create_learning_pack_for_source(source_id, payload))
+            if path.startswith("/v1/sources/") and path.endswith("/first-evidence"):
+                parts = path.strip("/").split("/")
+                if len(parts) != 4 or parts[0] != "v1" or parts[1] != "sources":
+                    return json_response(self, 404, {"ok": False, "error": "not found"})
+                try:
+                    result = self.store.create_first_evidence_for_source(parts[2], payload)
+                except KeyError as error:
+                    return json_response(self, 404, {"ok": False, "error": f"not found: {error}"})
+                return json_response(self, 200, result)
             if path.startswith("/v1/sources/") and path.endswith("/extract-knowledge"):
                 parts = path.strip("/").split("/")
                 source_id = parts[2]
@@ -15363,6 +15662,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 job_id = path.split("/")[-2]
                 return json_response(self, 200, {"ok": True, "job": self.store.update_job(job_id, payload)})
             return json_response(self, 404, {"ok": False, "error": "not found"})
+        except FirstEvidenceValidationError as error:
+            return json_response(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": f"first evidence failed closed: {error.reason}",
+                    "reason": error.reason,
+                    "detail": str(error),
+                },
+            )
         except ValueError as error:
             return json_response(self, 400, {"ok": False, "error": str(error)})
         except Exception as error:

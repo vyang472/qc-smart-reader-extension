@@ -18,7 +18,9 @@ QC Smart Reader does not sell data, use it for advertising, build advertising pr
 
 ## Local storage
 
-Captured sources, notes, evidence, jobs, and generated outputs are stored by the companion service in a SQLite database and Markdown Vault selected by the user. Extension settings, the loopback Pairing Token, and temporary recovery queues are stored in Chrome extension storage on the same device. The Companion also keeps its copy of the Pairing Token and any model API key in local credential files with owner-only permissions; model API keys are not stored in Chrome extension storage.
+Captured sources, notes, evidence, jobs, and generated outputs are stored by the companion service in a SQLite database and Markdown Vault selected by the user. Extension settings and the loopback Pairing Token are stored in Chrome extension storage on the same device. When the user explicitly right-clicks **Save selection as pending evidence (local, no model)**, a bounded copy of the exact selected quote and captured context is temporarily kept in `chrome.storage.local` for browser-restart recovery. An unpaired or failed save remains queued; a successful Companion write followed by the extension's acknowledgement deletes the queue item. Clearing the extension's stored data or uninstalling the extension also lets Chrome remove this extension-owned queue. The queue is not developer telemetry, is not sent to the developer, and does not trigger a model call.
+
+The Companion also keeps its copy of the Pairing Token and any model API key in local credential files with owner-only permissions; model API keys are not stored in Chrome extension storage.
 
 ## Model providers and data sharing
 
@@ -35,12 +37,12 @@ QC Smart Reader sends only the material required for the model action the user i
 - `scripting`: extract content only from an HTTP(S) page the user chooses to read or process.
 - `http://*/*` and `https://*/*`: read the URL, title, and content of user-selected web pages, process HTTP(S) batch URLs in temporary tabs, and communicate with the loopback Companion. These permissions do not include file or other URL schemes and are not used for passive browsing-history collection.
 - `downloads`: export a file requested by the user.
-- `storage`: retain settings and recoverable local queues.
-- `contextMenus` and `sidePanel`: provide the selected-text and side-panel workflows.
+- `storage`: retain settings and bounded, project-scoped recovery queues on the user's device until a local Companion write is acknowledged.
+- `contextMenus` and `sidePanel`: provide the explicit selected-text save and side-panel review workflows.
 
 ## Retention and deletion
 
-The user controls the local Vault and can back it up, archive it, or delete it. Removing the Chrome extension clears Chrome-owned extension storage but intentionally does not delete the companion Vault. Deleting the Vault or companion data directory is a separate, explicit local action.
+The user controls the local Vault and can back it up, archive it, or delete it. Removing the Chrome extension clears Chrome-owned extension storage, including any pending selection recovery queue, but intentionally does not delete the Companion Vault. Deleting the Vault or Companion data directory is a separate, explicit local action.
 
 ## Security and Limited Use
 

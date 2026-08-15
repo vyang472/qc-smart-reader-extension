@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_SCRIPT = ROOT / "scripts" / "release.py"
-EXPECTED_VERSION = "0.9.4"
+EXPECTED_VERSION = "0.9.5"
 EXPECTED_MIN_EXTENSION_VERSION = "0.9.0"
 EXPECTED_EXTENSION_FILES = {
     "LICENSE",
@@ -40,10 +40,16 @@ EXPECTED_LOCALE_MESSAGES = {
                 "stored in a local Markdown + SQLite vault."
             ),
         },
+        "contextMenuSaveSelectionAsPendingEvidence": {
+            "message": "Save selection as pending evidence (local, no model)",
+        },
     },
     "_locales/zh_CN/messages.json": {
         "extensionDescription": {
             "message": "把网页研究资料转成由原文精确引文支撑、等待核验的 claim，并保存到本地 Markdown + SQLite 知识库。",
+        },
+        "contextMenuSaveSelectionAsPendingEvidence": {
+            "message": "将选中文本保存为待核验证据（仅本地，不调用模型）",
         },
     },
 }
@@ -136,7 +142,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertEqual(loaded_messages, EXPECTED_LOCALE_MESSAGES)
         self.assertEqual(
             {frozenset(messages) for messages in loaded_messages.values()},
-            {frozenset({"extensionDescription"})},
+            {frozenset({"extensionDescription", "contextMenuSaveSelectionAsPendingEvidence"})},
         )
 
     def test_release_allowlists_are_intentionally_narrow(self) -> None:
@@ -277,8 +283,8 @@ class ReleaseArtifactTests(unittest.TestCase):
             server_path = source / "companion_service" / "server.py"
             server_path.write_text(
                 server_path.read_text(encoding="utf-8").replace(
-                    'SERVICE_VERSION = "0.9.4"',
                     'SERVICE_VERSION = "0.9.5"',
+                    'SERVICE_VERSION = "0.9.6"',
                     1,
                 ),
                 encoding="utf-8",
@@ -293,7 +299,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             server_path.write_text(
                 server_path.read_text(encoding="utf-8").replace(
                     'MIN_EXTENSION_VERSION = "0.9.0"',
-                    'MIN_EXTENSION_VERSION = "0.9.5"',
+                    'MIN_EXTENSION_VERSION = "0.9.6"',
                     1,
                 ),
                 encoding="utf-8",
@@ -303,7 +309,7 @@ class ReleaseArtifactTests(unittest.TestCase):
 
     def test_release_rejects_installer_contract_drift(self) -> None:
         for original, replacement, message in (
-            ('REQUIRED_SERVICE_VERSION="0.9.4"', 'REQUIRED_SERVICE_VERSION="0.9.5"', "installer service version"),
+            ('REQUIRED_SERVICE_VERSION="0.9.5"', 'REQUIRED_SERVICE_VERSION="0.9.6"', "installer service version"),
             ('REQUIRED_API_VERSION="1"', 'REQUIRED_API_VERSION="2"', "installer API version"),
         ):
             with self.subTest(replacement=replacement), tempfile.TemporaryDirectory(
@@ -320,8 +326,8 @@ class ReleaseArtifactTests(unittest.TestCase):
 
     def test_release_rejects_package_metadata_version_drift(self) -> None:
         for relative, old, new in (
-            ("package.json", '"version": "0.9.4"', '"version": "0.9.5"'),
-            ("package-lock.json", '"version": "0.9.4"', '"version": "0.9.5"'),
+            ("package.json", '"version": "0.9.5"', '"version": "0.9.6"'),
+            ("package-lock.json", '"version": "0.9.5"', '"version": "0.9.6"'),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory(
                 prefix="qc-release-package-version-drift-"
