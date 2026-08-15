@@ -1,19 +1,19 @@
 # Chrome Web Store reviewer test instructions — QC Smart Reader v0.9.3
 
-**Handoff status:** pre-release draft. Do not paste it into the dashboard until every `<PUBLISHED_VERSION>` sentinel has been replaced with the published version and both public links and checksums have been verified from a signed-out browser session.
+**Handoff status:** published-release instructions for v0.9.3. The public Companion and checksum links have been verified without authentication. Do not paste these instructions into the dashboard until the publisher has repeated the complete flow with the exact extension ZIP on a clean macOS account.
 
 ## Dashboard-ready instructions
 
 QC Smart Reader requires macOS, Chrome 116 or later, and the free local Companion from the same release. No account, payment, API key, Codex CLI, or external model is required for the core review flow.
 
 1. Download the Companion and checksum file:
-   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v<PUBLISHED_VERSION>/qc-smart-reader-companion-<PUBLISHED_VERSION>.zip`
-   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v<PUBLISHED_VERSION>/SHA256SUMS`
+   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.3/qc-smart-reader-companion-0.9.3.zip`
+   - `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v0.9.3/SHA256SUMS`
 2. In Terminal, verify and install the per-user Companion:
 
    ```bash
    cd ~/Downloads
-   RELEASE_VERSION="<PUBLISHED_VERSION>"
+   RELEASE_VERSION="0.9.3"
    grep "qc-smart-reader-companion-${RELEASE_VERSION}.zip" SHA256SUMS | shasum -a 256 -c -
    mkdir -p "qc-smart-reader-companion-${RELEASE_VERSION}"
    unzip "qc-smart-reader-companion-${RELEASE_VERSION}.zip" -d "qc-smart-reader-companion-${RELEASE_VERSION}"
@@ -51,7 +51,7 @@ Expected: the per-user service is removed. The default uninstall deliberately pr
 
 ## Publisher verification before submission
 
-- Replace every `<PUBLISHED_VERSION>` sentinel with the published numeric version, then confirm both release URLs return public assets without authentication. Keep the shell variable name `RELEASE_VERSION` unchanged.
-- Confirm the checksum command reports `qc-smart-reader-companion-<published-version>.zip: OK`.
+- Confirm both v0.9.3 release URLs still return public assets without authentication before submission.
+- Confirm the checksum command reports `qc-smart-reader-companion-0.9.3.zip: OK`.
 - Repeat the complete flow on a clean macOS user account with the exact extension ZIP submitted to the Web Store.
 - Do not provide the reviewer with a reused Pairing Token, API key, password, private Vault, or private source URL.

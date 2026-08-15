@@ -1,6 +1,6 @@
 # Chrome Web Store listing handoff — QC Smart Reader v0.9.3
 
-**Status:** v0.9.3 bilingual listing copy, permission explanations, data-use answers, and the version-neutral small promo tile are prepared. The tracked localized screenshots are verified v0.9.2 reference captures and predate Replay; refreshed v0.9.3 screenshots, release publication, publisher-account checks, asset upload, and dashboard submission are still pending. This is not evidence of submission or approval.
+**Status:** v0.9.3 is publicly released. The bilingual listing copy, permission explanations, data-use answers, version-neutral small promo tile, and localized v0.9.3 Replay screenshots are prepared and verified. Publisher-account checks, a clean-account submission test, asset upload, and dashboard submission are still pending. This is not evidence of Chrome Web Store submission or approval.
 
 This file records the listing copy, permission explanations, data-use answers, assets, and clean-install checks for the publisher account. Re-check the Chrome Web Store dashboard requirements on submission day.
 
@@ -121,7 +121,7 @@ Host the product's capture, review, knowledge, delivery, batch, and settings wor
 
 ## Assets
 
-The localized screenshots below were generated from clean browser profiles using the reviewed v0.9.2 extension, the real local Companion, and a public deterministic fixture. They show that release's actual First Evidence interface without fabricated or overlaid UI, but they predate Source Replay and must not be described as v0.9.3 captures:
+The localized screenshots below were generated from independent clean browser profiles using the released v0.9.3 extension, the real local Companion, and a public deterministic fixture. The pending screenshots show an undecided quote-backed claim with equal supported and unsupported actions and a folded Replay control. The reviewed screenshots restore the saved human decision after reopening the side panel, then expand the same service-backed Replay record to show its exact quote in captured context, locator, capture time, and current source version. The capture harness adds no labels, overlays, or fabricated state.
 
 - Store icon: `assets/icons/icon-128.png`
 - English screenshot 1: [`store-assets/web-store/en-US/01-first-evidence-pending-review.png`](web-store/en-US/01-first-evidence-pending-review.png) (640×400)
@@ -134,19 +134,19 @@ The localized screenshots below were generated from clean browser profiles using
 - Launch-page composites, not store screenshots: `store-assets/screenshots/`
 - Repository social card, not a store screenshot: `store-assets/social-preview.png`
 
-The PNGs currently stored directly under `store-assets/web-store/` are v0.9.1 Chinese-interface reference captures. Do not upload them as evidence of the v0.9.3 English primary listing, and do not use the advanced Vault screenshot in the English listing while that workspace remains Chinese. The localized v0.9.2 pairs also need a refreshed capture before they can serve as current v0.9.3 UI evidence.
+The PNGs currently stored directly under `store-assets/web-store/` are v0.9.1 Chinese-interface reference captures. Do not upload them as evidence of the v0.9.3 English primary listing, and do not use the advanced Vault screenshot in the English listing while that workspace remains Chinese. Use only the locale-specific v0.9.3 pairs above for the current listing.
 
 Before upload, confirm each screenshot matches the dashboard's current dimensions and shows no Pairing Token, API key, private URL, private source text, personal path, or browser profile data. Do not add awards, review scores, user counts, or performance claims without verifiable evidence.
 
 ## Publisher checklist
 
-- [ ] Publish v0.9.3, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
+- [x] Publish v0.9.3, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
 - [x] Render the locale- and version-neutral small promo tile from its tracked SVG source; verify dimensions, visible-text/version scanning, and deterministic hashes.
 - [ ] Verify the publisher identity and required contact details in the dashboard.
-- [ ] Refresh all four localized screenshot paths above from the final reviewed v0.9.3 build; verify dimensions, sensitive-data scanning, and deterministic hashes. Existing files remain v0.9.2 references until replaced.
+- [x] Refresh all four localized screenshot paths above from the final reviewed v0.9.3 build; verify 640×400 RGB dimensions, sensitive-data scanning, Source Replay linkage, and deterministic hashes across independent clean-profile runs.
 - [ ] Upload the refreshed en-US pair to the English primary listing and the refreshed zh-CN pair to the Simplified Chinese localized listing.
 - [ ] Complete privacy, permission, distribution, pricing, and tester declarations truthfully.
-- [ ] Replace the release placeholders in `WEB_STORE_TEST_INSTRUCTIONS.md`, verify the public Companion and checksum links, then paste those instructions into the dashboard.
+- [x] Replace the release placeholders in `WEB_STORE_TEST_INSTRUCTIONS.md` and verify the public Companion and checksum links without authentication. Paste the instructions into the dashboard only after the remaining clean-account test.
 - [ ] Explain why HTTP(S) host access is necessary for user-selected arbitrary research pages and requested URL batches.
 - [ ] Confirm there is no remotely hosted executable code and no undisclosed analytics.
 - [ ] Install both release ZIPs on a clean macOS user account.
