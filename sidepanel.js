@@ -49,7 +49,7 @@ const SELECTION_QUEUED_MESSAGE = "qc-smart-reader-selection-queued";
 const CLAIM_SELECTION_MESSAGE = "qc-smart-reader-claim-selection";
 const FALLBACK_LEGACY_PROJECT_ID = "default";
 const PENDING_NOTE_SYNC_TAG_PREFIX = "qc-local-note:";
-const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.3";
+const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "0.9.4";
 const REQUIRED_COMPANION_API_VERSION = 1;
 const MODEL_DATA_CONSENT_VERSION = "2026-08-14-v1";
 const ONBOARDING_MILESTONES_KEY = "onboardingMilestones";
@@ -170,6 +170,39 @@ function setLocalizedNodeText(node, key, params = {}, fallback = "") {
     node.dataset.i18nParams = JSON.stringify(params);
   }
   node.textContent = uiText(key, params, fallback);
+}
+
+function companionReleaseLinks(version = EXTENSION_VERSION) {
+  const releaseVersion = encodeURIComponent(String(version || "").trim());
+  const releaseBase = `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v${releaseVersion}`;
+  return {
+    companion: `${releaseBase}/qc-smart-reader-companion-${releaseVersion}.zip`,
+    checksums: `${releaseBase}/SHA256SUMS`
+  };
+}
+
+function configureCompanionReleaseLinks() {
+  const links = companionReleaseLinks();
+  const companionLink = $("companionDownloadLink");
+  const checksumsLink = $("companionChecksumsLink");
+  if (companionLink) {
+    companionLink.href = links.companion;
+    setLocalizedNodeText(
+      companionLink,
+      "settings.setup.downloadCompanion",
+      { version: EXTENSION_VERSION },
+      `下载 Companion v${EXTENSION_VERSION}`
+    );
+  }
+  if (checksumsLink) {
+    checksumsLink.href = links.checksums;
+    setLocalizedNodeText(
+      checksumsLink,
+      "settings.setup.downloadChecksums",
+      {},
+      "校验 SHA256SUMS"
+    );
+  }
 }
 
 function clearLocalizedNodeText(node) {
@@ -421,6 +454,7 @@ async function init() {
   let interactionHandlersBound = false;
   let hydrateWorkspaces = false;
   try {
+    configureCompanionReleaseLinks();
     let localeError = null;
     try {
       await initializeUiLocale();

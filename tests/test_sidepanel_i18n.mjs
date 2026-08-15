@@ -207,13 +207,13 @@ test("reviewed and pending-verification messages are localized without translati
       error: {
         i18nKey: "companion.error.apiMismatch",
         params: {
-          extensionVersion: "0.9.3",
+          extensionVersion: "0.9.4",
           requiredApi: 1,
           actualApi: { i18nKey: "companion.value.legacyUnknown" }
         }
       }
     }),
-    "The local Companion is unavailable: Extension 0.9.3 requires Companion API 1; the current API is legacy or unknown. Update and restart the Companion."
+    "The local Companion is unavailable: Extension 0.9.4 requires Companion API 1; the current API is legacy or unknown. Update and restart the Companion."
   );
 });
 
@@ -225,6 +225,9 @@ test("First Evidence exposes neutral bilingual support decisions and three user 
   assert.equal(english.t("firstEvidence.prompt"), "Does this exact quote support the claim?");
   assert.equal(english.t("firstEvidence.accept"), "Accept as supported");
   assert.equal(english.t("firstEvidence.reject"), "Reject as unsupported");
+  assert.equal(english.t("settings.setup.downloadPrompt"), "Install the matching local Companion before pairing:");
+  assert.equal(english.t("settings.setup.downloadCompanion", { version: "1.2.3" }), "Download Companion v1.2.3");
+  assert.equal(english.t("settings.setup.downloadChecksums"), "Verify SHA256SUMS");
   assert.match(english.t("quickStart.status.completedRejected"), /3 \/ 3.*unsupported.*another page/i);
 
   const chinese = (await createI18nHarness({ uiLanguage: "zh-CN" })).api;
@@ -234,5 +237,8 @@ test("First Evidence exposes neutral bilingual support decisions and three user 
   assert.equal(chinese.t("firstEvidence.prompt"), "这段原文是否支持这条 claim？");
   assert.equal(chinese.t("firstEvidence.accept"), "接受：原文支持");
   assert.equal(chinese.t("firstEvidence.reject"), "拒绝：原文不支持");
+  assert.equal(chinese.t("settings.setup.downloadPrompt"), "配对前，请先安装与扩展同版本的本地 Companion：");
+  assert.equal(chinese.t("settings.setup.downloadCompanion", { version: "1.2.3" }), "下载 Companion v1.2.3");
+  assert.equal(chinese.t("settings.setup.downloadChecksums"), "校验 SHA256SUMS");
   assert.match(chinese.t("quickStart.status.completedRejected"), /3 \/ 3.*不支持.*另一个页面/);
 });

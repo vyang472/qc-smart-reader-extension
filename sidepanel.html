@@ -434,6 +434,13 @@
         <p class="trust-disclosure" data-i18n="settings.trust">采集内容保存在本机 Vault。零配置本地模板不调用外部模型；只有你明确同意后，才会把内容发送给已配置的模型。</p>
         <section id="setupGuide" class="setup-guide" aria-labelledby="setupGuideTitle">
           <h3 id="setupGuideTitle" data-i18n="settings.setupTitle">首次使用 · 3 步完成</h3>
+          <div id="companionDownloadCta" class="setup-download-cta">
+            <p data-i18n="settings.setup.downloadPrompt">配对前，请先安装与扩展同版本的本地 Companion：</p>
+            <div class="setup-download-links">
+              <a id="companionDownloadLink" class="setup-download-primary" target="_blank" rel="noopener noreferrer" data-i18n="settings.setup.downloadCompanion">下载 Companion</a>
+              <a id="companionChecksumsLink" target="_blank" rel="noopener noreferrer" data-i18n="settings.setup.downloadChecksums">校验 SHA256SUMS</a>
+            </div>
+          </div>
           <ol>
             <li data-i18n="settings.setup.step1">正式版双击 Companion 包里的 install.command；源码开发时才用 start.command。</li>
             <li data-i18n="settings.setup.step2">粘贴安装器复制的 Pairing Token，点击“测试本地服务”。</li>

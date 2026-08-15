@@ -21,9 +21,9 @@ QC Smart Reader is a macOS-first Chrome extension and local Python companion. It
 | --- | --- | --- |
 | ![Capture a page in the QC Smart Reader side panel](store-assets/screenshots/01-capture.png) | ![Review a claim against its exact source quotation](store-assets/screenshots/02-evidence-review.png) | ![Inspect the local Markdown and SQLite Vault](store-assets/screenshots/03-local-vault.png) |
 
-The three overview screenshots above were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture, so they retain that release's Simplified Chinese interface. The current v0.9.3 Web Store captures were generated from independent clean profiles against the real Companion: [English pending review](store-assets/web-store/en-US/01-first-evidence-pending-review.png), [English reviewed Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png), [Simplified Chinese pending review](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png), and [Simplified Chinese reviewed Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png). They show an undecided exact-quote claim followed by the same service-backed Replay record, source version, and human decision restored after reopening the side panel.
+The three overview screenshots above were captured from the reviewed v0.9.1 extension and local Companion using a public deterministic fixture, so they retain that release's Simplified Chinese interface. The current v0.9.4 Web Store captures were regenerated twice from independent clean profiles against the real v0.9.4 Companion: [English pending review](store-assets/web-store/en-US/01-first-evidence-pending-review.png), [English reviewed Replay](store-assets/web-store/en-US/02-reviewed-exact-quote.png), [Simplified Chinese pending review](store-assets/web-store/zh-CN/01-first-evidence-pending-review.png), and [Simplified Chinese reviewed Replay](store-assets/web-store/zh-CN/02-reviewed-exact-quote.png). They show an undecided exact-quote claim followed by the same service-backed Replay record, source version, and human decision restored after reopening the side panel. Because v0.9.4 changes only the Settings setup CTA, these First Evidence pixels remain identical to the reviewed v0.9.3 captures.
 
-> **v0.9.3 interface coverage:** setup, pairing, Quick Start, core current-page feedback, First Evidence, and Source Replay controls are available in English and Simplified Chinese. The interface follows the browser language by default and also offers Auto, English, and 简体中文 choices. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls remain in Simplified Chinese and are labeled accordingly.
+> **v0.9.4 interface coverage:** setup, pairing, Quick Start, core current-page feedback, First Evidence, and Source Replay controls are available in English and Simplified Chinese. The interface follows the browser language by default and also offers Auto, English, and 简体中文 choices. Advanced Batch, Agents, most of Knowledge, Deliverables, and project/model controls remain in Simplified Chinese and are labeled accordingly.
 
 ## Why it is different
 
@@ -35,20 +35,20 @@ The three overview screenshots above were captured from the reviewed v0.9.1 exte
 - **Replay the captured record.** Reopen evidence against its saved context, locator, source version, and exact quote. Replay reports stale or unresolved records explicitly and never invents a live-page position.
 - **No API key required to try it.** Deterministic local template extraction creates a draft claim whose exact quote comes from the captured source. It is not an AI summary and remains undecided until a person marks it supported or unsupported. Codex CLI and direct API providers remain optional.
 
-## Install v0.9.3
+## Install v0.9.4
 
 The supported release path currently targets **macOS and Chrome 116+**. Core setup, First Evidence, and Replay controls are available in English and Simplified Chinese; advanced workspaces remain in Simplified Chinese.
 
 Before starting, make sure the Mac has **Python 3.9+**, Chrome 116+, and internet access for the first Companion install to download its hash-pinned Python wheels. Codex CLI, `yt-dlp`, and the Swift toolchain are optional and only enable their corresponding model, public-caption, and OCR paths.
 
-1. Download these three files from [QC Smart Reader v0.9.3](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.3):
-   - `qc-smart-reader-companion-0.9.3.zip`
-   - `qc-smart-reader-extension-0.9.3.zip`
+1. After the v0.9.4 GitHub Release is published, download these three files from [QC Smart Reader v0.9.4](https://github.com/vyang472/qc-smart-reader-extension/releases/tag/v0.9.4):
+   - `qc-smart-reader-companion-0.9.4.zip`
+   - `qc-smart-reader-extension-0.9.4.zip`
    - `SHA256SUMS`
 2. In the download directory, run `shasum -a 256 -c SHA256SUMS` and confirm that both ZIPs report `OK`.
 3. Extract the Companion ZIP, then double-click `install.command` (or run `bash install.command`). It installs a per-user background service, verifies readiness, and copies the Pairing Token.
 4. Extract the Extension ZIP. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder containing `manifest.json`.
-5. Open the QC Smart Reader side panel. Leave **Interface language** on **Auto (browser)** or choose English / 简体中文. In **Settings / 设置**, enter `http://127.0.0.1:37621`, paste the Pairing Token, and choose **Test local Companion / 测试本地服务**. The protected projects API must accept the token before onboarding is unlocked.
+5. Open the QC Smart Reader side panel. Leave **Interface language** on **Auto (browser)** or choose English / 简体中文. Settings also shows a direct **Download Companion v0.9.4** link and the matching `SHA256SUMS` link, both derived from the installed extension version. Enter `http://127.0.0.1:37621`, paste the Pairing Token, and choose **Test local Companion / 测试本地服务**. The protected projects API must accept the token before onboarding is unlocked.
 6. Open a normal article and run Quick Start from **Read / 聊天**. First Evidence shows three user steps: connect the Companion, capture this page, then review and save. QC Smart Reader saves the page to the Vault, runs deterministic local template extraction internally, and shows one draft claim beside an exact source quote. Mark it supported only when the quote supports it, or unsupported when it does not. Choose **Replay** to inspect that quote in the captured context; reopening the side panel restores the server-backed evidence, Replay target, and decision.
 
 Quick Start never calls an external model, even when one is configured. Its template draft is deliberately simple and is not an AI summary; the quote is copied from the stored source, and the claim remains pending until you mark it supported (`reviewed`) or unsupported (`rejected`). To use a model for other extraction or agent actions, select one route in **设置 → 模型设置**:
@@ -76,7 +76,7 @@ Chrome capture / PDF / captions
 
 The extension sends authenticated requests only to the loopback companion. The companion keeps a queryable SQLite index and a plain Markdown Vault under `~/Documents/QC Smart Reader Vault/`. Optional model calls are made by the companion to the provider the user selected; source material included in that action then leaves the device under that provider's terms.
 
-## What v0.9.3 handles
+## What v0.9.4 handles
 
 | Workflow | Current behavior |
 | --- | --- |
@@ -102,7 +102,7 @@ Read the complete [Privacy Policy](PRIVACY.md) and [Security Policy](SECURITY.md
 ## Known limits
 
 - The installer, background service lifecycle, and scanned-PDF OCR path are macOS-first. Windows and Linux packaging are not yet supported.
-- v0.9.3 provides bilingual core onboarding, First Evidence, and Replay controls. Advanced Batch, Agents, most Knowledge and Deliverables views, and project/model controls remain in Simplified Chinese and show that boundary in the English interface.
+- v0.9.4 provides bilingual core onboarding, First Evidence, and Replay controls. Advanced Batch, Agents, most Knowledge and Deliverables views, and project/model controls remain in Simplified Chinese and show that boundary in the English interface.
 - Replay is anchored to the locally captured snapshot. Its canonical-source link does not guarantee a precise position on the current remote page, and ambiguous or missing quote matches remain unresolved.
 - Installation uses Chrome Developer mode until a Chrome Web Store release is approved.
 - Complex PDF layouts, tables, figures, and formulas may need manual review.

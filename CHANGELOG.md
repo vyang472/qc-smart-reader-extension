@@ -6,6 +6,23 @@ All notable changes to QC Smart Reader will be documented here. The project foll
 
 No unreleased changes have been announced.
 
+## [0.9.4] - 2026-08-15
+
+This release prepares the first Chrome Web Store candidate and removes a setup dead end by linking each extension build to its exact matching Companion archive and checksum file.
+
+### Added
+
+- A bilingual setup call to action in Settings that derives the direct Companion ZIP and `SHA256SUMS` links from the installed extension manifest version.
+
+### Changed
+
+- Extension, Companion, installer, plugin, and package metadata now identify v0.9.4 consistently. `API_VERSION` and `SCHEMA_VERSION` remain at 1, and Companion v0.9.4 continues to accept extensions from v0.9.0 onward.
+- Store and reviewer handoff documents now describe v0.9.4 as a candidate. Chrome Web Store upload, submission, and approval remain separate publisher actions.
+
+### Trust boundary
+
+- Setup links point only to the repository's version-matched GitHub Release assets, carry no Pairing Token or other secret, and keep checksum verification visible beside the download action.
+
 ## [0.9.3] - 2026-08-15
 
 This release adds Source Replay so a saved evidence decision can be inspected against the exact captured record later, without guessing a live-page position or fetching the source again.
@@ -119,7 +136,8 @@ First public preview.
 - Isolated Codex CLI runs in an ephemeral restricted environment and disabled shell, web, plugin, and delegation capabilities for provider calls.
 - Added archive/input validation, dependency integrity checks, cautious installer path handling, and rollback verification.
 
-[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/vyang472/qc-smart-reader-extension/compare/v0.9.0...v0.9.1

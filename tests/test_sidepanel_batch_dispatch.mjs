@@ -82,6 +82,7 @@ async function createSidepanelHarness({
   runtimeMessageHandler,
   confirmHandler = () => true,
   uiLanguage = "zh-CN",
+  manifestVersion = "0.9.4",
   currentTab = { id: 41, windowId: 7, url: "https://example.com/current", title: "Current tab" }
 } = {}) {
   const i18nJs = await projectFile("sidepanel_i18n.js");
@@ -146,6 +147,9 @@ async function createSidepanelHarness({
         }
       },
       runtime: {
+        getManifest() {
+          return { version: manifestVersion };
+        },
         onMessage: {
           addListener(listener) {
             runtimeListeners.push(listener);
@@ -1297,6 +1301,54 @@ test("privacy consent is explicit, versioned, and required before model calls", 
     /扩展版本过旧/
   );
   assert.equal(harness.context.compareProductVersions("0.9.0", "0.9"), 0);
+});
+
+test("unpaired setup links the manifest-matched Companion release without carrying secrets", async () => {
+  const manifestVersion = "7.6.5.4";
+  const harness = await createSidepanelHarness({ manifestVersion, uiLanguage: "en-US" });
+  const links = harness.run("companionReleaseLinks()");
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(links)),
+    {
+      companion: `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v${manifestVersion}/qc-smart-reader-companion-${manifestVersion}.zip`,
+      checksums: `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v${manifestVersion}/SHA256SUMS`
+    }
+  );
+  for (const url of Object.values(links)) {
+    const parsed = new URL(url);
+    assert.equal(parsed.search, "", "release URLs must not carry the Pairing Token or other query data");
+    assert.equal(parsed.hash, "");
+  }
+
+  harness.run("configureCompanionReleaseLinks()");
+  const companionLink = harness.nodes.get("companionDownloadLink");
+  const checksumsLink = harness.nodes.get("companionChecksumsLink");
+  assert.equal(companionLink.href, links.companion);
+  assert.equal(checksumsLink.href, links.checksums);
+  assert.equal(companionLink.dataset.i18nParams, JSON.stringify({ version: manifestVersion }));
+
+  const ctaDocument = {
+    documentElement: { lang: "" },
+    querySelectorAll() {
+      return [companionLink, checksumsLink];
+    },
+    getElementById() {
+      return null;
+    }
+  };
+  await harness.context.QCI18n.set("en", ctaDocument);
+  assert.equal(companionLink.textContent, `Download Companion v${manifestVersion}`);
+  await harness.context.QCI18n.set("zh-CN", ctaDocument);
+  assert.equal(companionLink.textContent, `下载 Companion v${manifestVersion}`);
+  assert.equal(checksumsLink.textContent, "校验 SHA256SUMS");
+  assert.equal(companionLink.href, links.companion, "locale switching must not replace the release target");
+  assert.equal(checksumsLink.href, links.checksums, "locale switching must not replace the checksum target");
+
+  const html = await projectFile("sidepanel.html");
+  assert.match(html, /id="companionDownloadCta"[^>]*>/);
+  assert.match(html, /id="companionDownloadLink"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*data-i18n="settings\.setup\.downloadCompanion"/);
+  assert.match(html, /id="companionChecksumsLink"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*data-i18n="settings\.setup\.downloadChecksums"/);
 });
 
 test("local Mock is the zero-config default and external extraction never silently falls back", async () => {

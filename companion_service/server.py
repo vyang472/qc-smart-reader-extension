@@ -36,7 +36,7 @@ from uuid import uuid4
 
 
 APP_NAME = "QC Smart Reader"
-SERVICE_VERSION = "0.9.3"
+SERVICE_VERSION = "0.9.4"
 API_VERSION = 1
 SCHEMA_VERSION = 1
 MIN_EXTENSION_VERSION = "0.9.0"

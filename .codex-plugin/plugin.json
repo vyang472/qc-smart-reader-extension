@@ -1,6 +1,6 @@
 {
   "name": "qc-smart-reader-extension",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Codex plugin for operating and auditing the local QC Smart Reader companion service, Chrome extension, and research workflow.",
   "author": {
     "name": "Vincent Yang"

@@ -734,6 +734,32 @@ async function exerciseCleanProfileFirstEvidence(t, { browserLocale, htmlLang, d
     assert.equal(await sidepanel.locator("#providerSelect").inputValue(), "mock");
     assert.equal(await sidepanel.locator("#quickStartCard").isHidden(), true);
 
+    const extensionVersion = await sidepanel.evaluate(() => chrome.runtime.getManifest().version);
+    const expectedCompanionUrl = `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v${extensionVersion}/qc-smart-reader-companion-${extensionVersion}.zip`;
+    const expectedChecksumsUrl = `https://github.com/vyang472/qc-smart-reader-extension/releases/download/v${extensionVersion}/SHA256SUMS`;
+    const companionDownload = sidepanel.locator("#companionDownloadLink");
+    const companionChecksums = sidepanel.locator("#companionChecksumsLink");
+    assert.equal(await sidepanel.locator("#companionDownloadCta").isVisible(), true);
+    assert.equal(await companionDownload.getAttribute("href"), expectedCompanionUrl);
+    assert.equal(await companionChecksums.getAttribute("href"), expectedChecksumsUrl);
+    assert.equal(await companionDownload.getAttribute("target"), "_blank");
+    assert.equal(await companionDownload.getAttribute("rel"), "noopener noreferrer");
+    assert.equal((await sidepanel.locator("#companionDownloadCta").textContent() || "").includes(token), false);
+    assert.equal(await sidepanel.locator("#pairingTokenInput").inputValue(), "");
+
+    const alternateLocale = htmlLang === "zh-CN" ? "en" : "zh-CN";
+    await sidepanel.locator("#uiLocaleSelect").selectOption(alternateLocale);
+    await sidepanel.waitForFunction((expected) => document.documentElement.lang === expected, alternateLocale);
+    assert.equal(await companionDownload.isVisible(), true);
+    assert.equal(await companionDownload.getAttribute("href"), expectedCompanionUrl);
+    assert.match(
+      await companionDownload.textContent() || "",
+      alternateLocale === "zh-CN" ? /^\u4e0b\u8f7d Companion v/ : /^Download Companion v/
+    );
+    await sidepanel.locator("#uiLocaleSelect").selectOption("auto");
+    await sidepanel.waitForFunction((expected) => document.documentElement.lang === expected, htmlLang);
+    assert.equal(await companionChecksums.getAttribute("href"), expectedChecksumsUrl);
+
     await sidepanel.locator("#serviceUrlInput").fill(serviceUrl);
     await sidepanel.locator("#pairingTokenInput").fill(token);
     await sidepanel.locator("#testCompanionBtn").click();

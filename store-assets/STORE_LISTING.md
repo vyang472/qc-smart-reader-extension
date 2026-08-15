@@ -1,6 +1,6 @@
-# Chrome Web Store listing handoff — QC Smart Reader v0.9.3
+# Chrome Web Store listing handoff — QC Smart Reader v0.9.4
 
-**Status:** v0.9.3 is publicly released. The bilingual listing copy, permission explanations, data-use answers, version-neutral small promo tile, and localized v0.9.3 Replay screenshots are prepared and verified. Publisher-account checks, a clean-account submission test, asset upload, and dashboard submission are still pending. This is not evidence of Chrome Web Store submission or approval.
+**Status:** v0.9.4 is the first Chrome Web Store candidate. The bilingual listing copy, permission explanations, data-use answers, version-neutral small promo tile, and localized v0.9.4 Replay screenshots are prepared. The v0.9.4 GitHub Release, publisher-account checks, clean-account test, asset upload, dashboard submission, and approval are still pending. This file is not evidence that any of those steps happened.
 
 This file records the listing copy, permission explanations, data-use answers, assets, and clean-install checks for the publisher account. Re-check the Chrome Web Store dashboard requirements on submission day.
 
@@ -23,7 +23,7 @@ Capture web research, verify claims against exact quotes, and keep a local Markd
 
 ### Detailed description — English (primary)
 
-QC Smart Reader is a local-first research reader. Before using the extension, install the free macOS Companion from the same release. The extension communicates with that Companion only through the loopback interface; it does not depend on developer-hosted capture or storage infrastructure.
+QC Smart Reader is a local-first research reader. Before pairing, Settings links directly to the free, version-matched macOS Companion and its `SHA256SUMS` file. The extension communicates with that Companion only through the loopback interface; it does not depend on developer-hosted capture or storage infrastructure.
 
 Its single purpose is to turn web pages, PDFs, and public captions that the user intentionally selects into locally stored research claims backed by exact source quotes and held for human review.
 
@@ -49,7 +49,7 @@ The supported path is macOS with Chrome 116 or later. Setup, pairing, Quick Star
 
 ### Detailed description — 简体中文（localized listing）
 
-QC Smart Reader 是一个本地优先的研究阅读器。使用扩展前，需要先安装同一版本、免费的 macOS Companion；扩展只通过本机回环地址与它通信，不依赖开发者托管的采集或存储服务。
+QC Smart Reader 是一个本地优先的研究阅读器。配对前，设置页会直达同版本、免费的 macOS Companion 与对应的 `SHA256SUMS`；扩展只通过本机回环地址与它通信，不依赖开发者托管的采集或存储服务。
 
 它的单一用途是：把用户主动选择的网页、PDF 和公开视频字幕转成保存在本地、以原文 quote 支撑且等待人工核验的研究 claim。
 
@@ -121,32 +121,33 @@ Host the product's capture, review, knowledge, delivery, batch, and settings wor
 
 ## Assets
 
-The localized screenshots below were generated from independent clean browser profiles using the released v0.9.3 extension, the real local Companion, and a public deterministic fixture. The pending screenshots show an undecided quote-backed claim with equal supported and unsupported actions and a folded Replay control. The reviewed screenshots restore the saved human decision after reopening the side panel, then expand the same service-backed Replay record to show its exact quote in captured context, locator, capture time, and current source version. The capture harness adds no labels, overlays, or fabricated state.
+The localized screenshots below were regenerated twice from independent clean browser profiles using the v0.9.4 extension, the real v0.9.4 Companion, and a public deterministic fixture. The pending screenshots show an undecided quote-backed claim with equal supported and unsupported actions and a folded Replay control. The reviewed screenshots restore the saved human decision after reopening the side panel, then expand the same service-backed Replay record to show its exact quote in captured context, locator, capture time, and current source version. The capture harness adds no labels, overlays, or fabricated state. Replay-contract, sensitive-data, layout, RGB, and deterministic-hash checks passed; the pixels remain identical to v0.9.3 because the v0.9.4 Settings setup CTA is outside these First Evidence views.
 
 - Store icon: `assets/icons/icon-128.png`
 - English screenshot 1: [`store-assets/web-store/en-US/01-first-evidence-pending-review.png`](web-store/en-US/01-first-evidence-pending-review.png) (640×400)
 - English screenshot 2: [`store-assets/web-store/en-US/02-reviewed-exact-quote.png`](web-store/en-US/02-reviewed-exact-quote.png) (640×400)
 - Simplified Chinese screenshot 1: [`store-assets/web-store/zh-CN/01-first-evidence-pending-review.png`](web-store/zh-CN/01-first-evidence-pending-review.png) (640×400)
 - Simplified Chinese screenshot 2: [`store-assets/web-store/zh-CN/02-reviewed-exact-quote.png`](web-store/zh-CN/02-reviewed-exact-quote.png) (640×400)
-- Small promo tile: [`store-assets/web-store/small-promo-tile-440x280.png`](web-store/small-promo-tile-440x280.png) (440×280; ready for v0.9.3; locale- and version-neutral)
+- Small promo tile: [`store-assets/web-store/small-promo-tile-440x280.png`](web-store/small-promo-tile-440x280.png) (440×280; locale- and version-neutral)
   - Reproducible vector source: [`store-assets/web-store/small-promo-tile-440x280.svg`](web-store/small-promo-tile-440x280.svg)
   - Deterministic renderer: [`scripts/render_small_promo_tile.mjs`](../scripts/render_small_promo_tile.mjs)
 - Launch-page composites, not store screenshots: `store-assets/screenshots/`
 - Repository social card, not a store screenshot: `store-assets/social-preview.png`
 
-The PNGs currently stored directly under `store-assets/web-store/` are v0.9.1 Chinese-interface reference captures. Do not upload them as evidence of the v0.9.3 English primary listing, and do not use the advanced Vault screenshot in the English listing while that workspace remains Chinese. Use only the locale-specific v0.9.3 pairs above for the current listing.
+The PNGs currently stored directly under `store-assets/web-store/` are v0.9.1 Chinese-interface reference captures. Do not upload them as evidence of the English primary listing, and do not use the advanced Vault screenshot there while that workspace remains Chinese. Use only the locale-specific v0.9.4 pairs above for this candidate.
 
 Before upload, confirm each screenshot matches the dashboard's current dimensions and shows no Pairing Token, API key, private URL, private source text, personal path, or browser profile data. Do not add awards, review scores, user counts, or performance claims without verifiable evidence.
 
 ## Publisher checklist
 
-- [x] Publish v0.9.3, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
+- [ ] Publish the v0.9.4 GitHub Release, and keep `PRIVACY.md`, `SUPPORT.md`, and `SECURITY.md` at stable public URLs.
 - [x] Render the locale- and version-neutral small promo tile from its tracked SVG source; verify dimensions, visible-text/version scanning, and deterministic hashes.
 - [ ] Verify the publisher identity and required contact details in the dashboard.
-- [x] Refresh all four localized screenshot paths above from the final reviewed v0.9.3 build; verify 640×400 RGB dimensions, sensitive-data scanning, Source Replay linkage, and deterministic hashes across independent clean-profile runs.
-- [ ] Upload the refreshed en-US pair to the English primary listing and the refreshed zh-CN pair to the Simplified Chinese localized listing.
+- [x] Regenerate all four localized screenshots from the v0.9.4 build; verify 640×400 RGB dimensions, sensitive-data scanning, Source Replay linkage, and deterministic hashes across independent clean-profile runs.
+- [ ] Upload the en-US v0.9.4 pair to the English primary listing and the zh-CN v0.9.4 pair to the Simplified Chinese localized listing.
 - [ ] Complete privacy, permission, distribution, pricing, and tester declarations truthfully.
-- [x] Replace the release placeholders in `WEB_STORE_TEST_INSTRUCTIONS.md` and verify the public Companion and checksum links without authentication. Paste the instructions into the dashboard only after the remaining clean-account test.
+- [x] Verify the v0.9.4 extension derives the direct Companion ZIP and `SHA256SUMS` targets from its manifest version without carrying a Pairing Token or other secret.
+- [ ] After publishing v0.9.4, verify both reviewer-instruction links without authentication. Paste the instructions into the dashboard only after the remaining clean-account test.
 - [ ] Explain why HTTP(S) host access is necessary for user-selected arbitrary research pages and requested URL batches.
 - [ ] Confirm there is no remotely hosted executable code and no undisclosed analytics.
 - [ ] Install both release ZIPs on a clean macOS user account.
