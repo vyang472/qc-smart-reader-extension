@@ -6,5 +6,5 @@
 # corresponding wheel bytes.
 # Exact version validated by scripts/test_all.sh on Python 3.9 and the launcher's
 # selected Python. Upgrade this deliberately together with the release version.
-pypdf==6.16.0
+pypdf==6.16.1
 typing_extensions==4.15.0
